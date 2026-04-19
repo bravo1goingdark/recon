@@ -23,5 +23,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 
+[features]
+default = []
+embed = ["recon-server/embed"]
+
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -5,3 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Local ONNX embeddings and vector search for recon"
+
+[dependencies]
+recon-core = { workspace = true }
+fastembed = { workspace = true }
+lancedb = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+compact_str = { workspace = true }
