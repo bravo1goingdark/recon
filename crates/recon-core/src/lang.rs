@@ -7,15 +7,25 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
+    /// Rust.
     Rust,
+    /// Python.
     Python,
+    /// TypeScript.
     TypeScript,
+    /// TSX (TypeScript JSX).
     Tsx,
+    /// JavaScript.
     JavaScript,
+    /// Go.
     Go,
+    /// Java.
     Java,
+    /// C.
     C,
+    /// C++.
     Cpp,
+    /// Unknown or unsupported language.
     Unknown,
 }
 
@@ -109,7 +119,10 @@ mod tests {
 
     #[test]
     fn from_path_works() {
-        assert_eq!(Language::from_path(Path::new("src/main.rs")), Language::Rust);
+        assert_eq!(
+            Language::from_path(Path::new("src/main.rs")),
+            Language::Rust
+        );
         assert_eq!(Language::from_path(Path::new("noext")), Language::Unknown);
     }
 

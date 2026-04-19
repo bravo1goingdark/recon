@@ -10,19 +10,33 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
+    /// A free function.
     Function,
+    /// A method on a type.
     Method,
+    /// A struct definition.
     Struct,
+    /// A class definition.
     Class,
+    /// An interface definition.
     Interface,
+    /// An enum definition.
     Enum,
+    /// A variant of an enum.
     EnumVariant,
+    /// A trait definition.
     Trait,
+    /// A constant binding.
     Const,
+    /// A static binding.
     Static,
+    /// A type alias.
     Type,
+    /// A module.
     Module,
+    /// A macro definition.
     Macro,
+    /// A struct or class field.
     Field,
 }
 

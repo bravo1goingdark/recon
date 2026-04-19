@@ -23,73 +23,106 @@ pub enum ToolOutput {
 /// Outline view — one line per top-level symbol.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutlineView {
+    /// File path.
     pub path: PathBuf,
+    /// Top-level symbol entries.
     pub entries: Vec<OutlineEntry>,
 }
 
 /// A single entry in an outline.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutlineEntry {
+    /// Symbol kind.
     pub kind: SymbolKind,
+    /// Symbol name.
     pub name: String,
+    /// Line number (1-indexed).
     pub line: u32,
+    /// Nested child entries.
     pub children: Vec<OutlineEntry>,
 }
 
 /// Skeleton view — signatures + docstrings, bodies as `...`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkeletonView {
+    /// File path, if scoped to a single file.
     pub path: Option<PathBuf>,
+    /// Skeleton content with bodies replaced by `...`.
     pub content: String,
+    /// Estimated token count.
     pub token_estimate: usize,
 }
 
 /// Symbol card — full source of one symbol + parents + callers.
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolCardView {
+    /// File containing this symbol.
     pub path: PathBuf,
+    /// Fully qualified name.
     pub qualified_name: String,
+    /// Symbol kind.
     pub kind: SymbolKind,
+    /// Signature line.
     pub signature: Option<String>,
+    /// Doc comment.
     pub doc: Option<String>,
+    /// Full source body.
     pub body: String,
+    /// Start and end lines (1-indexed).
     pub line_range: (u32, u32),
+    /// Enclosing parent symbols from outermost to innermost.
     pub parent_chain: Vec<String>,
+    /// Incoming references (callers).
     pub callers: Vec<RefEntry>,
+    /// Outgoing references (callees).
     pub callees: Vec<RefEntry>,
 }
 
 /// A reference entry (compact).
 #[derive(Debug, Clone, Serialize)]
 pub struct RefEntry {
+    /// File path.
     pub path: PathBuf,
+    /// Line number (1-indexed).
     pub line: u32,
+    /// Column number (0-indexed), if known.
     pub col: Option<u32>,
+    /// Source line snippet.
     pub snippet: String,
+    /// Name of the enclosing symbol, if resolved.
     pub enclosing_symbol: Option<String>,
 }
 
 /// Reference digest — count + top-k sites.
 #[derive(Debug, Clone, Serialize)]
 pub struct RefDigestView {
+    /// Symbol name being queried.
     pub symbol: String,
+    /// Total number of references found.
     pub total: usize,
+    /// Top-k reference entries by weight.
     pub top_k: Vec<RefEntry>,
 }
 
 /// Diagnostic messages.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiagView {
+    /// Diagnostic entries.
     pub entries: Vec<DiagEntry>,
 }
 
 /// A single diagnostic.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiagEntry {
+    /// File path.
     pub path: PathBuf,
+    /// Line number (1-indexed).
     pub line: u32,
+    /// Column number (0-indexed).
     pub col: u32,
+    /// Diagnostic message text.
     pub message: String,
+    /// Severity level.
     pub severity: DiagSeverity,
 }
 
@@ -97,8 +130,11 @@ pub struct DiagEntry {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagSeverity {
+    /// Error.
     Error,
+    /// Warning.
     Warning,
+    /// Informational.
     Info,
 }
 

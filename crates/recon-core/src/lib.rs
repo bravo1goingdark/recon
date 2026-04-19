@@ -1,4 +1,5 @@
 //! Shared types, error enums, and output shapes for recon.
+#![deny(missing_docs)]
 
 pub mod config;
 pub mod error;
