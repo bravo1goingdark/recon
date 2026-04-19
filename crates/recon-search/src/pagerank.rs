@@ -119,7 +119,7 @@ pub fn pagerank(
     let mut new_scores = vec![0.0f64; n];
     let inv_n = 1.0 / n as f64;
 
-    for _ in 0..iterations {
+    for _iter in 0..iterations {
         new_scores.fill(0.0);
 
         // Accumulate dangling node mass as a scalar, then distribute once
@@ -137,12 +137,19 @@ pub fn pagerank(
 
         // Distribute dangling mass evenly + apply damping with personalization
         let dangling_share = dangling_sum * inv_n;
+        let mut diff = 0.0f64;
         for i in 0..n {
             new_scores[i] = damping * (new_scores[i] + dangling_share)
                 + (1.0 - damping) * personalization[i];
+            diff += (new_scores[i] - scores[i]).abs();
         }
 
         std::mem::swap(&mut scores, &mut new_scores);
+
+        // Early convergence: stop when L1 norm change is negligible
+        if diff < 1e-6 {
+            break;
+        }
     }
 
     // Boost top-level symbols (no parent) by sqrt(ref_count)
