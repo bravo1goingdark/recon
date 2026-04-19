@@ -19,3 +19,8 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 tracing = { workspace = true }
 compact_str = { workspace = true }
+recon-embed = { workspace = true, optional = true }
+
+[features]
+default = []
+embed = ["dep:recon-embed", "recon-indexer/embed"]
