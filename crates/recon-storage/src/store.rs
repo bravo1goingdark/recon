@@ -253,6 +253,107 @@ impl Store {
         Ok(())
     }
 
+    /// Batch-insert multiple files' metadata + symbols + refs in a single transaction.
+    ///
+    /// Much faster than calling `batch_index_file` per file — one BEGIN/COMMIT
+    /// instead of N, and WAL syncs once instead of N times.
+    pub fn batch_index_files(
+        &self,
+        files: &[(FileMeta, Vec<Symbol>, Vec<Ref>)],
+    ) -> Result<(), Error> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        {
+            let mut del_refs_stmt = tx
+                .prepare_cached(
+                    "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            let mut del_sym_stmt = tx
+                .prepare_cached("DELETE FROM symbols WHERE path = ?1")
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            let mut file_stmt = tx
+                .prepare_cached(
+                    "INSERT INTO files(path, lang, size_bytes, content_hash, mtime, indexed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(path) DO UPDATE SET
+                        lang=excluded.lang, size_bytes=excluded.size_bytes,
+                        content_hash=excluded.content_hash, mtime=excluded.mtime,
+                        indexed_at=excluded.indexed_at",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            let mut sym_stmt = tx
+                .prepare_cached(
+                    "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
+                                         byte_start, byte_end, line_start, line_end, body_hash)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            let mut ref_stmt = tx
+                .prepare_cached(
+                    "INSERT INTO refs(src_path, src_symbol_id, ident, dst_symbol_id, weight)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?;
+
+            for (meta, symbols, refs) in files {
+                let path_str = meta.path.to_str().unwrap_or("");
+                del_refs_stmt
+                    .execute(params![path_str])
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                del_sym_stmt
+                    .execute(params![path_str])
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                file_stmt
+                    .execute(params![
+                        path_str,
+                        meta.lang.name(),
+                        meta.size_bytes,
+                        meta.content_hash.as_slice(),
+                        meta.mtime,
+                        meta.indexed_at,
+                    ])
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                for sym in symbols {
+                    sym_stmt
+                        .execute(params![
+                            sym.path.to_str().unwrap_or(""),
+                            sym.name.as_str(),
+                            sym.qualified_name.as_str(),
+                            sym.kind.label(),
+                            sym.signature.as_deref(),
+                            sym.doc.as_deref(),
+                            sym.parent_id,
+                            sym.byte_range.start,
+                            sym.byte_range.end,
+                            *sym.line_range.start(),
+                            *sym.line_range.end(),
+                            sym.body_hash.as_slice(),
+                        ])
+                        .map_err(|e| Error::Storage(e.to_string()))?;
+                }
+                for r in refs {
+                    ref_stmt
+                        .execute(params![
+                            r.src_path.to_str().unwrap_or(""),
+                            r.src_symbol_id,
+                            r.ident.as_str(),
+                            r.dst_symbol_id,
+                            r.weight,
+                        ])
+                        .map_err(|e| Error::Storage(e.to_string()))?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     /// Delete all symbols for a given file path.
     pub fn delete_symbols_for_path(&self, path: &Path) -> Result<(), Error> {
         let path_str = path.to_str().unwrap_or("");

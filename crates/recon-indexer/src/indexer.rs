@@ -145,38 +145,39 @@ pub fn index_repo(
         })
         .collect();
 
-    // Phase 2: Sequential batch store (SQLite single-writer + Tantivy single-writer)
-    // Use 15MB heap for Tantivy to reduce memory pressure on large repos
-    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(15_000_000).ok());
+    // Phase 2: Bulk store — one SQLite transaction for all files, fewer Tantivy commits.
+    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(50_000_000).ok());
     let mut stats = IndexStats::default();
-    let mut tantivy_docs_since_commit = 0usize;
 
-    for parsed_file in &parsed {
-        match store.batch_index_file(&parsed_file.meta, &parsed_file.symbols, &parsed_file.refs) {
-            Ok(()) => {
-                stats.files_indexed += 1;
-                // Index into Tantivy
-                if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
-                    let _ = tb.index_symbols(writer, &parsed_file.meta.path, &parsed_file.symbols);
-                    tantivy_docs_since_commit += parsed_file.symbols.len();
-                    // Commit every 5000 docs to bound memory usage
-                    if tantivy_docs_since_commit >= 5000 {
-                        if let Err(e) = tb.commit(writer) {
-                            warn!("tantivy interim commit error: {e}");
-                        }
-                        tantivy_docs_since_commit = 0;
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(path = ?parsed_file.meta.path, "store error: {e}");
-                stats.errors += 1;
-            }
+    // Collect tuples for the bulk SQLite insert
+    let bulk: Vec<_> = parsed
+        .iter()
+        .map(|p| (p.meta.clone(), p.symbols.clone(), p.refs.clone()))
+        .collect();
+
+    match store.batch_index_files(&bulk) {
+        Ok(()) => {
+            stats.files_indexed = bulk.len();
+        }
+        Err(e) => {
+            warn!("bulk store error: {e}");
+            stats.errors = bulk.len();
         }
     }
 
-    // Final Tantivy commit
+    // Tantivy indexing — batch with commits every 20K docs
     if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
+        let mut docs_since_commit = 0usize;
+        for parsed_file in &parsed {
+            let _ = tb.index_symbols(writer, &parsed_file.meta.path, &parsed_file.symbols);
+            docs_since_commit += parsed_file.symbols.len();
+            if docs_since_commit >= 20_000 {
+                if let Err(e) = tb.commit(writer) {
+                    warn!("tantivy interim commit error: {e}");
+                }
+                docs_since_commit = 0;
+            }
+        }
         if let Err(e) = tb.commit(writer) {
             warn!("tantivy commit error: {e}");
         }
