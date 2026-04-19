@@ -6354,6 +6354,8 @@ dependencies = [
  "recon-parser",
  "recon-search",
  "recon-storage",
+ "serde",
+ "serde_json",
  "tantivy 0.26.0",
  "tempfile",
  "tracing",
