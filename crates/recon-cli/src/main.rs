@@ -121,6 +121,8 @@ enum Command {
     Stats,
     /// Force full re-index
     Reindex,
+    /// Delete all index data (.recon directory)
+    Purge,
     /// Raw tool query (JSON args)
     Query {
         /// Tool name (e.g. code_find_symbol)
@@ -319,6 +321,17 @@ async fn main() -> Result<()> {
         Command::Reindex => {
             let server = read_server(repo)?;
             println!("{}", server.query_tool("code_reindex", "{}").await);
+            Ok(())
+        }
+        Command::Purge => {
+            let repo = repo.canonicalize()?;
+            let store_dir = repo.join(".recon");
+            if store_dir.exists() {
+                std::fs::remove_dir_all(&store_dir)?;
+                eprintln!("Purged {}", store_dir.display());
+            } else {
+                eprintln!("No index found at {}", store_dir.display());
+            }
             Ok(())
         }
         Command::Query { tool, args } => {
