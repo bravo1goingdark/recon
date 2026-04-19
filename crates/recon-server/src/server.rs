@@ -224,6 +224,10 @@ impl ReconServer {
         description = "Show one-line-per-symbol outline of a file. Returns symbol kinds, names, and line numbers in a tree structure. Use instead of Read when you need to understand a file's structure without reading its full content. Typical output: 300-500 tokens for a 500-line file."
     )]
     async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
+        // Validate path doesn't escape repo root
+        if let Err(e) = self.resolve_path(&params.0.path) {
+            return format!("Error: {e}");
+        }
         let store = self.store.lock().await;
         let rel_path = PathBuf::from(&params.0.path);
         let symbols = match store.symbols_for_path(&rel_path) {
@@ -256,9 +260,7 @@ impl ReconServer {
             path: rel_path,
             entries,
         });
-        redact_response(
-            serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
-        )
+        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
@@ -310,9 +312,7 @@ impl ReconServer {
             content: skeleton,
             token_estimate: token_est,
         });
-        redact_response(
-            serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
-        )
+        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
@@ -376,9 +376,7 @@ impl ReconServer {
             callers,
             callees: vec![],
         });
-        redact_response(
-            serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
-        )
+        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
@@ -504,8 +502,7 @@ impl ReconServer {
                     .map(|(id, dist)| serde_json::json!({"symbol_id": id, "distance": dist}))
                     .collect();
                 return redact_response(
-                    serde_json::to_string(&entries)
-                        .unwrap_or_else(|e| format!("Error: {e}")),
+                    serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
                 );
             } else {
                 return "semantic search requires embed feature to be initialized (run init_embed)"
@@ -630,9 +627,7 @@ impl ReconServer {
             })
             .collect();
 
-        redact_response(
-            serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-        )
+        redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
@@ -710,8 +705,7 @@ impl ReconServer {
             let all_refs = store.all_refs().unwrap_or_default();
 
             let ranked = pagerank::pagerank(&all_symbols, &all_refs, &[], 0.85, 30);
-            let content =
-                pagerank::render_repo_map(&all_symbols, &ranked, budget);
+            let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
 
             let token_est = recon_search::tokens::count_tokens(&content);
             let view = ToolOutput::Skeleton(SkeletonView {
@@ -719,11 +713,14 @@ impl ReconServer {
                 content,
                 token_estimate: token_est,
             });
-            let result =
-                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"));
+            let result = serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"));
 
-            let _ = store.delete_meta_prefix("map_cache:");
-            let _ = store.set_meta(&cache_key, &result);
+            if let Err(e) = store.delete_meta_prefix("map_cache:") {
+                warn!("failed to clear map cache: {e}");
+            }
+            if let Err(e) = store.set_meta(&cache_key, &result) {
+                warn!("failed to write map cache: {e}");
+            }
             drop(store);
             return result;
         }
@@ -784,9 +781,7 @@ impl ReconServer {
             })
             .collect();
 
-        redact_response(
-            serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-        )
+        redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
@@ -819,9 +814,7 @@ impl ReconServer {
             })
             .collect();
 
-        redact_response(
-            serde_json::to_string(&results).unwrap_or_else(|e| format!("Error: {e}")),
-        )
+        redact_response(serde_json::to_string(&results).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(

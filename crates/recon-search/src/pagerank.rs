@@ -65,9 +65,7 @@ pub fn pagerank(
 
         // Aider-style weight heuristics on the referenced identifier
         // Boost long mixed-case identifiers (more specific = more important)
-        if ident.len() > 8
-            && (ident.contains('_') || ident.chars().any(|c| c.is_uppercase()))
-        {
+        if ident.len() > 8 && (ident.contains('_') || ident.chars().any(|c| c.is_uppercase())) {
             weight *= 10.0;
         }
 
@@ -139,8 +137,8 @@ pub fn pagerank(
         let dangling_share = dangling_sum * inv_n;
         let mut diff = 0.0f64;
         for i in 0..n {
-            new_scores[i] = damping * (new_scores[i] + dangling_share)
-                + (1.0 - damping) * personalization[i];
+            new_scores[i] =
+                damping * (new_scores[i] + dangling_share) + (1.0 - damping) * personalization[i];
             diff += (new_scores[i] - scores[i]).abs();
         }
 
