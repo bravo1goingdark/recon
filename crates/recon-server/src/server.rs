@@ -6,7 +6,9 @@ use recon_core::redact;
 use recon_core::shapes::*;
 use recon_indexer::indexer;
 use recon_indexer::watcher::Watcher;
-use recon_search::{fuzzy, pagerank, tantivy_backend::TantivyBackend, text};
+use recon_search::fff_backend::FffBackend;
+use recon_search::search_trait::{TextQuery, TextSearcher};
+use recon_search::{filters, fuzzy, pagerank, tantivy_backend::TantivyBackend};
 use recon_storage::store::Store;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -20,10 +22,16 @@ use tracing::{info, warn};
 /// The recon MCP server.
 #[derive(Clone)]
 pub struct ReconServer {
+    #[allow(dead_code)] // read by the #[tool_router] macro expansion
     tool_router: ToolRouter<Self>,
     store: Arc<Mutex<Store>>,
     tantivy: Arc<TantivyBackend>,
+    text_searcher: Arc<dyn TextSearcher>,
     repo_root: PathBuf,
+    #[cfg(feature = "embed")]
+    embedder: Arc<Mutex<Option<recon_embed::Embedder>>>,
+    #[cfg(feature = "embed")]
+    vector_store: Arc<Mutex<Option<recon_embed::VectorStore>>>,
 }
 
 fn redact_response(response: String) -> String {
@@ -37,14 +45,34 @@ impl ReconServer {
             tool_router: Self::tool_router(),
             store: Arc::new(Mutex::new(store)),
             tantivy: Arc::new(tantivy),
+            text_searcher: Arc::new(FffBackend::new()),
             repo_root,
+            #[cfg(feature = "embed")]
+            embedder: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "embed")]
+            vector_store: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Initialize the embedding engine (model download on first run).
+    #[cfg(feature = "embed")]
+    pub async fn init_embed(&self) -> Result<(), recon_core::error::Error> {
+        let store_dir = self.repo_root.join(".recon");
+        let embedder = recon_embed::Embedder::new()
+            .map_err(|e| recon_core::error::Error::Search(format!("embed init: {e}")))?;
+        let vs = recon_embed::VectorStore::open(&store_dir.join("vectors"))
+            .await
+            .map_err(|e| recon_core::error::Error::Search(format!("vector store: {e}")))?;
+        *self.embedder.lock().await = Some(embedder);
+        *self.vector_store.lock().await = Some(vs);
+        info!("embedding engine initialized");
+        Ok(())
     }
 
     /// Run initial indexing of the repo (SQLite + Tantivy).
     pub async fn index_repo(&self) -> Result<(), recon_core::error::Error> {
         let store = self.store.lock().await;
-        let stats = indexer::index_repo(&store, Some(&self.tantivy), &self.repo_root)?;
+        let stats = indexer::index_repo_incremental(&store, Some(&self.tantivy), &self.repo_root)?;
         info!(
             files = stats.files_indexed,
             symbols = stats.total_symbols,
@@ -115,6 +143,21 @@ impl ReconServer {
         }
         Ok(canonical)
     }
+
+    /// Resolve indexed paths to absolute paths, applying an optional filter DSL.
+    fn resolve_search_scope(&self, rel_paths: &[PathBuf], filter: Option<&str>) -> Vec<PathBuf> {
+        let filtered = match filter {
+            Some(f) if !f.is_empty() => match filters::parse_filter(f) {
+                Ok(pf) => filters::apply_filter(rel_paths, &pf),
+                Err(e) => {
+                    warn!("filter parse error: {e}");
+                    rel_paths.to_vec()
+                }
+            },
+            _ => rel_paths.to_vec(),
+        };
+        filtered.iter().map(|p| self.repo_root.join(p)).collect()
+    }
 }
 
 #[tool_router(router = tool_router)]
@@ -152,8 +195,13 @@ impl ReconServer {
             }
         }
 
-        let view = ToolOutput::Outline(OutlineView { path: rel_path, entries });
-        redact_response(serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        let view = ToolOutput::Outline(OutlineView {
+            path: rel_path,
+            entries,
+        });
+        redact_response(
+            serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")),
+        )
     }
 
     #[tool(
@@ -199,13 +247,15 @@ impl ReconServer {
             skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
         }
 
-        let token_est = skeleton.len() / 4;
+        let token_est = recon_search::tokens::count_tokens(&skeleton);
         let view = ToolOutput::Skeleton(SkeletonView {
             path: Some(rel_path),
             content: skeleton,
             token_estimate: token_est,
         });
-        redact_response(serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        redact_response(
+            serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")),
+        )
     }
 
     #[tool(
@@ -229,7 +279,9 @@ impl ReconServer {
         let target = if let Ok(line) = params.0.symbol_or_line.parse::<u32>() {
             symbols.iter().find(|s| s.line_range.contains(&line))
         } else {
-            symbols.iter().find(|s| s.name.as_str() == params.0.symbol_or_line)
+            symbols
+                .iter()
+                .find(|s| s.name.as_str() == params.0.symbol_or_line)
         };
 
         let sym = match target {
@@ -243,10 +295,17 @@ impl ReconServer {
             .to_string();
 
         let refs = store.refs_for_ident(sym.name.as_str()).unwrap_or_default();
-        let callers: Vec<RefEntry> = refs.iter().take(10).map(|r| RefEntry {
-            path: r.src_path.clone(), line: 0, col: None,
-            snippet: r.ident.to_string(), enclosing_symbol: None,
-        }).collect();
+        let callers: Vec<RefEntry> = refs
+            .iter()
+            .take(10)
+            .map(|r| RefEntry {
+                path: r.src_path.clone(),
+                line: 0,
+                col: None,
+                snippet: r.ident.to_string(),
+                enclosing_symbol: None,
+            })
+            .collect();
 
         let view = ToolOutput::SymbolCard(SymbolCardView {
             path: rel_path,
@@ -260,7 +319,9 @@ impl ReconServer {
             callers,
             callees: vec![],
         });
-        redact_response(serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        redact_response(
+            serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")),
+        )
     }
 
     #[tool(
@@ -271,13 +332,19 @@ impl ReconServer {
         let store = self.store.lock().await;
 
         // Tier 0: exact match via SQLite index
-        let mut results = store.find_symbols_exact(&params.0.name, 20).unwrap_or_default();
+        let mut results = store
+            .find_symbols_exact(&params.0.name, 20)
+            .unwrap_or_default();
 
         // Tier 1: Tantivy BM25 structured search
         if results.is_empty() {
             let hits = self.tantivy.search(&params.0.name, 20).unwrap_or_default();
             for hit in &hits {
-                if let Some(sym) = store.get_symbol_by_qname(&hit.qualified_name).ok().flatten() {
+                if let Some(sym) = store
+                    .get_symbol_by_qname(&hit.qualified_name)
+                    .ok()
+                    .flatten()
+                {
                     results.push(sym);
                 }
             }
@@ -285,9 +352,14 @@ impl ReconServer {
 
         // Tier 2: FTS5 trigram + nucleo fuzzy rescore
         if results.is_empty() {
-            let fts_results = store.search_symbols_fuzzy(&params.0.name, 50).unwrap_or_default();
+            let fts_results = store
+                .search_symbols_fuzzy(&params.0.name, 50)
+                .unwrap_or_default();
             let ranked = fuzzy::fuzzy_rank(&fts_results, &params.0.name, 20);
-            results = ranked.into_iter().map(|(i, _)| fts_results[i].clone()).collect();
+            results = ranked
+                .into_iter()
+                .map(|(i, _): (usize, _)| fts_results[i].clone())
+                .collect();
         }
 
         // Apply filters
@@ -301,15 +373,18 @@ impl ReconServer {
             }
         }
 
-        let entries: Vec<serde_json::Value> = results.iter().map(|s| {
-            serde_json::json!({
-                "qualified_name": s.qualified_name.as_str(),
-                "path": s.path.to_string_lossy(),
-                "line": *s.line_range.start(),
-                "kind": s.kind.label(),
-                "signature": s.signature,
+        let entries: Vec<serde_json::Value> = results
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "qualified_name": s.qualified_name.as_str(),
+                    "path": s.path.to_string_lossy(),
+                    "line": *s.line_range.start(),
+                    "kind": s.kind.label(),
+                    "signature": s.signature,
+                })
             })
-        }).collect();
+            .collect();
 
         serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}"))
     }
@@ -322,10 +397,17 @@ impl ReconServer {
         let store = self.store.lock().await;
         let refs = store.refs_for_ident(&params.0.symbol).unwrap_or_default();
 
-        let top_k: Vec<RefEntry> = refs.iter().take(20).map(|r| RefEntry {
-            path: r.src_path.clone(), line: 0, col: None,
-            snippet: r.ident.to_string(), enclosing_symbol: None,
-        }).collect();
+        let top_k: Vec<RefEntry> = refs
+            .iter()
+            .take(20)
+            .map(|r| RefEntry {
+                path: r.src_path.clone(),
+                line: 0,
+                col: None,
+                snippet: r.ident.to_string(),
+                enclosing_symbol: None,
+            })
+            .collect();
 
         let view = ToolOutput::ReferenceDigest(RefDigestView {
             symbol: params.0.symbol.clone(),
@@ -344,51 +426,125 @@ impl ReconServer {
         let paths = store.all_file_paths().unwrap_or_default();
         drop(store);
 
-        let abs_paths: Vec<PathBuf> = paths.iter().map(|p| self.repo_root.join(p)).collect();
+        let abs_paths = self.resolve_search_scope(&paths, params.0.filter.as_deref());
+
+        // Semantic mode via embed feature
+        #[cfg(feature = "embed")]
+        if params.0.mode == "semantic" {
+            let embedder_guard = self.embedder.lock().await;
+            let vs_guard = self.vector_store.lock().await;
+            if let (Some(embedder), Some(vs)) = (embedder_guard.as_ref(), vs_guard.as_ref()) {
+                // Need mut for embed — drop and re-acquire
+                drop(embedder_guard);
+                drop(vs_guard);
+                let mut eg = self.embedder.lock().await;
+                let embedder = eg.as_mut().unwrap();
+                let query_vec = match embedder.embed_one(&params.0.query) {
+                    Ok(v) => v,
+                    Err(e) => return format!("embed error: {e}"),
+                };
+                drop(eg);
+                let vg = self.vector_store.lock().await;
+                let vs = vg.as_ref().unwrap();
+                let results = match vs.search(query_vec, None, 20).await {
+                    Ok(r) => r,
+                    Err(e) => return format!("vector search error: {e}"),
+                };
+                let entries: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|(id, dist)| serde_json::json!({"symbol_id": id, "distance": dist}))
+                    .collect();
+                return redact_response(
+                    serde_json::to_string_pretty(&entries)
+                        .unwrap_or_else(|e| format!("Error: {e}")),
+                );
+            } else {
+                return "semantic search requires embed feature to be initialized (run init_embed)"
+                    .into();
+            }
+        }
+        #[cfg(not(feature = "embed"))]
+        if params.0.mode == "semantic" {
+            return "semantic search requires the 'embed' feature flag".into();
+        }
 
         if params.0.mode == "hybrid" {
             // RRF fusion: Tantivy BM25 results + text grep results
             let tantivy_hits = self.tantivy.search(&params.0.query, 20).unwrap_or_default();
-            let text_hits = text::search_files(&params.0.query, &abs_paths, false, 20).unwrap_or_default();
+            let q = TextQuery {
+                pattern: params.0.query.clone(),
+                is_regex: false,
+                max_results: 20,
+                scope: abs_paths.clone(),
+            };
+            let text_hits = self.text_searcher.search(&q).unwrap_or_default();
 
-            // Build RRF scores (k=60)
-            let mut rrf: std::collections::HashMap<String, (f64, serde_json::Value)> = std::collections::HashMap::new();
+            let mut rrf: std::collections::HashMap<String, (f64, serde_json::Value)> =
+                std::collections::HashMap::new();
             let k = 60.0;
 
             for (rank, hit) in tantivy_hits.iter().enumerate() {
                 let key = format!("{}:{}", hit.path, hit.name);
                 let score = 1.0 / (k + rank as f64 + 1.0);
-                rrf.entry(key).or_insert_with(|| (0.0, serde_json::json!({
-                    "path": hit.path, "name": hit.name, "kind": hit.kind,
-                    "signature": hit.signature, "source": "tantivy",
-                }))).0 += score;
+                rrf.entry(key)
+                    .or_insert_with(|| {
+                        (
+                            0.0,
+                            serde_json::json!({
+                                "path": hit.path, "name": hit.name, "kind": hit.kind,
+                                "signature": hit.signature, "source": "tantivy",
+                            }),
+                        )
+                    })
+                    .0 += score;
             }
             for (rank, hit) in text_hits.iter().enumerate() {
                 let rel = hit.path.strip_prefix(&self.repo_root).unwrap_or(&hit.path);
                 let key = format!("{}:{}", rel.to_string_lossy(), hit.line);
                 let score = 1.0 / (k + rank as f64 + 1.0);
-                rrf.entry(key).or_insert_with(|| (0.0, serde_json::json!({
-                    "path": rel.to_string_lossy(), "line": hit.line,
-                    "text": hit.line_text, "source": "text",
-                }))).0 += score;
+                rrf.entry(key)
+                    .or_insert_with(|| {
+                        (
+                            0.0,
+                            serde_json::json!({
+                                "path": rel.to_string_lossy(), "line": hit.line,
+                                "text": hit.line_text, "source": "text",
+                            }),
+                        )
+                    })
+                    .0 += score;
             }
 
             let mut sorted: Vec<_> = rrf.into_values().collect();
             sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let entries: Vec<serde_json::Value> = sorted.into_iter().take(30).map(|(_, v)| v).collect();
+            let entries: Vec<serde_json::Value> =
+                sorted.into_iter().take(30).map(|(_, v)| v).collect();
 
-            return redact_response(serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")));
+            return redact_response(
+                serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+            );
         }
 
         let is_regex = params.0.mode == "regex";
-        let hits = text::search_files(&params.0.query, &abs_paths, is_regex, 30).unwrap_or_default();
+        let q = TextQuery {
+            pattern: params.0.query.clone(),
+            is_regex,
+            max_results: 30,
+            scope: abs_paths,
+        };
+        let hits = self.text_searcher.search(&q).unwrap_or_default();
 
-        let entries: Vec<serde_json::Value> = hits.iter().map(|h| {
-            let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
-            serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "col": h.col, "text": h.line_text })
-        }).collect();
+        let entries: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|h| {
+                let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
+                serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "col": h.col, "text": h.line_text })
+            })
+            .collect();
 
-        redact_response(serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")))
+        redact_response(
+            serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+        )
     }
 
     #[tool(
@@ -397,23 +553,42 @@ impl ReconServer {
     )]
     async fn code_list(&self, params: Parameters<ListParams>) -> String {
         let store = self.store.lock().await;
-        let paths = store.all_file_paths().unwrap_or_default();
+        let all_paths = store.all_file_paths().unwrap_or_default();
+
+        // Apply filter DSL first
+        let paths = match params.0.filter.as_deref() {
+            Some(f) if !f.is_empty() => match filters::parse_filter(f) {
+                Ok(pf) => filters::apply_filter(&all_paths, &pf),
+                Err(e) => {
+                    warn!("filter parse error: {e}");
+                    all_paths
+                }
+            },
+            _ => all_paths,
+        };
 
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(paths.len());
         for path in &paths {
             let lang = Language::from_path(path);
             if let Some(lang_filter) = &params.0.lang {
                 let filter_lang = Language::from_extension(lang_filter);
-                if filter_lang != Language::Unknown && lang != filter_lang { continue; }
+                if filter_lang != Language::Unknown && lang != filter_lang {
+                    continue;
+                }
             }
             if let Some(glob_pat) = &params.0.glob {
                 let path_str = path.to_string_lossy();
-                if !path_str.contains(glob_pat.trim_matches('*')) { continue; }
+                if !path_str.contains(glob_pat.trim_matches('*')) {
+                    continue;
+                }
             }
             let syms = store.symbols_for_path(path).unwrap_or_default();
-            let top_syms: Vec<String> = syms.iter()
-                .filter(|s| s.parent_id.is_none()).take(3)
-                .map(|s| format!("{} {}", s.kind.label(), s.name)).collect();
+            let top_syms: Vec<String> = syms
+                .iter()
+                .filter(|s| s.parent_id.is_none())
+                .take(3)
+                .map(|s| format!("{} {}", s.kind.label(), s.name))
+                .collect();
 
             entries.push(serde_json::json!({
                 "path": path.to_string_lossy(), "lang": lang.name(),
@@ -444,17 +619,30 @@ impl ReconServer {
             }
         }
 
-        let focus_indices: Vec<usize> = params.0.focus_files.as_deref().unwrap_or(&[]).iter()
-            .flat_map(|f| all_symbols.iter().enumerate()
-                .filter(|(_, s)| s.path.to_string_lossy().contains(f.as_str()))
-                .map(|(i, _)| i))
+        let focus_indices: Vec<usize> = params
+            .0
+            .focus_files
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .flat_map(|f| {
+                all_symbols
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.path.to_string_lossy().contains(f.as_str()))
+                    .map(|(i, _)| i)
+            })
             .collect();
 
         let ranked = pagerank::pagerank(&all_symbols, &all_refs, &focus_indices, 0.85, 30);
         let content = pagerank::render_repo_map(&all_symbols, &ranked, params.0.token_budget);
 
-        let token_est = content.len() / 4;
-        let view = ToolOutput::Skeleton(SkeletonView { path: None, content, token_estimate: token_est });
+        let token_est = recon_search::tokens::count_tokens(&content);
+        let view = ToolOutput::Skeleton(SkeletonView {
+            path: None,
+            content,
+            token_estimate: token_est,
+        });
         serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}"))
     }
 
@@ -467,15 +655,26 @@ impl ReconServer {
         let paths = store.all_file_paths().unwrap_or_default();
         drop(store);
 
-        let abs_paths: Vec<PathBuf> = paths.iter().map(|p| self.repo_root.join(p)).collect();
-        let hits = text::search_files(&params.0.pattern, &abs_paths, false, 30).unwrap_or_default();
+        let abs_paths = self.resolve_search_scope(&paths, params.0.filter.as_deref());
+        let q = TextQuery {
+            pattern: params.0.pattern.clone(),
+            is_regex: false,
+            max_results: 30,
+            scope: abs_paths,
+        };
+        let hits = self.text_searcher.search(&q).unwrap_or_default();
 
-        let entries: Vec<serde_json::Value> = hits.iter().map(|h| {
-            let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
-            serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "text": h.line_text, "kind": params.0.kind })
-        }).collect();
+        let entries: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|h| {
+                let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
+                serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "text": h.line_text, "kind": params.0.kind })
+            })
+            .collect();
 
-        redact_response(serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")))
+        redact_response(
+            serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+        )
     }
 
     #[tool(
@@ -487,19 +686,30 @@ impl ReconServer {
         let paths = store.all_file_paths().unwrap_or_default();
         drop(store);
 
-        let abs_paths: Vec<PathBuf> = paths.iter().map(|p| self.repo_root.join(p)).collect();
-        let mut results: Vec<serde_json::Value> = Vec::with_capacity(params.0.patterns.len());
+        let abs_paths = self.resolve_search_scope(&paths, params.0.filter.as_deref());
+        let pat_refs: Vec<&str> = params.0.patterns.iter().map(|s| s.as_str()).collect();
+        let multi_results = self
+            .text_searcher
+            .multi_search(&pat_refs, &abs_paths, 10)
+            .unwrap_or_default();
 
-        for pattern in &params.0.patterns {
-            let hits = text::search_files(pattern, &abs_paths, false, 10).unwrap_or_default();
-            let entries: Vec<serde_json::Value> = hits.iter().map(|h| {
-                let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
-                serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "text": h.line_text })
-            }).collect();
-            results.push(serde_json::json!({ "pattern": pattern, "hits": entries }));
-        }
+        let results: Vec<serde_json::Value> = multi_results
+            .iter()
+            .map(|(pattern, hits)| {
+                let entries: Vec<serde_json::Value> = hits
+                    .iter()
+                    .map(|h| {
+                        let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
+                        serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "text": h.line_text })
+                    })
+                    .collect();
+                serde_json::json!({ "pattern": pattern, "hits": entries })
+            })
+            .collect();
 
-        redact_response(serde_json::to_string_pretty(&results).unwrap_or_else(|e| format!("Error: {e}")))
+        redact_response(
+            serde_json::to_string_pretty(&results).unwrap_or_else(|e| format!("Error: {e}")),
+        )
     }
 
     #[tool(
@@ -509,14 +719,13 @@ impl ReconServer {
     async fn code_reindex(&self, _params: Parameters<ReindexParams>) -> String {
         let store = self.store.lock().await;
         match indexer::index_repo(&store, Some(&self.tantivy), &self.repo_root) {
-            Ok(stats) => {
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "ok",
-                    "files_indexed": stats.files_indexed,
-                    "total_symbols": stats.total_symbols,
-                    "errors": stats.errors,
-                })).unwrap_or_else(|e| format!("Error: {e}"))
-            }
+            Ok(stats) => serde_json::to_string_pretty(&serde_json::json!({
+                "status": "ok",
+                "files_indexed": stats.files_indexed,
+                "total_symbols": stats.total_symbols,
+                "errors": stats.errors,
+            }))
+            .unwrap_or_else(|e| format!("Error: {e}")),
             Err(e) => format!("Reindex failed: {e}"),
         }
     }
@@ -530,7 +739,10 @@ impl ReconServer {
         let file_count = store.all_file_paths().map(|p| p.len()).unwrap_or(0);
         let symbol_count = store.symbol_count().unwrap_or(0);
         let tantivy_docs = self.tantivy.doc_count();
-        let schema_version = store.get_meta("schema_version").unwrap_or(None).unwrap_or_default();
+        let schema_version = store
+            .get_meta("schema_version")
+            .unwrap_or(None)
+            .unwrap_or_default();
 
         serde_json::to_string_pretty(&serde_json::json!({
             "files_indexed": file_count,
@@ -538,7 +750,8 @@ impl ReconServer {
             "tantivy_docs": tantivy_docs,
             "schema_version": schema_version,
             "repo_root": self.repo_root.to_string_lossy(),
-        })).unwrap_or_else(|e| format!("Error: {e}"))
+        }))
+        .unwrap_or_else(|e| format!("Error: {e}"))
     }
 }
 

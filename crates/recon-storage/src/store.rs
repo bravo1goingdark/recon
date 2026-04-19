@@ -598,7 +598,11 @@ mod tests {
         let store = Store::open_memory().unwrap();
         store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
 
-        let sym = make_symbol("validate_email", "mymod::validate_email", SymbolKind::Function);
+        let sym = make_symbol(
+            "validate_email",
+            "mymod::validate_email",
+            SymbolKind::Function,
+        );
         let id = store.upsert_symbol(&sym).unwrap();
         assert!(id > 0);
 

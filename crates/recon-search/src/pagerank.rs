@@ -9,7 +9,9 @@ use std::collections::HashMap;
 /// A ranked symbol with its PageRank score.
 #[derive(Debug, Clone)]
 pub struct RankedSymbol {
+    /// Index into the original symbols slice.
     pub index: usize,
+    /// PageRank score (higher = more important).
     pub score: f64,
 }
 
@@ -32,10 +34,7 @@ pub fn pagerank(
     // Build name → index map for fast lookup
     let mut name_to_idx: HashMap<&str, Vec<usize>> = HashMap::with_capacity(n);
     for (i, sym) in symbols.iter().enumerate() {
-        name_to_idx
-            .entry(sym.name.as_str())
-            .or_default()
-            .push(i);
+        name_to_idx.entry(sym.name.as_str()).or_default().push(i);
     }
 
     // Build adjacency list with weights
@@ -93,8 +92,8 @@ pub fn pagerank(
     if !focus_symbols.is_empty() {
         let focus_weight = 0.8 / focus_symbols.len() as f64;
         let other_weight = 0.2 / (n - focus_symbols.len()).max(1) as f64;
-        for i in 0..n {
-            personalization[i] = if focus_symbols.contains(&i) {
+        for (i, p) in personalization.iter_mut().enumerate() {
+            *p = if focus_symbols.contains(&i) {
                 focus_weight
             } else {
                 other_weight
@@ -150,16 +149,16 @@ pub fn pagerank(
         .map(|(i, &score)| RankedSymbol { index: i, score })
         .collect();
 
-    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     ranked
 }
 
 /// Render a ranked symbol list into a skeleton string within a token budget.
-pub fn render_repo_map(
-    symbols: &[Symbol],
-    ranked: &[RankedSymbol],
-    token_budget: usize,
-) -> String {
+pub fn render_repo_map(symbols: &[Symbol], ranked: &[RankedSymbol], token_budget: usize) -> String {
     let mut output = String::with_capacity(token_budget * 4);
     let mut tokens = 0usize;
 
@@ -180,7 +179,7 @@ pub fn render_repo_map(
             .unwrap_or_default();
 
         let full_line = format!("{line}{sig_suffix}\n");
-        let line_tokens = full_line.len() / 4;
+        let line_tokens = crate::tokens::count_tokens(&full_line);
 
         if tokens + line_tokens > token_budget {
             break;
@@ -247,12 +246,21 @@ mod tests {
         assert!(!ranked.is_empty());
 
         // All symbols should appear in the ranking
-        let names: Vec<&str> = ranked.iter().map(|r| symbols[r.index].name.as_str()).collect();
-        assert!(names.contains(&"process_data"), "process_data should be ranked: {names:?}");
+        let names: Vec<&str> = ranked
+            .iter()
+            .map(|r| symbols[r.index].name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"process_data"),
+            "process_data should be ranked: {names:?}"
+        );
         assert!(names.contains(&"main"), "main should be ranked: {names:?}");
 
         // process_data has higher in-degree, should have good score
-        let pd_rank = ranked.iter().find(|r| symbols[r.index].name.as_str() == "process_data").unwrap();
+        let pd_rank = ranked
+            .iter()
+            .find(|r| symbols[r.index].name.as_str() == "process_data")
+            .unwrap();
         assert!(pd_rank.score > 0.0);
     }
 
@@ -264,10 +272,7 @@ mod tests {
             sym(3, "C", "mod::C"),
         ];
 
-        let refs = vec![
-            make_ref("B", 1),
-            make_ref("C", 1),
-        ];
+        let refs = vec![make_ref("B", 1), make_ref("C", 1)];
 
         // Without focus, B and C compete equally
         let ranked_no_focus = pagerank(&symbols, &refs, &[], 0.85, 30);
@@ -294,12 +299,15 @@ mod tests {
             sym(3, "baz", "mod::baz"),
         ];
         let ranked: Vec<RankedSymbol> = (0..3)
-            .map(|i| RankedSymbol { index: i, score: 1.0 - i as f64 * 0.1 })
+            .map(|i| RankedSymbol {
+                index: i,
+                score: 1.0 - i as f64 * 0.1,
+            })
             .collect();
 
         let output = render_repo_map(&symbols, &ranked, 50);
         assert!(!output.is_empty());
         // Should fit within budget
-        assert!(output.len() / 4 <= 55); // some slack
+        assert!(crate::tokens::count_tokens(&output) <= 55); // some slack
     }
 }

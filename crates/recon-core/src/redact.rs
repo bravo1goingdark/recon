@@ -46,10 +46,7 @@ const PEM_MARKERS: &[&str] = &[
 
 /// Check if a path should be blocked from being served.
 pub fn is_blocked_path(path: &Path) -> bool {
-    let filename = path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("");
+    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
     // Check blocked filenames
     for blocked in BLOCKED_PATHS {
@@ -107,7 +104,11 @@ pub fn redact_secrets(text: &str) -> Option<String> {
         }
     }
 
-    if changed { Some(redacted) } else { None }
+    if changed {
+        Some(redacted)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -157,7 +158,8 @@ mod tests {
 
     #[test]
     fn redacts_pem_block() {
-        let text = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQ...\n-----END RSA PRIVATE KEY-----";
+        let text =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQ...\n-----END RSA PRIVATE KEY-----";
         let result = redact_secrets(text);
         assert!(result.is_some());
         let redacted = result.unwrap();

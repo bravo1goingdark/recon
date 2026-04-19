@@ -10,7 +10,12 @@ pub fn fuzzy_rank(symbols: &[Symbol], query: &str, limit: usize) -> Vec<(usize, 
         return Vec::new();
     }
 
-    let pattern = Pattern::new(query, CaseMatching::Smart, Normalization::Smart, nucleo::pattern::AtomKind::Fuzzy);
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        nucleo::pattern::AtomKind::Fuzzy,
+    );
     let mut matcher = Matcher::default();
 
     let mut buf = Vec::with_capacity(128);

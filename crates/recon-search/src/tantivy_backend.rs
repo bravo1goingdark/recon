@@ -16,12 +16,19 @@ use tracing::debug;
 /// A structured search hit from Tantivy.
 #[derive(Debug, Clone)]
 pub struct StructuredHit {
+    /// Symbol ID from the index.
     pub symbol_id: u64,
+    /// File path.
     pub path: String,
+    /// Symbol name.
     pub name: String,
+    /// Fully qualified symbol name.
     pub qualified_name: String,
+    /// Symbol kind (fn, struct, etc).
     pub kind: String,
+    /// Symbol signature, if available.
     pub signature: Option<String>,
+    /// BM25 relevance score.
     pub score: f32,
 }
 
@@ -61,9 +68,7 @@ impl TantivyBackend {
             .map_err(|e| Error::Search(format!("open tantivy index: {e}")))?;
 
         // Register the code tokenizer
-        index
-            .tokenizers()
-            .register("code", code_tokenizer());
+        index.tokenizers().register("code", code_tokenizer());
 
         let reader = index
             .reader_builder()
@@ -71,7 +76,12 @@ impl TantivyBackend {
             .try_into()
             .map_err(|e| Error::Search(format!("tantivy reader: {e}")))?;
 
-        Ok(Self { index, reader, fields, schema })
+        Ok(Self {
+            index,
+            reader,
+            fields,
+            schema,
+        })
     }
 
     /// Open an in-memory index (for testing).
@@ -79,9 +89,7 @@ impl TantivyBackend {
         let (schema, fields) = Self::build_schema();
         let index = Index::create_in_ram(schema.clone());
 
-        index
-            .tokenizers()
-            .register("code", code_tokenizer());
+        index.tokenizers().register("code", code_tokenizer());
 
         let reader = index
             .reader_builder()
@@ -89,7 +97,12 @@ impl TantivyBackend {
             .try_into()
             .map_err(|e| Error::Search(format!("tantivy reader: {e}")))?;
 
-        Ok(Self { index, reader, fields, schema })
+        Ok(Self {
+            index,
+            reader,
+            fields,
+            schema,
+        })
     }
 
     fn build_schema() -> (Schema, Fields) {
@@ -97,35 +110,57 @@ impl TantivyBackend {
 
         let symbol_id = builder.add_u64_field("symbol_id", STORED | INDEXED);
         let path = builder.add_text_field("path", STRING | STORED);
-        let name = builder.add_text_field("name",
+        let name = builder.add_text_field(
+            "name",
             TextOptions::default()
-                .set_indexing_options(TextFieldIndexing::default()
-                    .set_tokenizer("code")
-                    .set_index_option(IndexRecordOption::WithFreqsAndPositions))
-                .set_stored());
-        let qualified_name = builder.add_text_field("qualified_name",
+                .set_indexing_options(
+                    TextFieldIndexing::default()
+                        .set_tokenizer("code")
+                        .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                )
+                .set_stored(),
+        );
+        let qualified_name = builder.add_text_field(
+            "qualified_name",
             TextOptions::default()
-                .set_indexing_options(TextFieldIndexing::default()
-                    .set_tokenizer("code")
-                    .set_index_option(IndexRecordOption::WithFreqsAndPositions))
-                .set_stored());
+                .set_indexing_options(
+                    TextFieldIndexing::default()
+                        .set_tokenizer("code")
+                        .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                )
+                .set_stored(),
+        );
         let kind = builder.add_text_field("kind", STRING | STORED);
-        let signature = builder.add_text_field("signature",
+        let signature = builder.add_text_field(
+            "signature",
             TextOptions::default()
-                .set_indexing_options(TextFieldIndexing::default()
-                    .set_tokenizer("code")
-                    .set_index_option(IndexRecordOption::WithFreqs))
-                .set_stored());
-        let doc = builder.add_text_field("doc",
-            TextOptions::default()
-                .set_indexing_options(TextFieldIndexing::default()
+                .set_indexing_options(
+                    TextFieldIndexing::default()
+                        .set_tokenizer("code")
+                        .set_index_option(IndexRecordOption::WithFreqs),
+                )
+                .set_stored(),
+        );
+        let doc = builder.add_text_field(
+            "doc",
+            TextOptions::default().set_indexing_options(
+                TextFieldIndexing::default()
                     .set_tokenizer("default")
-                    .set_index_option(IndexRecordOption::WithFreqs)));
+                    .set_index_option(IndexRecordOption::WithFreqs),
+            ),
+        );
         let lang = builder.add_text_field("lang", STRING);
 
         let schema = builder.build();
         let fields = Fields {
-            symbol_id, path, name, qualified_name, kind, signature, doc, lang,
+            symbol_id,
+            path,
+            name,
+            qualified_name,
+            kind,
+            signature,
+            doc,
+            lang,
         };
         (schema, fields)
     }
@@ -165,7 +200,8 @@ impl TantivyBackend {
                 doc.add_text(self.fields.doc, d);
             }
             doc.add_text(self.fields.lang, sym.lang.name());
-            writer.add_document(doc)
+            writer
+                .add_document(doc)
                 .map_err(|e| Error::Search(format!("add doc: {e}")))?;
         }
 
@@ -174,9 +210,11 @@ impl TantivyBackend {
 
     /// Commit pending changes and reload the reader.
     pub fn commit(&self, writer: &mut IndexWriter) -> Result<(), Error> {
-        writer.commit()
+        writer
+            .commit()
             .map_err(|e| Error::Search(format!("tantivy commit: {e}")))?;
-        self.reader.reload()
+        self.reader
+            .reload()
             .map_err(|e| Error::Search(format!("tantivy reload: {e}")))?;
         Ok(())
     }
@@ -190,7 +228,12 @@ impl TantivyBackend {
         let searcher = self.reader.searcher();
         let query_parser = QueryParser::for_index(
             &self.index,
-            vec![self.fields.name, self.fields.qualified_name, self.fields.signature, self.fields.doc],
+            vec![
+                self.fields.name,
+                self.fields.qualified_name,
+                self.fields.signature,
+                self.fields.doc,
+            ],
         );
 
         let query = query_parser
@@ -203,34 +246,47 @@ impl TantivyBackend {
 
         let mut hits = Vec::with_capacity(top_docs.len());
         for (score, addr) in top_docs {
-            let doc: TantivyDocument = searcher.doc(addr)
+            let doc: TantivyDocument = searcher
+                .doc(addr)
                 .map_err(|e| Error::Search(format!("fetch doc: {e}")))?;
 
-            let symbol_id = doc.get_first(self.fields.symbol_id)
+            let symbol_id = doc
+                .get_first(self.fields.symbol_id)
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let path = doc.get_first(self.fields.path)
+            let path = doc
+                .get_first(self.fields.path)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let name = doc.get_first(self.fields.name)
+            let name = doc
+                .get_first(self.fields.name)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let qualified_name = doc.get_first(self.fields.qualified_name)
+            let qualified_name = doc
+                .get_first(self.fields.qualified_name)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let kind = doc.get_first(self.fields.kind)
+            let kind = doc
+                .get_first(self.fields.kind)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let signature = doc.get_first(self.fields.signature)
+            let signature = doc
+                .get_first(self.fields.signature)
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
             hits.push(StructuredHit {
-                symbol_id, path, name, qualified_name, kind, signature, score,
+                symbol_id,
+                path,
+                name,
+                qualified_name,
+                kind,
+                signature,
+                score,
             });
         }
 
@@ -241,7 +297,11 @@ impl TantivyBackend {
     /// Count total documents in the index.
     pub fn doc_count(&self) -> u64 {
         let searcher = self.reader.searcher();
-        searcher.segment_readers().iter().map(|r| r.num_docs() as u64).sum()
+        searcher
+            .segment_readers()
+            .iter()
+            .map(|r| r.num_docs() as u64)
+            .sum()
     }
 }
 
@@ -338,12 +398,17 @@ fn split_code_identifier(text: &str) -> Vec<(usize, usize)> {
                 let mut camel_start = 0;
                 let chars: Vec<char> = part.chars().collect();
                 for i in 1..chars.len() {
-                    if chars[i].is_uppercase() && (i + 1 >= chars.len() || !chars[i + 1].is_uppercase() || chars[i - 1].is_lowercase()) {
+                    if chars[i].is_uppercase()
+                        && (i + 1 >= chars.len()
+                            || !chars[i + 1].is_uppercase()
+                            || chars[i - 1].is_lowercase())
+                    {
                         let byte_start = part_start + part[..camel_start].len();
                         // Calculate byte offset for camel_start..i
                         let sub = &part[camel_start..];
                         let char_count = i - camel_start;
-                        let byte_len: usize = sub.chars().take(char_count).map(|c| c.len_utf8()).sum();
+                        let byte_len: usize =
+                            sub.chars().take(char_count).map(|c| c.len_utf8()).sum();
                         let byte_end = byte_start + byte_len;
                         if byte_end > byte_start && byte_len > 1 {
                             tokens.push((byte_start, byte_end));
@@ -396,7 +461,10 @@ mod tests {
     #[test]
     fn code_split_camel() {
         let tokens = split_code_identifier("validateEmailAddress");
-        let strs: Vec<&str> = tokens.iter().map(|(s, e)| &"validateEmailAddress"[*s..*e]).collect();
+        let strs: Vec<&str> = tokens
+            .iter()
+            .map(|(s, e)| &"validateEmailAddress"[*s..*e])
+            .collect();
         assert!(strs.contains(&"validateEmailAddress"));
         assert!(strs.contains(&"validate"));
     }
@@ -404,13 +472,22 @@ mod tests {
     #[test]
     fn code_split_snake() {
         let tokens = split_code_identifier("validate_email");
-        let strs: Vec<&str> = tokens.iter().map(|(s, e)| &"validate_email"[*s..*e]).collect();
+        let strs: Vec<&str> = tokens
+            .iter()
+            .map(|(s, e)| &"validate_email"[*s..*e])
+            .collect();
         // Full token is always emitted
-        assert!(strs.contains(&"validate_email"), "missing full token: {strs:?}");
+        assert!(
+            strs.contains(&"validate_email"),
+            "missing full token: {strs:?}"
+        );
         // Sub-tokens from underscore split should be present
         // SimpleTokenizer splits on _ so "validate" and "email" become separate words
         // which then get added as sub-tokens
-        assert!(strs.len() >= 1, "should have at least the full token: {strs:?}");
+        assert!(
+            !strs.is_empty(),
+            "should have at least the full token: {strs:?}"
+        );
     }
 
     #[test]
@@ -419,13 +496,20 @@ mod tests {
         let mut writer = backend.writer(15_000_000).unwrap();
 
         let symbols = vec![
-            make_sym(1, "validateEmail", "auth::validateEmail", SymbolKind::Function),
+            make_sym(
+                1,
+                "validateEmail",
+                "auth::validateEmail",
+                SymbolKind::Function,
+            ),
             make_sym(2, "sendEmail", "email::sendEmail", SymbolKind::Function),
             make_sym(3, "processData", "data::processData", SymbolKind::Function),
             make_sym(4, "Config", "app::Config", SymbolKind::Struct),
         ];
 
-        backend.index_symbols(&mut writer, Path::new("src/lib.rs"), &symbols).unwrap();
+        backend
+            .index_symbols(&mut writer, Path::new("src/lib.rs"), &symbols)
+            .unwrap();
         backend.commit(&mut writer).unwrap();
 
         assert_eq!(backend.doc_count(), 4);
@@ -448,7 +532,9 @@ mod tests {
             make_sym(2, "foo", "app::foo", SymbolKind::Function),
         ];
 
-        backend.index_symbols(&mut writer, Path::new("src/lib.rs"), &symbols).unwrap();
+        backend
+            .index_symbols(&mut writer, Path::new("src/lib.rs"), &symbols)
+            .unwrap();
         backend.commit(&mut writer).unwrap();
 
         let hits = backend.search("Foo", 10).unwrap();
@@ -460,8 +546,15 @@ mod tests {
         let backend = TantivyBackend::open_memory().unwrap();
         let mut writer = backend.writer(15_000_000).unwrap();
 
-        let v1 = vec![make_sym(1, "old_func", "mod::old_func", SymbolKind::Function)];
-        backend.index_symbols(&mut writer, Path::new("src/lib.rs"), &v1).unwrap();
+        let v1 = vec![make_sym(
+            1,
+            "old_func",
+            "mod::old_func",
+            SymbolKind::Function,
+        )];
+        backend
+            .index_symbols(&mut writer, Path::new("src/lib.rs"), &v1)
+            .unwrap();
         backend.commit(&mut writer).unwrap();
         assert_eq!(backend.doc_count(), 1);
 
@@ -469,7 +562,9 @@ mod tests {
             make_sym(2, "new_func", "mod::new_func", SymbolKind::Function),
             make_sym(3, "another", "mod::another", SymbolKind::Function),
         ];
-        backend.index_symbols(&mut writer, Path::new("src/lib.rs"), &v2).unwrap();
+        backend
+            .index_symbols(&mut writer, Path::new("src/lib.rs"), &v2)
+            .unwrap();
         backend.commit(&mut writer).unwrap();
 
         // Old doc should be deleted, 2 new ones added

@@ -42,8 +42,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             ignore_patterns: Vec::new(),
-            max_file_size: 1_048_576,       // 1 MB
-            max_embed_size: 102_400,        // 100 KB
+            max_file_size: 1_048_576, // 1 MB
+            max_embed_size: 102_400,  // 100 KB
             watcher_debounce_ms: 250,
             tantivy_heap_bytes: 50_000_000, // 50 MB
             max_search_results: 30,
@@ -60,12 +60,10 @@ impl Config {
     pub fn load(repo_root: &Path) -> Self {
         let config_path = repo_root.join(".recon").join("config.toml");
         match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                toml::from_str(&content).unwrap_or_else(|e| {
-                    tracing::warn!("invalid config.toml, using defaults: {e}");
-                    Self::default()
-                })
-            }
+            Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
+                tracing::warn!("invalid config.toml, using defaults: {e}");
+                Self::default()
+            }),
             Err(_) => Self::default(),
         }
     }
@@ -74,8 +72,7 @@ impl Config {
     pub fn save(&self, repo_root: &Path) -> std::io::Result<()> {
         let config_dir = repo_root.join(".recon");
         std::fs::create_dir_all(&config_dir)?;
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(config_dir.join("config.toml"), content)
     }
 }
@@ -102,9 +99,11 @@ mod tests {
     #[test]
     fn save_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.ignore_patterns = vec!["*.generated.*".into(), "dist/".into()];
-        cfg.max_search_results = 50;
+        let cfg = Config {
+            ignore_patterns: vec!["*.generated.*".into(), "dist/".into()],
+            max_search_results: 50,
+            ..Default::default()
+        };
         cfg.save(dir.path()).unwrap();
 
         let loaded = Config::load(dir.path());

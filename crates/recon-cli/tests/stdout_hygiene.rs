@@ -100,10 +100,7 @@ fn serve_stdout_is_clean_jsonrpc() {
 
     for (i, line) in lines_read.iter().enumerate() {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
-        assert!(
-            parsed.is_ok(),
-            "stdout line {i} is not valid JSON: {line}"
-        );
+        assert!(parsed.is_ok(), "stdout line {i} is not valid JSON: {line}");
 
         let value = parsed.unwrap();
         // Should be a JSON-RPC response (has "jsonrpc" field)
