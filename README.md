@@ -1,6 +1,19 @@
-# recon
+<p align="center">
+  <img src="site/og.png" alt="recon — 35x fewer tokens for AI coding agents" width="800" />
+</p>
 
-Token-lean code intelligence MCP server. Replaces `Read`, `Grep`, and `Glob` with symbol-aware tools that deliver **15-30x token reduction** on code exploration tasks.
+<h1 align="center">recon</h1>
+
+<p align="center">
+  Token-lean code intelligence MCP server.<br/>
+  Replaces <code>Read</code>, <code>Grep</code>, and <code>Glob</code> with symbol-aware tools that deliver <strong>15-30x token reduction</strong> on code exploration.
+</p>
+
+<p align="center">
+  <a href="https://mcprecon.pages.dev">Website</a> · <a href="https://mcprecon.pages.dev/Docs.html">Docs</a> · <a href="#connect-your-agent-hosted">Get Started</a>
+</p>
+
+---
 
 Offered as a **hosted MCP server** -- no binary to install, no local indexing. Point your agent at the endpoint, hand it an API key, and it gets 12 symbol-aware tools instantly.
 

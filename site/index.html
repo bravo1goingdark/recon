@@ -266,15 +266,22 @@
   @media (max-width:540px){ footer .grid{grid-template-columns:1fr} footer .bottom{flex-direction:column;gap:10px;align-items:flex-start} }
 
   /* Marquee of languages */
+  @keyframes marquee{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
   .langs{
-    display:flex;gap:40px;align-items:center;padding:24px 0;
+    padding:24px 0;
     font-family:var(--serif);font-size:28px;color:var(--ink-3);
     border-top:1px solid var(--rule-soft);border-bottom:1px solid var(--rule-soft);
     overflow:hidden;white-space:nowrap;
+    -webkit-mask-image:linear-gradient(90deg,transparent,#000 8%,#000 92%,transparent);
+    mask-image:linear-gradient(90deg,transparent,#000 8%,#000 92%,transparent);
   }
-  .langs span{display:inline-flex;align-items:center;gap:40px}
+  .langs .track{
+    display:inline-flex;align-items:center;gap:40px;
+    animation:marquee 20s linear infinite;
+    will-change:transform;
+  }
+  .langs .track:hover{animation-play-state:paused}
   .langs em{font-style:italic;color:var(--clay);margin:0 4px}
-  .langs .sep{width:4px;height:4px;background:var(--ink-3);border-radius:50%;display:inline-block}
 
   /* ─────── RESPONSIVE FIXES ─────── */
   @media (max-width:720px){
@@ -394,12 +401,12 @@
 
 <!-- Languages marquee -->
 <div class="langs" aria-hidden="true">
-  <span>
-    Rust <em>·</em> Python <em>·</em> TypeScript <em>·</em> TSX <em>·</em> JavaScript
-    <em>·</em> Go <em>·</em> Java <em>·</em> C <em>·</em> C++
-    <em>·</em> Rust <em>·</em> Python <em>·</em> TypeScript <em>·</em> TSX <em>·</em> JavaScript
-    <em>·</em> Go <em>·</em> Java <em>·</em> C <em>·</em> C++
-  </span>
+  <div class="track">
+    <span>Rust</span> <em>·</em> <span>Python</span> <em>·</em> <span>TypeScript</span> <em>·</em> <span>TSX</span> <em>·</em> <span>JavaScript</span> <em>·</em> <span>Go</span> <em>·</em> <span>Java</span> <em>·</em> <span>C</span> <em>·</em> <span>C++</span> <em>·</em>
+    <span>Rust</span> <em>·</em> <span>Python</span> <em>·</em> <span>TypeScript</span> <em>·</em> <span>TSX</span> <em>·</em> <span>JavaScript</span> <em>·</em> <span>Go</span> <em>·</em> <span>Java</span> <em>·</em> <span>C</span> <em>·</em> <span>C++</span> <em>·</em>
+    <span>Rust</span> <em>·</em> <span>Python</span> <em>·</em> <span>TypeScript</span> <em>·</em> <span>TSX</span> <em>·</em> <span>JavaScript</span> <em>·</em> <span>Go</span> <em>·</em> <span>Java</span> <em>·</em> <span>C</span> <em>·</em> <span>C++</span> <em>·</em>
+    <span>Rust</span> <em>·</em> <span>Python</span> <em>·</em> <span>TypeScript</span> <em>·</em> <span>TSX</span> <em>·</em> <span>JavaScript</span> <em>·</em> <span>Go</span> <em>·</em> <span>Java</span> <em>·</em> <span>C</span> <em>·</em> <span>C++</span> <em>·</em>
+  </div>
 </div>
 
 <!-- TOOLS -->
