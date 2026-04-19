@@ -529,8 +529,7 @@ impl ReconServer {
             };
             let text_hits = self.text_searcher.search(&q).unwrap_or_default();
 
-            let mut rrf: std::collections::HashMap<String, (f64, serde_json::Value)> =
-                std::collections::HashMap::new();
+            let mut rrf: ahash::AHashMap<String, (f64, serde_json::Value)> = ahash::AHashMap::new();
             let k = 60.0;
 
             for (rank, hit) in tantivy_hits.iter().enumerate() {

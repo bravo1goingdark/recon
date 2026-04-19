@@ -6462,6 +6462,7 @@ dependencies = [
 name = "recon-search"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "compact_str",
  "criterion",
  "fff-grep",
@@ -6485,6 +6486,7 @@ dependencies = [
 name = "recon-server"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "compact_str",
  "parking_lot",
  "recon-core",

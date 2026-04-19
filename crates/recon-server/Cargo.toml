@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+ahash = { workspace = true }
 compact_str = { workspace = true }
 recon-embed = { workspace = true, optional = true }
 

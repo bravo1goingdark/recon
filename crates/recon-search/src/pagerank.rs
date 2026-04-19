@@ -3,8 +3,8 @@
 //! Builds a directed graph from symbol references, applies Aider-style
 //! edge weights, runs power iteration, and returns ranked symbols.
 
+use ahash::AHashMap;
 use recon_core::symbol::{Ref, Symbol};
-use std::collections::HashMap;
 
 /// A ranked symbol with its PageRank score.
 #[derive(Debug, Clone)]
@@ -32,9 +32,9 @@ pub fn pagerank(
     }
 
     // Build name → index map for target resolution
-    let mut name_to_idx: HashMap<&str, Vec<usize>> = HashMap::with_capacity(n);
+    let mut name_to_idx: AHashMap<&str, Vec<usize>> = AHashMap::with_capacity(n);
     // Build id → index map for source resolution
-    let mut id_to_idx: HashMap<u64, usize> = HashMap::with_capacity(n);
+    let mut id_to_idx: AHashMap<u64, usize> = AHashMap::with_capacity(n);
     for (i, sym) in symbols.iter().enumerate() {
         name_to_idx.entry(sym.name.as_str()).or_default().push(i);
         id_to_idx.insert(sym.id, i);
