@@ -185,6 +185,10 @@ impl TantivyBackend {
         let path_term = tantivy::Term::from_field_text(self.fields.path, path_str);
         writer.delete_term(path_term);
 
+        // Tantivy drops tokens exceeding 65530 bytes with a warning.
+        // Truncate long fields to avoid this.
+        const MAX_FIELD_BYTES: usize = 60_000;
+
         // Add new docs
         for sym in symbols {
             let mut doc = TantivyDocument::new();
@@ -194,10 +198,10 @@ impl TantivyBackend {
             doc.add_text(self.fields.qualified_name, sym.qualified_name.as_str());
             doc.add_text(self.fields.kind, sym.kind.label());
             if let Some(sig) = &sym.signature {
-                doc.add_text(self.fields.signature, sig);
+                doc.add_text(self.fields.signature, truncate_utf8(sig, MAX_FIELD_BYTES));
             }
             if let Some(d) = &sym.doc {
-                doc.add_text(self.fields.doc, d);
+                doc.add_text(self.fields.doc, truncate_utf8(d, MAX_FIELD_BYTES));
             }
             doc.add_text(self.fields.lang, sym.lang.name());
             writer
@@ -305,6 +309,18 @@ impl TantivyBackend {
     }
 }
 
+/// Truncate a string to at most `max_bytes`, ensuring we don't split a UTF-8 char.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Custom tokenizer that splits camelCase and snake_case, then lowercases.
 fn code_tokenizer() -> TextAnalyzer {
     TextAnalyzer::builder(CodeSplitTokenizer)
@@ -360,7 +376,7 @@ impl<'a> tantivy::tokenizer::TokenStream for CodeSplitTokenStream<'a> {
     }
 }
 
-/// Split a code identifier into sub-tokens.
+/// Split a code identifier into sub-tokens (UTF-8 safe).
 /// "validateEmailAddress" -> ["validate", "Email", "Address", "validateEmailAddress"]
 /// "validate_email" -> ["validate", "email", "validate_email"]
 fn split_code_identifier(text: &str) -> Vec<(usize, usize)> {
@@ -378,55 +394,55 @@ fn split_code_identifier(text: &str) -> Vec<(usize, usize)> {
     let mut word_ranges = Vec::new();
     while tantivy::tokenizer::TokenStream::advance(&mut stream) {
         let t = tantivy::tokenizer::TokenStream::token(&stream);
-        word_ranges.push((t.offset_from, t.offset_to));
+        // Validate char boundaries before accepting
+        if text.is_char_boundary(t.offset_from) && text.is_char_boundary(t.offset_to) {
+            word_ranges.push((t.offset_from, t.offset_to));
+        }
     }
 
-    for (start, end) in &word_ranges {
-        let word = &text[*start..*end];
+    for &(start, end) in &word_ranges {
+        let word = &text[start..end];
 
-        // Split on underscores
-        let mut pos = *start;
+        // Split on underscores — track byte offsets carefully
+        let mut byte_offset = start;
         for part in word.split('_') {
             if !part.is_empty() {
-                let part_start = pos;
-                let part_end = pos + part.len();
-                if part_end > part_start && (part_start != *start || part_end != *end) {
+                let part_start = byte_offset;
+                let part_end = byte_offset + part.len();
+                // Emit underscore-split part if it differs from the whole word
+                if part_end > part_start && (part_start != start || part_end != end) {
                     tokens.push((part_start, part_end));
                 }
 
-                // Split camelCase within each part
-                let mut camel_start = 0;
+                // Split camelCase: collect (char_index, byte_offset) pairs
+                let char_offsets: Vec<(usize, usize)> = part
+                    .char_indices()
+                    .enumerate()
+                    .map(|(ci, (bi, _))| (ci, part_start + bi))
+                    .collect();
+
                 let chars: Vec<char> = part.chars().collect();
+                let mut seg_start_byte = part_start;
+
                 for i in 1..chars.len() {
                     if chars[i].is_uppercase()
                         && (i + 1 >= chars.len()
                             || !chars[i + 1].is_uppercase()
                             || chars[i - 1].is_lowercase())
                     {
-                        let byte_start = part_start + part[..camel_start].len();
-                        // Calculate byte offset for camel_start..i
-                        let sub = &part[camel_start..];
-                        let char_count = i - camel_start;
-                        let byte_len: usize =
-                            sub.chars().take(char_count).map(|c| c.len_utf8()).sum();
-                        let byte_end = byte_start + byte_len;
-                        if byte_end > byte_start && byte_len > 1 {
-                            tokens.push((byte_start, byte_end));
+                        let seg_end_byte = char_offsets[i].1;
+                        if seg_end_byte > seg_start_byte + chars[0].len_utf8() {
+                            tokens.push((seg_start_byte, seg_end_byte));
                         }
-                        camel_start = i;
+                        seg_start_byte = seg_end_byte;
                     }
                 }
                 // Last camel segment
-                if camel_start > 0 {
-                    let byte_start = part_start + part[..camel_start].len();
-                    // Recalculate using char indices
-                    let sub = &part[camel_start..];
-                    if !sub.is_empty() {
-                        tokens.push((byte_start, part_end));
-                    }
+                if seg_start_byte > part_start && seg_start_byte < part_end {
+                    tokens.push((seg_start_byte, part_end));
                 }
             }
-            pos += part.len() + 1; // +1 for underscore
+            byte_offset += part.len() + 1; // +1 for underscore
         }
     }
 
