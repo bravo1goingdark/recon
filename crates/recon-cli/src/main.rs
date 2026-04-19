@@ -223,6 +223,54 @@ async fn main() -> Result<()> {
 
             std::fs::write(&mcp_path, serde_json::to_string_pretty(&merged)?)?;
             eprintln!("Wrote {}", mcp_path.display());
+
+            // 4. Add .recon/ to .gitignore if not already there
+            let gitignore_path = repo.join(".gitignore");
+            let needs_ignore = if gitignore_path.exists() {
+                let content = std::fs::read_to_string(&gitignore_path)?;
+                !content
+                    .lines()
+                    .any(|l| l.trim() == ".recon/" || l.trim() == ".recon")
+            } else {
+                true
+            };
+            if needs_ignore {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&gitignore_path)?;
+                // Ensure we start on a new line
+                if gitignore_path.exists() {
+                    let content = std::fs::read_to_string(&gitignore_path)?;
+                    if !content.is_empty() && !content.ends_with('\n') {
+                        writeln!(f)?;
+                    }
+                }
+                writeln!(f, ".recon/")?;
+                eprintln!("Added .recon/ to .gitignore");
+            }
+
+            // 5. Append CLAUDE.md hint if not already present
+            let claude_md = repo.join("CLAUDE.md");
+            let recon_hint = "Prefer code_* tools (code_outline, code_skeleton, code_find_symbol, code_search, code_repo_map) over Read/Grep/Glob for code exploration.";
+            let needs_hint = if claude_md.exists() {
+                let content = std::fs::read_to_string(&claude_md)?;
+                !content.contains("code_*")
+            } else {
+                false // don't create CLAUDE.md if it doesn't exist
+            };
+            if needs_hint {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().append(true).open(&claude_md)?;
+                let content = std::fs::read_to_string(&claude_md)?;
+                if !content.ends_with('\n') {
+                    writeln!(f)?;
+                }
+                writeln!(f, "\n## recon MCP tools\n{recon_hint}")?;
+                eprintln!("Added recon hint to CLAUDE.md");
+            }
+
             eprintln!("Restart Claude Code to activate recon tools.");
             Ok(())
         }
