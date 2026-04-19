@@ -1,6 +1,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod pretty;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use recon_indexer::indexer;
@@ -18,6 +20,10 @@ struct Cli {
     /// Repository root path (default: current directory)
     #[arg(long, global = true, default_value = ".")]
     repo: PathBuf,
+
+    /// Output raw JSON instead of formatted text
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -232,6 +238,8 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let repo = cli.repo;
+    let raw_json = cli.json;
+    let out = |s: &str| pretty::print_output(s, raw_json);
 
     match cli.command {
         Command::Init => {
@@ -397,12 +405,9 @@ async fn main() -> Result<()> {
         Command::Find { name, kind, lang } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "name": name, "kind": kind, "lang": lang });
-            println!(
-                "{}",
-                server
-                    .query_tool("code_find_symbol", &args.to_string())
-                    .await
-            );
+            out(&server
+                .query_tool("code_find_symbol", &args.to_string())
+                .await);
             Ok(())
         }
         Command::Search {
@@ -412,67 +417,46 @@ async fn main() -> Result<()> {
         } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "query": query, "mode": mode, "filter": filter });
-            println!(
-                "{}",
-                server.query_tool("code_search", &args.to_string()).await
-            );
+            out(&server.query_tool("code_search", &args.to_string()).await);
             Ok(())
         }
         Command::Outline { path } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "path": path });
-            println!(
-                "{}",
-                server.query_tool("code_outline", &args.to_string()).await
-            );
+            out(&server.query_tool("code_outline", &args.to_string()).await);
             Ok(())
         }
         Command::Skeleton { path, depth } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "path": path, "depth": depth });
-            println!(
-                "{}",
-                server.query_tool("code_skeleton", &args.to_string()).await
-            );
+            out(&server.query_tool("code_skeleton", &args.to_string()).await);
             Ok(())
         }
         Command::Symbol { path, name } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "path": path, "symbol_or_line": name });
-            println!(
-                "{}",
-                server
-                    .query_tool("code_read_symbol", &args.to_string())
-                    .await
-            );
+            out(&server
+                .query_tool("code_read_symbol", &args.to_string())
+                .await);
             Ok(())
         }
         Command::Refs { symbol } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "symbol": symbol });
-            println!(
-                "{}",
-                server.query_tool("code_find_refs", &args.to_string()).await
-            );
+            out(&server.query_tool("code_find_refs", &args.to_string()).await);
             Ok(())
         }
         Command::Ls { glob, lang, filter } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "glob": glob, "lang": lang, "filter": filter });
-            println!(
-                "{}",
-                server.query_tool("code_list", &args.to_string()).await
-            );
+            out(&server.query_tool("code_list", &args.to_string()).await);
             Ok(())
         }
         Command::Map { budget, focus } => {
             let server = read_server(repo)?;
             let focus = if focus.is_empty() { None } else { Some(focus) };
             let args = serde_json::json!({ "focus_files": focus, "token_budget": budget });
-            println!(
-                "{}",
-                server.query_tool("code_repo_map", &args.to_string()).await
-            );
+            out(&server.query_tool("code_repo_map", &args.to_string()).await);
             Ok(())
         }
         Command::Strings {
@@ -482,33 +466,27 @@ async fn main() -> Result<()> {
         } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "pattern": pattern, "kind": kind, "filter": filter });
-            println!(
-                "{}",
-                server
-                    .query_tool("code_find_strings", &args.to_string())
-                    .await
-            );
+            out(&server
+                .query_tool("code_find_strings", &args.to_string())
+                .await);
             Ok(())
         }
         Command::Multi { patterns } => {
             let server = read_server(repo)?;
             let args = serde_json::json!({ "patterns": patterns });
-            println!(
-                "{}",
-                server
-                    .query_tool("code_multi_find", &args.to_string())
-                    .await
-            );
+            out(&server
+                .query_tool("code_multi_find", &args.to_string())
+                .await);
             Ok(())
         }
         Command::Stats => {
             let server = read_server(repo)?;
-            println!("{}", server.query_tool("code_stats", "{}").await);
+            out(&server.query_tool("code_stats", "{}").await);
             Ok(())
         }
         Command::Reindex => {
             let server = read_server(repo)?;
-            println!("{}", server.query_tool("code_reindex", "{}").await);
+            out(&server.query_tool("code_reindex", "{}").await);
             Ok(())
         }
         Command::Purge => {
@@ -524,7 +502,7 @@ async fn main() -> Result<()> {
         }
         Command::Query { tool, args } => {
             let server = read_server(repo)?;
-            println!("{}", server.query_tool(&tool, &args).await);
+            out(&server.query_tool(&tool, &args).await);
             Ok(())
         }
     }
