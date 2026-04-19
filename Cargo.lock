@@ -1319,6 +1319,7 @@ dependencies = [
  "clap",
  "recon-core",
  "recon-indexer",
+ "recon-search",
  "recon-server",
  "recon-storage",
  "rmcp",
@@ -1355,7 +1356,9 @@ dependencies = [
  "rayon",
  "recon-core",
  "recon-parser",
+ "recon-search",
  "recon-storage",
+ "tantivy",
  "tempfile",
  "tracing",
 ]

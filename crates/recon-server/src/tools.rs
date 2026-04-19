@@ -48,7 +48,7 @@ pub struct FindRefsParams {
 pub struct SearchParams {
     /// Search query string.
     pub query: String,
-    /// Search mode: "exact", "regex", or "hybrid" (default).
+    /// Search mode: "exact" (default), "regex", or "hybrid" (BM25 + text).
     #[serde(default = "default_mode")]
     pub mode: String,
 }
@@ -90,3 +90,13 @@ pub struct MultiFindParams {
     /// Multiple patterns to search simultaneously.
     pub patterns: Vec<String>,
 }
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ReindexParams {
+    /// Force full re-index even if hashes match. Default false.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct StatsParams {}

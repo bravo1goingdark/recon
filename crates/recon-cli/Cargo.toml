@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 recon-core = { workspace = true }
 recon-storage = { workspace = true }
+recon-search = { workspace = true }
 recon-indexer = { workspace = true }
 recon-server = { workspace = true }
 rmcp = { workspace = true }

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use recon_indexer::indexer;
+use recon_search::tantivy_backend::TantivyBackend;
 use recon_server::server::ReconServer;
 use recon_storage::store::Store;
 use rmcp::ServiceExt;
@@ -49,16 +50,22 @@ async fn main() -> Result<()> {
             let repo = repo.canonicalize()?;
             info!(?repo, "starting recon server");
 
-            // Open store in repo's .recon directory
             let store_dir = repo.join(".recon");
             std::fs::create_dir_all(&store_dir)?;
+
             let store = Store::open(&store_dir.join("index.db"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            let server = ReconServer::new(repo, store);
+            let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            let server = ReconServer::new(repo, store, tantivy);
 
             // Index before serving
             server.index_repo().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            // Start background file watcher
+            server.start_watcher();
 
             // Serve over stdio
             let (stdin, stdout) = rmcp::transport::io::stdio();
@@ -79,15 +86,19 @@ async fn main() -> Result<()> {
 
             let store_dir = repo.join(".recon");
             std::fs::create_dir_all(&store_dir)?;
+
             let store = Store::open(&store_dir.join("index.db"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            let stats = indexer::index_repo(&store, &repo)
+            let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            let stats = indexer::index_repo(&store, Some(&tantivy), &repo)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             eprintln!(
-                "Indexed {} files, {} symbols ({} errors)",
-                stats.files_indexed, stats.total_symbols, stats.errors
+                "Indexed {} files, {} symbols, {} tantivy docs ({} errors)",
+                stats.files_indexed, stats.total_symbols, tantivy.doc_count(), stats.errors
             );
             Ok(())
         }
