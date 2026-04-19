@@ -1,6 +1,7 @@
 //! Core indexing logic: parallel parse with pooled parsers, batch store + Tantivy.
 
 use crate::walker;
+use rayon::prelude::*;
 use recon_core::error::Error;
 use recon_core::lang::Language;
 use recon_core::symbol::{FileMeta, Ref, Symbol};
@@ -9,7 +10,6 @@ use recon_parser::pool::LanguagePools;
 use recon_search::tantivy_backend::TantivyBackend;
 use recon_storage::hash;
 use recon_storage::store::Store;
-use rayon::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,8 +17,11 @@ use tracing::{debug, info, warn};
 
 /// Result of parsing a single file (before storing).
 pub struct ParsedFile {
+    /// File metadata (path, hash, timestamps).
     pub meta: FileMeta,
+    /// Extracted symbol definitions.
     pub symbols: Vec<Symbol>,
+    /// Extracted symbol references.
     pub refs: Vec<Ref>,
 }
 
@@ -147,11 +150,7 @@ pub fn index_repo(
     let mut stats = IndexStats::default();
 
     for parsed_file in &parsed {
-        match store.batch_index_file(
-            &parsed_file.meta,
-            &parsed_file.symbols,
-            &parsed_file.refs,
-        ) {
+        match store.batch_index_file(&parsed_file.meta, &parsed_file.symbols, &parsed_file.refs) {
             Ok(()) => {
                 stats.files_indexed += 1;
                 // Index into Tantivy
@@ -183,11 +182,59 @@ pub fn index_repo(
     Ok(stats)
 }
 
+/// Index a repo with git-aware incremental optimization.
+///
+/// - If HEAD matches the last indexed commit, skips entirely.
+/// - Otherwise, falls back to a full `index_repo`.
+/// - Stores the current HEAD SHA in the meta table after indexing.
+pub fn index_repo_incremental(
+    store: &Store,
+    tantivy: Option<&TantivyBackend>,
+    repo_root: &Path,
+) -> Result<IndexStats, Error> {
+    let last_commit = store.get_meta("last_indexed_commit")?;
+    let current_head = match crate::git::head_sha(repo_root) {
+        Ok(sha) => Some(sha),
+        Err(e) => {
+            debug!("gix head_sha unavailable, will do full index: {e}");
+            None
+        }
+    };
+
+    // Fast path: HEAD unchanged since last index
+    if let (Some(ref last), Some(ref current)) = (&last_commit, &current_head) {
+        if last == current {
+            let total = store.symbol_count().unwrap_or(0);
+            info!(head = %current, symbols = total, "HEAD matches last index, skipping");
+            return Ok(IndexStats {
+                files_indexed: 0,
+                total_symbols: total,
+                errors: 0,
+            });
+        }
+    }
+
+    // Full index (incremental diff by individual files is handled by the watcher)
+    let stats = index_repo(store, tantivy, repo_root)?;
+
+    // Record current HEAD so next startup can skip
+    if let Some(sha) = &current_head {
+        if let Err(e) = store.set_meta("last_indexed_commit", sha) {
+            warn!("failed to store last_indexed_commit: {e}");
+        }
+    }
+
+    Ok(stats)
+}
+
 /// Stats from an indexing run.
 #[derive(Debug, Default)]
 pub struct IndexStats {
+    /// Number of files that were parsed and stored.
     pub files_indexed: usize,
+    /// Total symbols in the store after indexing.
     pub total_symbols: u64,
+    /// Number of files that errored during indexing.
     pub errors: usize,
 }
 
@@ -239,9 +286,56 @@ mod tests {
     }
 
     #[test]
+    fn index_repo_incremental_stores_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        // Initialize a git repo with a file
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let store = Store::open_memory().unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path()).unwrap();
+        assert!(stats.files_indexed >= 1);
+
+        let commit = store.get_meta("last_indexed_commit").unwrap();
+        assert!(commit.is_some(), "should store last_indexed_commit");
+
+        // Second run with same HEAD should skip
+        let stats2 = index_repo_incremental(&store, None, dir.path()).unwrap();
+        assert_eq!(stats2.files_indexed, 0, "should skip when HEAD unchanged");
+    }
+
+    #[test]
     fn index_repo_with_tantivy() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("main.rs"), "pub fn hello() {}\npub struct Config {}").unwrap();
+        std::fs::write(
+            dir.path().join("main.rs"),
+            "pub fn hello() {}\npub struct Config {}",
+        )
+        .unwrap();
 
         let store = Store::open_memory().unwrap();
         let tantivy = TantivyBackend::open_memory().unwrap();
@@ -249,7 +343,10 @@ mod tests {
 
         assert!(stats.files_indexed >= 1);
         // Tantivy should have docs
-        assert!(tantivy.doc_count() >= 2, "tantivy should have indexed symbols");
+        assert!(
+            tantivy.doc_count() >= 2,
+            "tantivy should have indexed symbols"
+        );
 
         // Search should work
         let hits = tantivy.search("hello", 10).unwrap();

@@ -17,8 +17,15 @@ ignore = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 rayon = { workspace = true }
+gix = { workspace = true }
 tracing = { workspace = true }
 crossbeam-queue = { workspace = true }
+
+recon-embed = { workspace = true, optional = true }
+
+[features]
+default = []
+embed = ["dep:recon-embed"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

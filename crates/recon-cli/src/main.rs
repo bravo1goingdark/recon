@@ -53,8 +53,8 @@ async fn main() -> Result<()> {
             let store_dir = repo.join(".recon");
             std::fs::create_dir_all(&store_dir)?;
 
-            let store = Store::open(&store_dir.join("index.db"))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let store =
+                Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
 
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -62,7 +62,10 @@ async fn main() -> Result<()> {
             let server = ReconServer::new(repo, store, tantivy);
 
             // Index before serving
-            server.index_repo().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            server
+                .index_repo()
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             // Start background file watcher
             server.start_watcher();
@@ -87,18 +90,21 @@ async fn main() -> Result<()> {
             let store_dir = repo.join(".recon");
             std::fs::create_dir_all(&store_dir)?;
 
-            let store = Store::open(&store_dir.join("index.db"))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let store =
+                Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
 
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            let stats = indexer::index_repo(&store, Some(&tantivy), &repo)
+            let stats = indexer::index_repo_incremental(&store, Some(&tantivy), &repo)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             eprintln!(
                 "Indexed {} files, {} symbols, {} tantivy docs ({} errors)",
-                stats.files_indexed, stats.total_symbols, tantivy.doc_count(), stats.errors
+                stats.files_indexed,
+                stats.total_symbols,
+                tantivy.doc_count(),
+                stats.errors
             );
             Ok(())
         }
