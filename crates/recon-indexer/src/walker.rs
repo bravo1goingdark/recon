@@ -14,9 +14,9 @@ const GENERATED_MARKERS: &[&str] = &[
 ];
 
 /// Walk a directory, yielding paths that should be indexed.
-/// Uses default max file size of 1MB.
+/// Uses default max file size of 2MB.
 pub fn walk_repo(root: &Path) -> Vec<PathBuf> {
-    walk_repo_with_limit(root, 1_048_576)
+    walk_repo_with_limit(root, 2_097_152)
 }
 
 /// Walk a directory with a configurable max file size.
