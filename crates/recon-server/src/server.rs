@@ -438,7 +438,7 @@ impl ReconServer {
             })
             .collect();
 
-        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}"))
+        redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
@@ -466,7 +466,7 @@ impl ReconServer {
             total: refs.len(),
             top_k,
         });
-        serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"))
+        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
@@ -680,7 +680,7 @@ impl ReconServer {
             }));
         }
 
-        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}"))
+        redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
@@ -714,7 +714,9 @@ impl ReconServer {
                 content,
                 token_estimate: token_est,
             });
-            let result = serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"));
+            let result = redact_response(
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            );
 
             if let Err(e) = store.delete_meta_prefix("map_cache:") {
                 warn!("failed to clear map cache: {e}");
@@ -753,7 +755,7 @@ impl ReconServer {
             content,
             token_estimate: token_est,
         });
-        serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"))
+        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     #[tool(
