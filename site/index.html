@@ -271,7 +271,7 @@
         <p class="lede">
           <b>recon</b> is a token-lean code intelligence <b>MCP server</b> for AI coding agents.
           It replaces <i>Read</i>, <i>Grep</i>, and <i>Glob</i> with symbol-aware tools that
-          deliver a <b>5–10× token reduction</b> on typical exploration tasks — without losing
+          deliver a <b>15–30× token reduction</b> on typical exploration tasks — without losing
           a single useful detail.
         </p>
         <div class="cta">
@@ -296,8 +296,8 @@
         <div class="row"><span>  <span class="dim">refs:</span> 7 callers across 3 files</span><span class="ok">25 µs</span></div>
         <div>&nbsp;</div>
         <div><span class="prompt">→ </span><span class="cmd">code_repo_map budget=<span class="hl">2000</span></span></div>
-        <div class="dim">  · pageranked 638 symbols · 3.4 ms</div>
-        <div class="dim">  · tokens used: <span class="hl">1,942</span> / 2,000</div>
+        <div class="dim">  · pageranked 320K symbols · cached</div>
+        <div class="dim">  · tokens used: <span class="hl">1,985</span> / 2,000 · <span class="ok">19 ms</span></div>
       </div>
     </div>
   </div>
@@ -307,8 +307,8 @@
 <section class="strip" style="padding:0;border-bottom:1px solid var(--rule-soft)">
   <div class="cell">
     <div class="k">Query p50</div>
-    <div class="v">11<sub>ms</sub></div>
-    <div class="foot">Rust compiler · 318K symbols</div>
+    <div class="v">10<sub>ms</sub></div>
+    <div class="foot">Rust compiler · 320K symbols</div>
   </div>
   <div class="cell">
     <div class="k">Token reduction</div>
@@ -350,73 +350,73 @@
         <div class="name">code_outline<span class="paren">(path)</span></div>
         <div class="replaces">↳ Read</div>
         <div class="desc">One line per symbol — kind, name, line. Skim a 2000-line file in a single screen.</div>
-        <div class="lat">&lt;1 ms</div>
+        <div class="lat">13 ms</div>
       </div>
       <div class="row">
         <div class="name">code_skeleton<span class="paren">(path)</span></div>
         <div class="replaces">↳ Read</div>
         <div class="desc">Signatures and docs only; bodies collapse to <code>…</code>. About 10× compression vs. full read.</div>
-        <div class="lat">&lt;2 ms</div>
+        <div class="lat">11 ms</div>
       </div>
       <div class="row">
         <div class="name">code_read_symbol<span class="paren">(…)</span></div>
         <div class="replaces">↳ Read</div>
         <div class="desc">Pull a single function, its signature, doc, body — and every caller — without loading the file.</div>
-        <div class="lat">&lt;3 ms</div>
+        <div class="lat">&lt;10 ms</div>
       </div>
       <div class="row">
         <div class="name">code_find_symbol<span class="paren">(name)</span></div>
         <div class="replaces">↳ Grep</div>
         <div class="desc">Three-tier resolver: exact SQLite → Tantivy BM25 → FTS5 trigram with nucleo fuzzy rescore.</div>
-        <div class="lat">25 µs</div>
+        <div class="lat">8 ms</div>
       </div>
       <div class="row">
         <div class="name">code_find_refs<span class="paren">(…)</span></div>
         <div class="replaces">↳ Grep</div>
         <div class="desc">Reference count and the top-k call sites for any symbol in the repo.</div>
-        <div class="lat">&lt;5 ms</div>
+        <div class="lat">12 ms</div>
       </div>
       <div class="row">
         <div class="name">code_search<span class="paren">(query, mode)</span></div>
         <div class="replaces">↳ Grep</div>
-        <div class="desc">Exact · regex · hybrid · semantic. Filter DSL: <code>type:rust status:modified !test</code>.</div>
-        <div class="lat">&lt;15 ms</div>
+        <div class="desc">Exact · regex · hybrid. Tantivy-first, grep fallback. Filter DSL: <code>type:rust !test</code>.</div>
+        <div class="lat">33 ms</div>
       </div>
       <div class="row">
         <div class="name">code_list<span class="paren">(glob?)</span></div>
         <div class="replaces">↳ Glob</div>
-        <div class="desc">Structured file listing with top symbols for each match — not just paths.</div>
-        <div class="lat">&lt;2 ms</div>
+        <div class="desc">Structured file listing with symbol counts — single GROUP BY query, not per-file.</div>
+        <div class="lat">57 ms</div>
       </div>
       <div class="row">
         <div class="name">code_repo_map<span class="paren">(budget)</span></div>
         <div class="replaces">—</div>
-        <div class="desc">PageRank-ranked repo overview, strictly bounded to a tiktoken budget you control.</div>
-        <div class="lat">3.4 ms</div>
+        <div class="desc">PageRank-ranked repo overview, cached in SQLite, invalidated on reindex.</div>
+        <div class="lat">19 ms</div>
       </div>
       <div class="row">
         <div class="name">code_find_strings<span class="paren">(…)</span></div>
         <div class="replaces">—</div>
         <div class="desc">Search string literals and comments separately from identifiers. Grep, but narrower.</div>
-        <div class="lat">&lt;10 ms</div>
+        <div class="lat">&lt;30 ms</div>
       </div>
       <div class="row">
         <div class="name">code_multi_find<span class="paren">(patterns[])</span></div>
         <div class="replaces">—</div>
         <div class="desc">Fan out several patterns through the TextSearcher trait in a single call.</div>
-        <div class="lat">&lt;20 ms</div>
+        <div class="lat">&lt;30 ms</div>
       </div>
       <div class="row">
         <div class="name">code_reindex<span class="paren">()</span></div>
         <div class="replaces">—</div>
-        <div class="desc">Agent-triggered re-index. Useful after a batch edit the watcher may not have seen.</div>
-        <div class="lat">6 ms*</div>
+        <div class="desc">Agent-triggered re-index. Clears map cache, rebuilds incrementally.</div>
+        <div class="lat">varies</div>
       </div>
       <div class="row">
         <div class="name">code_stats<span class="paren">()</span></div>
         <div class="replaces">—</div>
-        <div class="desc">Index health: symbols, files, commit SHA, freshness, backend versions.</div>
-        <div class="lat">&lt;1 ms</div>
+        <div class="desc">Index health: files, symbols, tantivy docs, freshness.</div>
+        <div class="lat">10 ms</div>
       </div>
     </div>
   </div>
@@ -619,7 +619,7 @@ cargo install rr
     </div>
     <div class="bottom wrap" style="padding-left:0;padding-right:0">
       <div>© 2026 recon · crafted in Rust</div>
-      <div>p99 &lt; 100 ms · 107 tests · stdout-clean</div>
+      <div>p99 &lt; 100 ms · 107 tests · 24 MB binary</div>
     </div>
   </div>
 </footer>

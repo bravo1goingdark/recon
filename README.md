@@ -8,19 +8,19 @@ Offered as a **hosted MCP server** -- no binary to install, no local indexing. P
 
 Measured on real codebases, release build, warm cache:
 
-| | Zed (80K symbols) | Rust compiler (318K symbols) |
+| | Zed (80K symbols) | Rust compiler (320K symbols) |
 |---|---|---|
-| **stats** | 11 ms | 28 ms |
-| **find** | 10 ms | 11 ms |
-| **search** | 14-39 ms | 33-95 ms |
-| **outline** | 16 ms | 20 ms |
-| **skeleton** | 18 ms | 16 ms |
-| **refs** | 16 ms | 9 ms |
-| **map (cached)** | 8 ms | 18 ms |
+| **stats** | 10 ms | 29 ms |
+| **find** | 8 ms | 8 ms |
+| **search** | 11 ms | 33 ms |
+| **outline** | 14 ms | 13 ms |
+| **skeleton** | 11 ms | 11 ms |
+| **refs** | 8 ms | 12 ms |
+| **map (cached)** | 8 ms | 19 ms |
 | **map (cold)** | 405 ms | 2.0 s |
-| **reindex** | 31 s | -- |
+| **cold index** | 19 s | 53 s |
 
-All read-path queries under 100 ms p99. Binary size: 24 MB.
+All read-path queries under 33 ms on 320K symbols. Binary size: 24 MB.
 
 ## Token reduction
 
@@ -135,18 +135,18 @@ All output is human-readable by default. Pass `--json` for machine consumption.
 
 | Tool | Replaces | What it does | Latency |
 |---|---|---|---|
-| `code_outline(path)` | Read | One line per symbol -- kind, name, line | <20 ms |
-| `code_skeleton(path)` | Read | Signatures + docs, bodies as `...` (10x compression) | <20 ms |
+| `code_outline(path)` | Read | One line per symbol -- kind, name, line | 13 ms |
+| `code_skeleton(path)` | Read | Signatures + docs, bodies as `...` (10x compression) | 11 ms |
 | `code_read_symbol(path, symbol)` | Read | Full source of one symbol + callers | <10 ms |
-| `code_find_symbol(name)` | Grep | 3-tier: exact SQLite -> Tantivy BM25 -> FTS5 + nucleo fuzzy | <15 ms |
-| `code_find_refs(symbol)` | Grep | Reference count + top-k call sites | <50 ms |
-| `code_search(query, mode, filter?)` | Grep | exact/regex/hybrid + filter DSL, Tantivy-first | <100 ms |
-| `code_list(glob?, lang?, filter?)` | Glob | Structured file listing with symbol counts | <30 ms |
-| `code_repo_map(budget)` | -- | PageRank-ranked symbol overview under token budget | <20 ms cached |
+| `code_find_symbol(name)` | Grep | 3-tier: exact SQLite -> Tantivy BM25 -> FTS5 + nucleo fuzzy | 8 ms |
+| `code_find_refs(symbol)` | Grep | Reference count + top-k call sites | 12 ms |
+| `code_search(query, mode, filter?)` | Grep | exact/regex/hybrid + filter DSL, Tantivy-first | 33 ms |
+| `code_list(glob?, lang?, filter?)` | Glob | Structured file listing with symbol counts (batch query) | 57 ms |
+| `code_repo_map(budget)` | -- | PageRank-ranked symbol overview, cached in SQLite | 19 ms |
 | `code_find_strings(pattern)` | -- | Search string literals and comments | <30 ms |
 | `code_multi_find(patterns[])` | -- | Multi-pattern search in one call | <30 ms |
-| `code_reindex()` | -- | Agent-triggered re-indexing | varies |
-| `code_stats()` | -- | Index health: files, symbols, freshness | <30 ms |
+| `code_reindex()` | -- | Agent-triggered re-indexing, clears map cache | varies |
+| `code_stats()` | -- | Index health: files, symbols, freshness | 10 ms |
 
 ### Filter DSL
 
@@ -201,11 +201,12 @@ crates/
 - **parking_lot::Mutex** instead of tokio::sync::Mutex (no async overhead on sync SQLite)
 - **DashMap** for multi-tenant repo routing (sharded RwLock, zero contention on reads)
 - **Fat LTO + panic=abort + opt-level=3** -- 24 MB binary
-- **SQLite tuning** -- WAL, mmap 256MB, cache 32MB, PRAGMA optimize
-- **Tantivy-first search** -- try BM25 index before falling back to grep
+- **SQLite tuning** -- WAL, mmap 256MB, cache 32MB, PRAGMA optimize, chunked bulk inserts (500 files/tx)
+- **Tantivy-first search** -- try BM25 index before falling back to grep, 50MB heap, commits every 20K docs
 - **Token heuristic** -- estimate_tokens (len/4) in hot loops, tiktoken for accuracy checks
 - **Map caching** -- PageRank cached in SQLite meta, invalidated on max(indexed_at) change
 - **Early convergence** -- PageRank stops when L1 norm delta < 1e-6 (typically 8-12 iterations)
+- **ahash::AHashMap** -- non-cryptographic hash in PageRank and RRF fusion hot paths
 - **Bulk SQL** -- all_symbols() and all_refs() single-query loads for PageRank
 - **Secret redaction** -- regex scanner on all tool responses returning code content
 - **Path traversal guard** -- canonicalize + prefix check, repo root cached
