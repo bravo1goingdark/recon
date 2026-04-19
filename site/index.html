@@ -3,7 +3,48 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>recon — token-lean code intelligence</title>
+<title>recon — 35x fewer tokens for AI coding agents | Hosted MCP Server</title>
+<meta name="description" content="recon is a hosted MCP server that replaces Read, Grep, and Glob with 12 symbol-aware tools. 15-30x token reduction on code exploration. 8ms symbol lookup on 320K symbols. Rust, Python, TypeScript, Go, Java, C, C++." />
+<meta name="keywords" content="MCP server, code intelligence, AI coding, token reduction, Claude Code, symbol search, tree-sitter, PageRank, code exploration, developer tools" />
+<meta name="author" content="bravo1goingdark" />
+<link rel="canonical" href="https://mcprecon.pages.dev/" />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:title" content="recon — 35x fewer tokens for AI coding agents" />
+<meta property="og:description" content="Hosted MCP server with 12 symbol-aware tools. 8ms queries on 320K symbols. Replaces Read/Grep/Glob." />
+<meta property="og:url" content="https://mcprecon.pages.dev/" />
+<meta property="og:site_name" content="recon" />
+<meta property="og:image" content="https://mcprecon.pages.dev/og.svg" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="recon — 35x fewer tokens for AI coding agents" />
+<meta name="twitter:description" content="Hosted MCP server. 12 tools. 8ms queries. 15-30x token reduction." />
+<meta name="twitter:image" content="https://mcprecon.pages.dev/og.svg" />
+
+<!-- Favicon (inline SVG radar mark) -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 80 80' fill='none'%3E%3Ccircle cx='40' cy='40' r='4' fill='%23333'/%3E%3Ccircle cx='40' cy='40' r='14' stroke='%23333' stroke-width='1.5'/%3E%3Ccircle cx='40' cy='40' r='24' stroke='%23333' stroke-width='1' opacity='0.55'/%3E%3Ccircle cx='40' cy='40' r='34' stroke='%23333' stroke-width='1' opacity='0.25'/%3E%3Cline x1='40' y1='40' x2='68' y2='20' stroke='oklch(58%25 0.14 45)' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='68' cy='20' r='3.5' fill='oklch(58%25 0.14 45)'/%3E%3C/svg%3E" />
+
+<!-- Structured data -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "recon",
+  "description": "Token-lean code intelligence MCP server for AI coding agents. 15-30x token reduction.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
+</script>
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -241,7 +282,7 @@
 
 <!-- NAV -->
 <nav class="top">
-  <a href="#" class="mark">recon<span class="dot"></span></a>
+  <a href="#" class="mark" aria-label="recon home"><svg width="28" height="28" viewBox="0 0 80 80" fill="none" style="vertical-align:-4px;margin-right:8px"><circle cx="40" cy="40" r="4" fill="currentColor"/><circle cx="40" cy="40" r="14" stroke="currentColor" stroke-width="1.5"/><circle cx="40" cy="40" r="24" stroke="currentColor" stroke-width="1" opacity="0.55"/><circle cx="40" cy="40" r="34" stroke="currentColor" stroke-width="1" opacity="0.25"/><line x1="40" y1="40" x2="68" y2="20" stroke="var(--clay)" stroke-width="2" stroke-linecap="round"/><circle cx="68" cy="20" r="3.5" fill="var(--clay)"/></svg>recon<span class="dot"></span></a>
   <ul>
     <li><a href="#tools">Tools</a></li>
     <li><a href="#how">How it works</a></li>
@@ -446,9 +487,9 @@
 <span class="k">Read</span>("crates/recon-search/src/page_rank.rs")
 <span class="c">→ 218 lines  ·  ~3,600 tokens</span>
 
-<span class="c">subtotal</span> <span class="k">≈ 12,500 tokens</span></pre>
+<span class="c">subtotal</span> <span class="k">≈ 109,000 tokens</span></pre>
         <div class="meter">
-          <div class="lab"><span>tokens burned</span><span>12,500</span></div>
+          <div class="lab"><span>tokens burned</span><span>109,000</span></div>
           <div class="bar"><div class="fill" style="width:100%"></div></div>
         </div>
       </div>
@@ -468,10 +509,10 @@
 <span class="h">code_skeleton</span>("…/page_rank.rs")
 <span class="c">→ signatures + docs  ·  ~340 tokens</span>
 
-<span class="c">subtotal</span> <span class="h">≈ 1,260 tokens</span></pre>
+<span class="c">subtotal</span> <span class="h">≈ 3,100 tokens</span></pre>
         <div class="meter">
-          <div class="lab"><span>tokens burned</span><span>1,260 &nbsp;·&nbsp; ~10× less</span></div>
-          <div class="bar"><div class="fill" style="width:10%"></div></div>
+          <div class="lab"><span>tokens burned</span><span>3,100 &nbsp;·&nbsp; ~35× less</span></div>
+          <div class="bar"><div class="fill" style="width:3%"></div></div>
         </div>
       </div>
     </div>
