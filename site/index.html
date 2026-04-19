@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>recon — token-lean code intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:       oklch(98.5% 0.004 80);
+    --paper-2:     oklch(96.5% 0.006 80);
+    --rule:        oklch(88%   0.006 80);
+    --rule-soft:   oklch(93%   0.005 80);
+    --ink:         oklch(22%   0.01  60);
+    --ink-2:       oklch(40%   0.01  60);
+    --ink-3:       oklch(58%   0.01  60);
+    --clay:        oklch(58%   0.14  45);
+    --clay-soft:   oklch(94%   0.03  45);
+
+    --serif:  'Instrument Serif', 'Times New Roman', serif;
+    --sans:   'Geist', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+    --mono:   'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{background:var(--paper);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+  body{font-size:15px;line-height:1.55;letter-spacing:-0.005em}
+  a{color:inherit;text-decoration:none}
+  ::selection{background:var(--clay);color:var(--paper)}
+
+  .wrap{max-width:1180px;margin:0 auto;padding:0 40px}
+  @media (max-width:720px){ .wrap{padding:0 24px} }
+
+  /* ─────── NAV ─────── */
+  nav.top{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:22px 40px;border-bottom:1px solid var(--rule-soft);
+    position:sticky;top:0;background:color-mix(in oklab, var(--paper) 85%, transparent);
+    backdrop-filter:saturate(1.2) blur(8px);z-index:10;
+  }
+  nav.top .mark{font-family:var(--serif);font-size:22px;letter-spacing:-0.01em;display:flex;align-items:baseline;gap:8px}
+  nav.top .mark em{font-style:italic;color:var(--clay)}
+  nav.top .dot{width:5px;height:5px;border-radius:50%;background:var(--clay);display:inline-block;transform:translateY(-3px)}
+  nav.top ul{display:flex;gap:28px;list-style:none;font-size:13px;color:var(--ink-2)}
+  nav.top ul a:hover{color:var(--ink)}
+  nav.top .ship{font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:0.02em}
+  nav.top .ship span{color:var(--clay)}
+  @media (max-width:720px){ nav.top ul{display:none} nav.top{padding:18px 24px} }
+
+  /* ─────── HERO ─────── */
+  .hero{padding:96px 0 80px;border-bottom:1px solid var(--rule-soft);position:relative}
+  .hero .grid{display:grid;grid-template-columns:1.15fr 0.85fr;gap:64px;align-items:end}
+  @media (max-width:900px){ .hero .grid{grid-template-columns:1fr;gap:48px} .hero{padding:64px 0 56px} }
+
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);display:flex;align-items:center;gap:10px}
+  .eyebrow .line{flex:0 0 28px;height:1px;background:var(--ink-3)}
+
+  h1.display{
+    font-family:var(--serif);
+    font-size:clamp(72px, 12vw, 168px);
+    line-height:0.92;letter-spacing:-0.035em;
+    margin-top:28px;
+    font-weight:400;
+  }
+  h1.display em{font-style:italic;color:var(--clay)}
+  h1.display .amp{font-style:italic;color:var(--ink-3);font-size:0.75em;vertical-align:0.06em}
+
+  .lede{
+    margin-top:28px;max-width:560px;font-size:19px;line-height:1.5;color:var(--ink-2);
+    font-weight:300;letter-spacing:-0.01em;
+  }
+  .lede b{color:var(--ink);font-weight:500}
+
+  .cta{display:flex;gap:10px;margin-top:36px;flex-wrap:wrap}
+  .btn{
+    font-family:var(--mono);font-size:12px;letter-spacing:0.02em;
+    padding:13px 18px;border-radius:2px;display:inline-flex;align-items:center;gap:10px;
+    transition:transform .15s ease, background .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .btn.primary{background:var(--ink);color:var(--paper)}
+  .btn.primary:hover{background:var(--clay)}
+  .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--rule)}
+  .btn.ghost:hover{border-color:var(--ink)}
+  .btn .arr{display:inline-block;transition:transform .2s}
+  .btn:hover .arr{transform:translateX(3px)}
+
+  /* terminal panel */
+  .panel{
+    background:var(--paper-2);border:1px solid var(--rule);
+    border-radius:4px;padding:18px 20px;
+    font-family:var(--mono);font-size:12.5px;line-height:1.75;color:var(--ink-2);
+    box-shadow: 0 1px 0 var(--rule-soft), 0 24px 48px -36px rgba(0,0,0,0.12);
+  }
+  .panel .bar{display:flex;align-items:center;gap:6px;margin-bottom:14px;color:var(--ink-3);font-size:11px}
+  .panel .bar .d{width:8px;height:8px;border-radius:50%;background:var(--rule)}
+  .panel .bar .d.a{background:var(--clay)}
+  .panel .bar .t{margin-left:8px;letter-spacing:0.04em}
+  .panel .prompt{color:var(--ink-3)}
+  .panel .cmd{color:var(--ink)}
+  .panel .hl{color:var(--clay)}
+  .panel .dim{color:var(--ink-3)}
+  .panel .ok{color:oklch(55% 0.13 150)}
+  .panel .row{display:flex;justify-content:space-between;gap:16px}
+  .panel .row span:last-child{color:var(--ink)}
+
+  /* ─────── METRICS STRIP ─────── */
+  .strip{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--rule-soft)}
+  .strip .cell{padding:36px 28px;border-left:1px solid var(--rule-soft)}
+  .strip .cell:first-child{border-left:none}
+  .strip .k{font-family:var(--mono);font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3)}
+  .strip .v{font-family:var(--serif);font-size:54px;line-height:1;margin-top:14px;letter-spacing:-0.02em}
+  .strip .v sub{font-family:var(--mono);font-size:13px;color:var(--ink-3);letter-spacing:0.02em;margin-left:6px;vertical-align:0.2em}
+  .strip .foot{margin-top:10px;font-size:12px;color:var(--ink-3)}
+  @media (max-width:900px){ .strip{grid-template-columns:repeat(2,1fr)} .strip .cell:nth-child(3){border-left:none} .strip .cell{padding:28px 24px} }
+
+  /* ─────── SECTION HEADER ─────── */
+  section{padding:112px 0;border-bottom:1px solid var(--rule-soft)}
+  .sechdr{display:grid;grid-template-columns:1fr 2fr;gap:48px;align-items:baseline;margin-bottom:56px}
+  @media (max-width:900px){ .sechdr{grid-template-columns:1fr;gap:16px;margin-bottom:40px} section{padding:80px 0} }
+  .sechdr .no{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;color:var(--ink-3);text-transform:uppercase}
+  .sechdr .no em{color:var(--clay);font-style:normal}
+  .sechdr h2{font-family:var(--serif);font-size:clamp(40px,5vw,64px);line-height:1.02;letter-spacing:-0.025em;font-weight:400;max-width:780px}
+  .sechdr h2 em{font-style:italic;color:var(--clay)}
+
+  /* ─────── TOOLS TABLE ─────── */
+  .tools{border-top:1px solid var(--rule)}
+  .tools .row{
+    display:grid;grid-template-columns:220px 120px 1fr 80px;gap:24px;align-items:baseline;
+    padding:22px 4px;border-bottom:1px solid var(--rule-soft);
+    transition:background .15s, padding .15s;
+  }
+  .tools .row:hover{background:var(--paper-2);padding-left:12px}
+  .tools .row .name{font-family:var(--mono);font-size:13.5px;color:var(--ink)}
+  .tools .row .name .paren{color:var(--ink-3)}
+  .tools .row .replaces{font-family:var(--mono);font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:var(--clay)}
+  .tools .row .desc{font-size:14px;color:var(--ink-2);line-height:1.5}
+  .tools .row .lat{font-family:var(--mono);font-size:12px;color:var(--ink-3);text-align:right}
+  @media (max-width:900px){
+    .tools .row{grid-template-columns:1fr;gap:4px;padding:18px 4px}
+    .tools .row .lat{text-align:left}
+  }
+
+  /* ─────── COMPARISON ─────── */
+  .compare{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft)}
+  .compare .col{background:var(--paper);padding:36px 32px}
+  .compare .col.b{background:var(--paper-2)}
+  .compare .tag{font-family:var(--mono);font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-3);display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}
+  .compare .tag .pill{padding:3px 9px;border:1px solid var(--rule);border-radius:999px;font-size:10px}
+  .compare .col.b .tag .pill{border-color:var(--clay);color:var(--clay)}
+  .compare pre{font-family:var(--mono);font-size:12.5px;line-height:1.75;color:var(--ink-2);white-space:pre-wrap;word-break:break-word}
+  .compare pre .k{color:var(--ink)}
+  .compare pre .c{color:var(--ink-3)}
+  .compare pre .h{color:var(--clay)}
+  .compare .meter{margin-top:26px;padding-top:20px;border-top:1px dashed var(--rule)}
+  .compare .meter .lab{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:8px}
+  .compare .bar{height:6px;background:var(--rule-soft);border-radius:999px;overflow:hidden}
+  .compare .bar .fill{height:100%;background:var(--ink-3);border-radius:999px}
+  .compare .col.b .bar .fill{background:var(--clay)}
+  @media (max-width:720px){ .compare{grid-template-columns:1fr} }
+
+  /* ─────── INSTALL ─────── */
+  .install-grid{display:grid;grid-template-columns:1fr 1fr;gap:32px}
+  @media (max-width:900px){ .install-grid{grid-template-columns:1fr} }
+  .step{border-top:1px solid var(--rule)}
+  .step .n{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;color:var(--clay);padding:20px 0 10px;text-transform:uppercase}
+  .step h3{font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin-bottom:14px;line-height:1.1}
+  .step p{color:var(--ink-2);margin-bottom:16px;max-width:460px}
+  .step pre{
+    font-family:var(--mono);font-size:12.5px;color:var(--ink);
+    background:var(--paper-2);border:1px solid var(--rule);border-radius:3px;
+    padding:14px 16px;overflow-x:auto;line-height:1.6;
+  }
+  .step pre .c{color:var(--ink-3)}
+  .step pre .h{color:var(--clay)}
+
+  /* ─────── QUOTE / FOOTER LEAD ─────── */
+  .quote{padding:120px 0 120px}
+  .quote blockquote{
+    font-family:var(--serif);font-size:clamp(36px,4.4vw,58px);
+    line-height:1.08;letter-spacing:-0.025em;max-width:980px;font-weight:400;
+  }
+  .quote blockquote em{font-style:italic;color:var(--clay)}
+  .quote .byline{margin-top:32px;font-family:var(--mono);font-size:11px;letter-spacing:0.1em;color:var(--ink-3);text-transform:uppercase}
+
+  /* ─────── FOOTER ─────── */
+  footer{padding:56px 0 40px}
+  footer .grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:32px;padding-bottom:40px;border-bottom:1px solid var(--rule-soft)}
+  footer h4{font-family:var(--mono);font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:14px;font-weight:500}
+  footer ul{list-style:none;display:flex;flex-direction:column;gap:9px}
+  footer ul a{font-size:13.5px;color:var(--ink-2)}
+  footer ul a:hover{color:var(--clay)}
+  footer .mark{font-family:var(--serif);font-size:44px;letter-spacing:-0.03em;line-height:1}
+  footer .mark em{font-style:italic;color:var(--clay)}
+  footer .blurb{color:var(--ink-3);font-size:13px;margin-top:14px;max-width:300px}
+  footer .bottom{display:flex;justify-content:space-between;align-items:center;padding-top:22px;font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:0.04em}
+  @media (max-width:900px){ footer .grid{grid-template-columns:1fr 1fr;gap:32px} }
+  @media (max-width:540px){ footer .grid{grid-template-columns:1fr} footer .bottom{flex-direction:column;gap:10px;align-items:flex-start} }
+
+  /* Marquee of languages */
+  .langs{
+    display:flex;gap:40px;align-items:center;padding:24px 0;
+    font-family:var(--serif);font-size:28px;color:var(--ink-3);
+    border-top:1px solid var(--rule-soft);border-bottom:1px solid var(--rule-soft);
+    overflow:hidden;white-space:nowrap;
+  }
+  .langs span{display:inline-flex;align-items:center;gap:40px}
+  .langs em{font-style:italic;color:var(--clay);margin:0 4px}
+  .langs .sep{width:4px;height:4px;background:var(--ink-3);border-radius:50%;display:inline-block}
+
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="top">
+  <a href="#" class="mark">recon<span class="dot"></span></a>
+  <ul>
+    <li><a href="#tools">Tools</a></li>
+    <li><a href="#how">How it works</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="./Docs.html">Docs</a></li>
+  </ul>
+  <div class="ship">v0.1.0 · <span>shipping</span></div>
+</nav>
+
+<!-- HERO -->
+<header class="hero">
+  <div class="wrap">
+    <div class="grid">
+      <div>
+        <div class="eyebrow"><span class="line"></span> MCP server · hosted · zero-install for agents</div>
+        <h1 class="display">Read <em>less,</em><br/>understand <em>more.</em></h1>
+        <p class="lede">
+          <b>recon</b> is a token-lean code intelligence <b>MCP server</b> for AI coding agents.
+          It replaces <i>Read</i>, <i>Grep</i>, and <i>Glob</i> with symbol-aware tools that
+          deliver a <b>5–10× token reduction</b> on typical exploration tasks — without losing
+          a single useful detail.
+        </p>
+        <div class="cta">
+          <a class="btn primary" href="#install">Connect your agent <span class="arr">→</span></a>
+          <a class="btn ghost" href="#tools">Browse the 12 tools</a>
+        </div>
+      </div>
+
+      <!-- Terminal -->
+      <div class="panel" aria-hidden="true">
+        <div class="bar">
+          <span class="d a"></span><span class="d"></span><span class="d"></span>
+          <span class="t">~/projects/acme &nbsp;·&nbsp; recon</span>
+        </div>
+        <div><span class="prompt">$ </span><span class="cmd">agent.mcp.connect <span class="hl">"recon"</span></span></div>
+        <div class="dim">  → handshake ok · 12 tools registered</div>
+        <div class="dim">  → <span class="ok">ready</span> in <span class="hl">180 ms</span></div>
+        <div>&nbsp;</div>
+        <div><span class="prompt">→ </span><span class="cmd">code_find_symbol <span class="hl">"render_map"</span></span></div>
+        <div class="row"><span>  recon-search/src/map.rs</span><span>L142</span></div>
+        <div class="row"><span>  <span class="dim">fn</span> render_map(budget: usize) -> Map</span><span class="dim">pub</span></div>
+        <div class="row"><span>  <span class="dim">refs:</span> 7 callers across 3 files</span><span class="ok">25 µs</span></div>
+        <div>&nbsp;</div>
+        <div><span class="prompt">→ </span><span class="cmd">code_repo_map budget=<span class="hl">2000</span></span></div>
+        <div class="dim">  · pageranked 638 symbols · 3.4 ms</div>
+        <div class="dim">  · tokens used: <span class="hl">1,942</span> / 2,000</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- METRICS -->
+<section class="strip" style="padding:0;border-bottom:1px solid var(--rule-soft)">
+  <div class="cell">
+    <div class="k">Query p50</div>
+    <div class="v">11<sub>ms</sub></div>
+    <div class="foot">Rust compiler · 318K symbols</div>
+  </div>
+  <div class="cell">
+    <div class="k">Token reduction</div>
+    <div class="v">15–30<sub>×</sub></div>
+    <div class="foot">vs Read/Grep/Glob on exploration</div>
+  </div>
+  <div class="cell">
+    <div class="k">Index freshness</div>
+    <div class="v">&lt;1<sub>s</sub></div>
+    <div class="foot">file save → queryable</div>
+  </div>
+  <div class="cell">
+    <div class="k">Languages</div>
+    <div class="v">9</div>
+    <div class="foot">tree-sitter · Rust, Python, TS, Go, Java, C, C++</div>
+  </div>
+</section>
+
+<!-- Languages marquee -->
+<div class="langs" aria-hidden="true">
+  <span>
+    Rust <em>·</em> Python <em>·</em> TypeScript <em>·</em> TSX <em>·</em> JavaScript
+    <em>·</em> Go <em>·</em> Java <em>·</em> C <em>·</em> C++
+    <em>·</em> Rust <em>·</em> Python <em>·</em> TypeScript <em>·</em> TSX <em>·</em> JavaScript
+    <em>·</em> Go <em>·</em> Java <em>·</em> C <em>·</em> C++
+  </span>
+</div>
+
+<!-- TOOLS -->
+<section id="tools">
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>01</em> &nbsp;— &nbsp;Tools</div>
+      <h2>Twelve tools that speak <em>symbols,</em> not strings.</h2>
+    </div>
+
+    <div class="tools">
+      <div class="row">
+        <div class="name">code_outline<span class="paren">(path)</span></div>
+        <div class="replaces">↳ Read</div>
+        <div class="desc">One line per symbol — kind, name, line. Skim a 2000-line file in a single screen.</div>
+        <div class="lat">&lt;1 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_skeleton<span class="paren">(path)</span></div>
+        <div class="replaces">↳ Read</div>
+        <div class="desc">Signatures and docs only; bodies collapse to <code>…</code>. About 10× compression vs. full read.</div>
+        <div class="lat">&lt;2 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_read_symbol<span class="paren">(…)</span></div>
+        <div class="replaces">↳ Read</div>
+        <div class="desc">Pull a single function, its signature, doc, body — and every caller — without loading the file.</div>
+        <div class="lat">&lt;3 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_find_symbol<span class="paren">(name)</span></div>
+        <div class="replaces">↳ Grep</div>
+        <div class="desc">Three-tier resolver: exact SQLite → Tantivy BM25 → FTS5 trigram with nucleo fuzzy rescore.</div>
+        <div class="lat">25 µs</div>
+      </div>
+      <div class="row">
+        <div class="name">code_find_refs<span class="paren">(…)</span></div>
+        <div class="replaces">↳ Grep</div>
+        <div class="desc">Reference count and the top-k call sites for any symbol in the repo.</div>
+        <div class="lat">&lt;5 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_search<span class="paren">(query, mode)</span></div>
+        <div class="replaces">↳ Grep</div>
+        <div class="desc">Exact · regex · hybrid · semantic. Filter DSL: <code>type:rust status:modified !test</code>.</div>
+        <div class="lat">&lt;15 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_list<span class="paren">(glob?)</span></div>
+        <div class="replaces">↳ Glob</div>
+        <div class="desc">Structured file listing with top symbols for each match — not just paths.</div>
+        <div class="lat">&lt;2 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_repo_map<span class="paren">(budget)</span></div>
+        <div class="replaces">—</div>
+        <div class="desc">PageRank-ranked repo overview, strictly bounded to a tiktoken budget you control.</div>
+        <div class="lat">3.4 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_find_strings<span class="paren">(…)</span></div>
+        <div class="replaces">—</div>
+        <div class="desc">Search string literals and comments separately from identifiers. Grep, but narrower.</div>
+        <div class="lat">&lt;10 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_multi_find<span class="paren">(patterns[])</span></div>
+        <div class="replaces">—</div>
+        <div class="desc">Fan out several patterns through the TextSearcher trait in a single call.</div>
+        <div class="lat">&lt;20 ms</div>
+      </div>
+      <div class="row">
+        <div class="name">code_reindex<span class="paren">()</span></div>
+        <div class="replaces">—</div>
+        <div class="desc">Agent-triggered re-index. Useful after a batch edit the watcher may not have seen.</div>
+        <div class="lat">6 ms*</div>
+      </div>
+      <div class="row">
+        <div class="name">code_stats<span class="paren">()</span></div>
+        <div class="replaces">—</div>
+        <div class="desc">Index health: symbols, files, commit SHA, freshness, backend versions.</div>
+        <div class="lat">&lt;1 ms</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- COMPARISON -->
+<section id="how">
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>02</em> &nbsp;— &nbsp;The difference</div>
+      <h2>An agent reading code shouldn't burn the <em>context window</em> doing it.</h2>
+    </div>
+
+    <div class="compare">
+      <div class="col">
+        <div class="tag">
+          <span>Without recon</span>
+          <span class="pill">Read · Grep · Glob</span>
+        </div>
+<pre><span class="c">// agent wants to understand render_map</span>
+<span class="k">Read</span>("crates/recon-search/src/map.rs")
+<span class="c">→ 412 lines  ·  ~6,800 tokens</span>
+
+<span class="k">Grep</span>("render_map", "crates/**")
+<span class="c">→ 34 matches  ·  ~2,100 tokens</span>
+
+<span class="k">Read</span>("crates/recon-search/src/page_rank.rs")
+<span class="c">→ 218 lines  ·  ~3,600 tokens</span>
+
+<span class="c">subtotal</span> <span class="k">≈ 12,500 tokens</span></pre>
+        <div class="meter">
+          <div class="lab"><span>tokens burned</span><span>12,500</span></div>
+          <div class="bar"><div class="fill" style="width:100%"></div></div>
+        </div>
+      </div>
+
+      <div class="col b">
+        <div class="tag">
+          <span>With recon</span>
+          <span class="pill">code_*</span>
+        </div>
+<pre><span class="c">// same question, symbol-first</span>
+<span class="h">code_find_symbol</span>("render_map")
+<span class="c">→ 1 hit, 3 ranked callers  ·  ~140 tokens</span>
+
+<span class="h">code_read_symbol</span>("…/map.rs", "render_map")
+<span class="c">→ body + 7 call sites  ·  ~780 tokens</span>
+
+<span class="h">code_skeleton</span>("…/page_rank.rs")
+<span class="c">→ signatures + docs  ·  ~340 tokens</span>
+
+<span class="c">subtotal</span> <span class="h">≈ 1,260 tokens</span></pre>
+        <div class="meter">
+          <div class="lab"><span>tokens burned</span><span>1,260 &nbsp;·&nbsp; ~10× less</span></div>
+          <div class="bar"><div class="fill" style="width:10%"></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE PRINCIPLES -->
+<section>
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>03</em> &nbsp;— &nbsp;Principles</div>
+      <h2>Built on four small, stubborn <em>ideas.</em></h2>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft)">
+      <div style="background:var(--paper);padding:36px 32px">
+        <div class="eyebrow"><span class="line"></span> I</div>
+        <h3 style="font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin:14px 0 10px">Symbols first, bytes last.</h3>
+        <p style="color:var(--ink-2);max-width:420px">Everything tree-sitter can name is a first-class citizen. Everything else is noise the agent should never pay for.</p>
+      </div>
+      <div style="background:var(--paper);padding:36px 32px">
+        <div class="eyebrow"><span class="line"></span> II</div>
+        <h3 style="font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin:14px 0 10px">Five output shapes. No more.</h3>
+        <p style="color:var(--ink-2);max-width:420px">Every tool response is one of five canonical shapes in <code>recon-core::shapes</code>. Predictable for the model, cheap to parse.</p>
+      </div>
+      <div style="background:var(--paper);padding:36px 32px">
+        <div class="eyebrow"><span class="line"></span> III</div>
+        <h3 style="font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin:14px 0 10px">Incremental by default.</h3>
+        <p style="color:var(--ink-2);max-width:420px">gix ColdStart skips reparse on unchanged HEAD. A blake3 Merkle tree reindexes only what moved. First keystroke to queryable: under a second.</p>
+      </div>
+      <div style="background:var(--paper);padding:36px 32px">
+        <div class="eyebrow"><span class="line"></span> IV</div>
+        <h3 style="font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin:14px 0 10px">Secrets stay redacted.</h3>
+        <p style="color:var(--ink-2);max-width:420px">Every tool response passes through secret redaction — AWS keys, PEM blocks, API tokens are stripped before they reach the agent. Per-key tenant isolation.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- INSTALL -->
+<section id="install">
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>04</em> &nbsp;— &nbsp;Connect</div>
+      <h2>A hosted MCP server. No <em>install,</em> no binary.</h2>
+    </div>
+
+    <div class="install-grid">
+      <div class="step">
+        <div class="n">Step 01</div>
+        <h3>Grab an API key</h3>
+        <p>Sign up at <code>recon.dev</code> and generate a server key for your workspace. Takes about 15 seconds.</p>
+<pre><span class="c"># your key looks like this</span>
+<span class="h">RECON_KEY</span>=rk_live_9f2c…</pre>
+      </div>
+
+      <div class="step">
+        <div class="n">Step 02</div>
+        <h3>Point your agent at the server</h3>
+        <p>Drop this into your agent's MCP config. That's the whole setup — no local indexing, no watcher, no build step.</p>
+<pre>{
+  <span class="h">"mcpServers"</span>: {
+    <span class="h">"recon"</span>: {
+      "url": "https://mcp.recon.dev/v1",
+      "headers": {
+        "Authorization": "Bearer $RECON_KEY"
+      }
+    }
+  }
+}</pre>
+      </div>
+
+      <div class="step">
+        <div class="n">Step 03</div>
+        <h3>Teach your agent</h3>
+        <p>One line in your agent's system prompt reorders its habits toward the <code>code_*</code> tools.</p>
+<pre><span class="c"># agent rules</span>
+Use <span class="h">code_*</span> tools (outline, skeleton,
+find_symbol, search, repo_map) before
+Read/Grep/Glob when exploring code.</pre>
+      </div>
+
+      <div class="step">
+        <div class="n">Step 04</div>
+        <h3>Query from anywhere</h3>
+        <p>Use <code>rr</code> — the open-source CLI client — to query your repos from the terminal. Or let your MCP agent handle it.</p>
+<pre><span class="c"># install the public CLI</span>
+cargo install rr
+
+<span class="c"># query your hosted repos</span>
+<span class="h">rr</span> find TyCtxt
+<span class="h">rr</span> map --budget 2000
+<span class="h">rr</span> outline src/main.rs</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- QUOTE -->
+<section class="quote" style="border-bottom:1px solid var(--rule-soft)">
+  <div class="wrap">
+    <blockquote>
+      “The agent should spend its tokens <em>thinking,</em> not reading. recon gives back
+      the context window — and most of the wall-clock — that Read and Grep quietly took.”
+    </blockquote>
+    <div class="byline">— design note, recon-core · v0.4</div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="grid">
+      <div>
+        <div class="mark">recon<em>.</em></div>
+        <p class="blurb">Token-lean code intelligence for AI coding agents. MIT / Apache-2.0.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <ul>
+          <li><a href="#tools">Tools</a></li>
+          <li><a href="#how">How it works</a></li>
+          <li><a href="#install">Install</a></li>
+          <li><a href="#">Changelog</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Docs</h4>
+        <ul>
+          <li><a href="./Docs.html#introduction">Architecture</a></li>
+          <li><a href="./Docs.html#filter-dsl">Filter DSL</a></li>
+          <li><a href="./Docs.html#adrs">ADRs</a></li>
+          <li><a href="./Docs.html#performance">Benchmarks</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Project</h4>
+        <ul>
+          <li><a href="./Docs.html#changelog">Changelog</a></li>
+          <li><a href="./Docs.html#security">Security</a></li>
+          <li><a href="./Docs.html#adrs">ADRs</a></li>
+          <li><a href="./Docs.html#license">License</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="bottom wrap" style="padding-left:0;padding-right:0">
+      <div>© 2026 recon · crafted in Rust</div>
+      <div>p99 &lt; 100 ms · 107 tests · stdout-clean</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
