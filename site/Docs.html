@@ -21,6 +21,28 @@
     --sans:   'Geist', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
     --mono:   'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   }
+  [data-theme="dark"]{
+    --paper:       oklch(12%   0.005 260);
+    --paper-2:     oklch(16%   0.006 260);
+    --rule:        oklch(24%   0.006 260);
+    --rule-soft:   oklch(20%   0.005 260);
+    --ink:         oklch(92%   0.008 80);
+    --ink-2:       oklch(72%   0.008 80);
+    --ink-3:       oklch(50%   0.008 80);
+    --clay:        oklch(65%   0.16  45);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:       oklch(12%   0.005 260);
+      --paper-2:     oklch(16%   0.006 260);
+      --rule:        oklch(24%   0.006 260);
+      --rule-soft:   oklch(20%   0.005 260);
+      --ink:         oklch(92%   0.008 80);
+      --ink-2:       oklch(72%   0.008 80);
+      --ink-3:       oklch(50%   0.008 80);
+      --clay:        oklch(65%   0.16  45);
+    }
+  }
   *{margin:0;padding:0;box-sizing:border-box}
   html{scroll-behavior:smooth}
   html,body{background:var(--paper);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
@@ -140,7 +162,15 @@
     <li><a href="Landing Page.html#install">Install</a></li>
     <li><a class="active" href="Docs.html">Docs</a></li>
   </ul>
-  <div class="ship">v0.1.0 · <span>shipping</span></div>
+  <div style="display:flex;align-items:center;gap:16px">
+    <button id="theme-toggle" aria-label="Toggle theme" style="
+      background:none;border:1px solid var(--rule);border-radius:50%;
+      width:32px;height:32px;cursor:pointer;display:flex;align-items:center;
+      justify-content:center;color:var(--ink-3);transition:border-color .15s,color .15s;
+      font-size:14px;
+    "><span id="theme-icon">◑</span></button>
+    <div class="ship">v0.1.0 · <span>shipping</span></div>
+  </div>
 </nav>
 
 <div class="shell">
@@ -485,6 +515,27 @@ allow_sensitive = <span class="h">false</span></pre>
     });
   }, { rootMargin: '-96px 0px -70% 0px', threshold: 0 });
   ids.forEach(id => { const el = document.getElementById(id); if (el) io.observe(el); });
+</script>
+
+<script>
+(function(){
+  const btn = document.getElementById('theme-toggle');
+  const icon = document.getElementById('theme-icon');
+  const html = document.documentElement;
+  function getTheme(){
+    return localStorage.getItem('theme') ||
+      (matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
+  }
+  function apply(t){
+    html.setAttribute('data-theme', t);
+    icon.textContent = t === 'dark' ? '☀' : '◑';
+    localStorage.setItem('theme', t);
+  }
+  apply(getTheme());
+  btn.addEventListener('click', function(){ apply(getTheme() === 'dark' ? 'light' : 'dark'); });
+  btn.addEventListener('mouseenter', function(){ btn.style.borderColor = 'var(--ink-2)'; btn.style.color = 'var(--ink)'; });
+  btn.addEventListener('mouseleave', function(){ btn.style.borderColor = 'var(--rule)'; btn.style.color = 'var(--ink-3)'; });
+})();
 </script>
 
 </body>
