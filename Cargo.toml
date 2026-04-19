@@ -108,6 +108,8 @@ mimalloc = "0.1"
 tempfile = "3.27.0"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = true
+panic = "abort"
+opt-level = 3

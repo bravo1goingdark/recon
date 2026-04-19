@@ -31,9 +31,10 @@ impl Store {
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA foreign_keys=ON;
-             PRAGMA cache_size=-8000;
+             PRAGMA cache_size=-32000;
              PRAGMA mmap_size=268435456;
-             PRAGMA temp_store=MEMORY;",
+             PRAGMA temp_store=MEMORY;
+             PRAGMA optimize;",
         )
         .map_err(|e| Error::Storage(e.to_string()))?;
 

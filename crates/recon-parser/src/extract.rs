@@ -28,15 +28,15 @@ struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     fn new(src: &'a str, path: &'a Path, lang: Language) -> Self {
-        // Estimate: ~1 symbol per 10 lines, ~2 refs per symbol
+        // Estimate: ~1 symbol per 5 lines, ~3 refs per symbol
         let line_count = src.as_bytes().iter().filter(|&&b| b == b'\n').count();
-        let est_symbols = (line_count / 10).max(4);
+        let est_symbols = (line_count / 5).max(8);
         Self {
             src,
             path_buf: path.to_path_buf(),
             lang,
             symbols: Vec::with_capacity(est_symbols),
-            refs: Vec::with_capacity(est_symbols * 2),
+            refs: Vec::with_capacity(est_symbols * 3),
             next_id: 1,
             qname_buf: String::with_capacity(128),
         }
