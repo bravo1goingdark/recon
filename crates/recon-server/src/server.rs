@@ -81,6 +81,63 @@ impl ReconServer {
         Ok(())
     }
 
+    /// Dispatch a tool call by name with JSON arguments. For CLI `query` subcommand.
+    ///
+    /// Returns the tool's JSON response string, or an error message.
+    pub async fn query_tool(&self, tool_name: &str, args_json: &str) -> String {
+        match tool_name {
+            "code_outline" => match serde_json::from_str::<OutlineParams>(args_json) {
+                Ok(p) => self.code_outline(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_skeleton" => match serde_json::from_str::<SkeletonParams>(args_json) {
+                Ok(p) => self.code_skeleton(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_read_symbol" => match serde_json::from_str::<ReadSymbolParams>(args_json) {
+                Ok(p) => self.code_read_symbol(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_find_symbol" => match serde_json::from_str::<FindSymbolParams>(args_json) {
+                Ok(p) => self.code_find_symbol(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_find_refs" => match serde_json::from_str::<FindRefsParams>(args_json) {
+                Ok(p) => self.code_find_refs(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_search" => match serde_json::from_str::<SearchParams>(args_json) {
+                Ok(p) => self.code_search(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_list" => match serde_json::from_str::<ListParams>(args_json) {
+                Ok(p) => self.code_list(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_repo_map" => match serde_json::from_str::<RepoMapParams>(args_json) {
+                Ok(p) => self.code_repo_map(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_find_strings" => match serde_json::from_str::<FindStringsParams>(args_json) {
+                Ok(p) => self.code_find_strings(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_multi_find" => match serde_json::from_str::<MultiFindParams>(args_json) {
+                Ok(p) => self.code_multi_find(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_reindex" => match serde_json::from_str::<ReindexParams>(args_json) {
+                Ok(p) => self.code_reindex(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            "code_stats" => match serde_json::from_str::<StatsParams>(args_json) {
+                Ok(p) => self.code_stats(Parameters(p)).await,
+                Err(e) => format!("invalid args: {e}"),
+            },
+            _ => format!("unknown tool: {tool_name}"),
+        }
+    }
+
     /// Start background file watcher that re-indexes on changes.
     pub fn start_watcher(&self) {
         let store = self.store.clone();
