@@ -1,0 +1,21 @@
+[package]
+name = "recon-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MCP server handler and tool implementations for recon"
+
+[dependencies]
+recon-core = { workspace = true }
+recon-storage = { workspace = true }
+recon-search = { workspace = true }
+recon-indexer = { workspace = true }
+recon-parser = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+tracing = { workspace = true }
+compact_str = { workspace = true }

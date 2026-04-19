@@ -1,0 +1,26 @@
+# Build
+target/
+debug/
+
+# Index artifacts
+.recon/
+*.db
+*.tantivy/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust
+**/*.rs.bk
+*.pdb
+
+# Mutation testing
+**/mutants.out*/
+
+CLAUDE.md

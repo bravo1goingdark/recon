@@ -1,0 +1,23 @@
+[package]
+name = "recon-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CLI binary for recon MCP server"
+
+[[bin]]
+name = "recon"
+path = "src/main.rs"
+
+[dependencies]
+recon-core = { workspace = true }
+recon-storage = { workspace = true }
+recon-indexer = { workspace = true }
+recon-server = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

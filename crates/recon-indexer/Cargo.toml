@@ -1,0 +1,22 @@
+[package]
+name = "recon-indexer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Merkle walker, file watcher, and incremental indexing for recon"
+
+[dependencies]
+recon-core = { workspace = true }
+recon-parser = { workspace = true }
+recon-storage = { workspace = true }
+blake3 = { workspace = true }
+ignore = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }
+crossbeam-queue = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

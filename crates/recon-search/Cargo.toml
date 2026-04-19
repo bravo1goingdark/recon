@@ -1,0 +1,20 @@
+[package]
+name = "recon-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Text search, Tantivy structured search, and hybrid search for recon"
+
+[dependencies]
+recon-core = { workspace = true }
+recon-storage = { workspace = true }
+grep-matcher = { workspace = true }
+grep-regex = { workspace = true }
+grep-searcher = { workspace = true }
+nucleo = { workspace = true }
+tracing = { workspace = true }
+compact_str = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
