@@ -21,6 +21,12 @@ crossbeam-queue = { workspace = true }
 compact_str = { workspace = true }
 blake3 = { workspace = true }
 tracing = { workspace = true }
+smallvec = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "parser_bench"
+harness = false

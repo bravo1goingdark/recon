@@ -7,40 +7,70 @@ use std::path::Path;
 
 /// Result of extracting symbols from a source file.
 pub struct Extracted {
+    /// Extracted symbol definitions.
     pub symbols: Vec<Symbol>,
+    /// Extracted symbol references.
     pub refs: Vec<Ref>,
 }
 
 /// Mutable extraction context threaded through all extractors.
 struct Ctx<'a> {
     src: &'a str,
-    path: &'a Path,
+    /// Cached PathBuf — allocated once, cloned per symbol/ref.
+    path_buf: std::path::PathBuf,
     lang: Language,
     symbols: Vec<Symbol>,
     refs: Vec<Ref>,
     next_id: u64,
+    /// Reusable buffer for qualified name construction.
+    qname_buf: String,
 }
 
 impl<'a> Ctx<'a> {
     fn new(src: &'a str, path: &'a Path, lang: Language) -> Self {
-        Self { src, path, lang, symbols: Vec::new(), refs: Vec::new(), next_id: 1 }
+        // Estimate: ~1 symbol per 10 lines, ~2 refs per symbol
+        let line_count = src.as_bytes().iter().filter(|&&b| b == b'\n').count();
+        let est_symbols = (line_count / 10).max(4);
+        Self {
+            src,
+            path_buf: path.to_path_buf(),
+            lang,
+            symbols: Vec::with_capacity(est_symbols),
+            refs: Vec::with_capacity(est_symbols * 2),
+            next_id: 1,
+            qname_buf: String::with_capacity(128),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn push_symbol(
-        &mut self, name: &str, parent_name: Option<&str>, kind: SymbolKind,
-        signature: Option<String>, doc: Option<String>, parent_id: Option<u64>,
+        &mut self,
+        name: &str,
+        parent_name: Option<&str>,
+        kind: SymbolKind,
+        signature: Option<String>,
+        doc: Option<String>,
+        parent_id: Option<u64>,
         node: tree_sitter::Node,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+
+        // Build qualified name in reusable buffer to avoid per-symbol allocation
+        self.qname_buf.clear();
         let qname = match parent_name {
-            Some(p) => CompactString::new(format!("{p}::{name}")),
+            Some(p) => {
+                self.qname_buf.push_str(p);
+                self.qname_buf.push_str("::");
+                self.qname_buf.push_str(name);
+                CompactString::new(&self.qname_buf)
+            }
             None => CompactString::new(name),
         };
+
         self.symbols.push(Symbol {
             id,
-            path: self.path.to_path_buf(),
+            path: self.path_buf.clone(),
             name: CompactString::new(name),
             qualified_name: qname,
             kind,
@@ -48,7 +78,8 @@ impl<'a> Ctx<'a> {
             doc,
             parent_id,
             byte_range: node.start_byte()..node.end_byte(),
-            line_range: (node.start_position().row as u32 + 1)..=(node.end_position().row as u32 + 1),
+            line_range: (node.start_position().row as u32 + 1)
+                ..=(node.end_position().row as u32 + 1),
             body_hash: *blake3::hash(self.src[node.byte_range()].as_bytes()).as_bytes(),
             lang: self.lang,
         });
@@ -57,7 +88,7 @@ impl<'a> Ctx<'a> {
 
     fn push_ref(&mut self, src_symbol_id: u64, ident: &str) {
         self.refs.push(Ref {
-            src_path: self.path.to_path_buf(),
+            src_path: self.path_buf.clone(),
             src_symbol_id,
             ident: CompactString::new(ident),
             dst_symbol_id: None,
@@ -66,21 +97,27 @@ impl<'a> Ctx<'a> {
     }
 
     fn first_line(&self, node: tree_sitter::Node) -> String {
-        self.src[node.byte_range()].lines().next().unwrap_or("").to_string()
+        let slice = &self.src[node.byte_range()];
+        let end = slice.find('\n').unwrap_or(slice.len());
+        slice[..end].to_string()
     }
 
     fn leading_doc(&self, node: tree_sitter::Node) -> Option<String> {
         let mut prev = node.prev_sibling();
-        let mut doc_lines = Vec::new();
+        // Collect doc lines in reverse, then reverse once — avoids repeated Vec inserts
+        let mut doc_parts: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
         while let Some(p) = prev {
             let kind = p.kind();
-            if matches!(kind, "line_comment" | "block_comment" | "comment" | "doc_comment") {
-                doc_lines.push(self.src[p.byte_range()].trim().to_string());
+            if matches!(
+                kind,
+                "line_comment" | "block_comment" | "comment" | "doc_comment"
+            ) {
+                doc_parts.push(self.src[p.byte_range()].trim());
                 prev = p.prev_sibling();
             } else if kind == "expression_statement" {
                 if let Some(child) = p.child(0) {
                     if child.kind() == "string" {
-                        doc_lines.push(self.src[child.byte_range()].trim().to_string());
+                        doc_parts.push(self.src[child.byte_range()].trim());
                     }
                 }
                 break;
@@ -88,15 +125,24 @@ impl<'a> Ctx<'a> {
                 break;
             }
         }
-        if doc_lines.is_empty() { None } else { doc_lines.reverse(); Some(doc_lines.join("\n")) }
+        if doc_parts.is_empty() {
+            None
+        } else {
+            doc_parts.reverse();
+            Some(doc_parts.join("\n"))
+        }
     }
 
     fn child_text<'b>(&self, node: tree_sitter::Node<'b>, field: &str) -> Option<&'a str> {
-        node.child_by_field_name(field).map(|n| &self.src[n.byte_range()])
+        node.child_by_field_name(field)
+            .map(|n| &self.src[n.byte_range()])
     }
 
     fn into_result(self) -> Extracted {
-        Extracted { symbols: self.symbols, refs: self.refs }
+        Extracted {
+            symbols: self.symbols,
+            refs: self.refs,
+        }
     }
 }
 
@@ -108,13 +154,23 @@ type ParentCtx<'a> = Option<(u64, &'a str)>;
 pub fn extract_symbols(src: &[u8], lang: Language, path: &Path) -> Extracted {
     let ts_lang = match crate::languages::ts_language(lang) {
         Some(l) => l,
-        None => return Extracted { symbols: vec![], refs: vec![] },
+        None => {
+            return Extracted {
+                symbols: vec![],
+                refs: vec![],
+            }
+        }
     };
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&ts_lang).expect("set language");
     let tree = match parser.parse(src, None) {
         Some(t) => t,
-        None => return Extracted { symbols: vec![], refs: vec![] },
+        None => {
+            return Extracted {
+                symbols: vec![],
+                refs: vec![],
+            }
+        }
     };
     extract_from_tree(&tree, src, lang, path)
 }
@@ -129,11 +185,19 @@ pub fn extract_symbols_pooled(
     let tree = pool.with(|parser| parser.parse(src, None));
     match tree {
         Some(tree) => extract_from_tree(&tree, src, lang, path),
-        None => Extracted { symbols: vec![], refs: vec![] },
+        None => Extracted {
+            symbols: vec![],
+            refs: vec![],
+        },
     }
 }
 
-fn extract_from_tree(tree: &tree_sitter::Tree, src: &[u8], lang: Language, path: &Path) -> Extracted {
+fn extract_from_tree(
+    tree: &tree_sitter::Tree,
+    src: &[u8],
+    lang: Language,
+    path: &Path,
+) -> Extracted {
     let src_str = std::str::from_utf8(src).unwrap_or("");
     let mut ctx = Ctx::new(src_str, path, lang);
     let root = tree.root_node();
@@ -141,7 +205,9 @@ fn extract_from_tree(tree: &tree_sitter::Tree, src: &[u8], lang: Language, path:
     match lang {
         Language::Rust => extract_rust(&mut ctx, root, None),
         Language::Python => extract_python(&mut ctx, root, None),
-        Language::TypeScript | Language::Tsx | Language::JavaScript => extract_js_ts(&mut ctx, root, None),
+        Language::TypeScript | Language::Tsx | Language::JavaScript => {
+            extract_js_ts(&mut ctx, root, None)
+        }
         Language::Go => extract_go(&mut ctx, root, None),
         Language::Java => extract_java(&mut ctx, root, None),
         Language::C | Language::Cpp => extract_c_cpp(&mut ctx, root, None),
@@ -158,29 +224,61 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
         match child.kind() {
             "function_item" | "function_signature_item" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let kind = if parent.is_some() { SymbolKind::Method } else { SymbolKind::Function };
-                    ctx.push_symbol(name, parent.map(|p| p.1), kind,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let kind = if parent.is_some() {
+                        SymbolKind::Method
+                    } else {
+                        SymbolKind::Function
+                    };
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        kind,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "struct_item" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Struct,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Struct,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     extract_rust_fields(ctx, child, id, name);
                 }
             }
             "enum_item" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Enum,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Enum,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     extract_rust_variants(ctx, child, id, name);
                 }
             }
             "trait_item" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Trait,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Trait,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     extract_rust(ctx, child, Some((id, name)));
                 }
             }
@@ -192,33 +290,68 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
             }
             "const_item" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Const,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Const,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "static_item" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Static,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Static,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "type_item" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Type,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Type,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "mod_item" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Module,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Module,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     extract_rust(ctx, child, Some((id, name)));
                 }
             }
             "macro_definition" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Macro,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Macro,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "identifier" | "type_identifier" | "field_identifier" => {
@@ -246,8 +379,15 @@ fn extract_rust_fields(ctx: &mut Ctx, node: tree_sitter::Node, parent_id: u64, p
             for field in child.children(&mut fc) {
                 if field.kind() == "field_declaration" {
                     if let Some(name) = ctx.child_text(field, "name") {
-                        ctx.push_symbol(name, Some(parent_name), SymbolKind::Field,
-                            Some(ctx.first_line(field)), None, Some(parent_id), field);
+                        ctx.push_symbol(
+                            name,
+                            Some(parent_name),
+                            SymbolKind::Field,
+                            Some(ctx.first_line(field)),
+                            None,
+                            Some(parent_id),
+                            field,
+                        );
                     }
                 }
             }
@@ -255,7 +395,12 @@ fn extract_rust_fields(ctx: &mut Ctx, node: tree_sitter::Node, parent_id: u64, p
     }
 }
 
-fn extract_rust_variants(ctx: &mut Ctx, node: tree_sitter::Node, parent_id: u64, parent_name: &str) {
+fn extract_rust_variants(
+    ctx: &mut Ctx,
+    node: tree_sitter::Node,
+    parent_id: u64,
+    parent_name: &str,
+) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "enum_variant_list" {
@@ -263,8 +408,15 @@ fn extract_rust_variants(ctx: &mut Ctx, node: tree_sitter::Node, parent_id: u64,
             for variant in child.children(&mut vc) {
                 if variant.kind() == "enum_variant" {
                     if let Some(name) = ctx.child_text(variant, "name") {
-                        ctx.push_symbol(name, Some(parent_name), SymbolKind::EnumVariant,
-                            Some(ctx.first_line(variant)), None, Some(parent_id), variant);
+                        ctx.push_symbol(
+                            name,
+                            Some(parent_name),
+                            SymbolKind::EnumVariant,
+                            Some(ctx.first_line(variant)),
+                            None,
+                            Some(parent_id),
+                            variant,
+                        );
                     }
                 }
             }
@@ -280,17 +432,35 @@ fn extract_python(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
         match child.kind() {
             "function_definition" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let kind = if parent.is_some() { SymbolKind::Method } else { SymbolKind::Function };
+                    let kind = if parent.is_some() {
+                        SymbolKind::Method
+                    } else {
+                        SymbolKind::Function
+                    };
                     let doc = python_docstring(ctx, child);
-                    ctx.push_symbol(name, parent.map(|p| p.1), kind,
-                        Some(ctx.first_line(child)), doc, parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        kind,
+                        Some(ctx.first_line(child)),
+                        doc,
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "class_definition" => {
                 if let Some(name) = ctx.child_text(child, "name") {
                     let doc = python_docstring(ctx, child);
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Class,
-                        Some(ctx.first_line(child)), doc, parent.map(|p| p.0), child);
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Class,
+                        Some(ctx.first_line(child)),
+                        doc,
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     if let Some(body) = child.child_by_field_name("body") {
                         extract_python(ctx, body, Some((id, name)));
                     }
@@ -328,15 +498,33 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
         match child.kind() {
             "function_declaration" | "method_definition" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let kind = if child.kind() == "method_definition" { SymbolKind::Method } else { SymbolKind::Function };
-                    ctx.push_symbol(name, parent.map(|p| p.1), kind,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let kind = if child.kind() == "method_definition" {
+                        SymbolKind::Method
+                    } else {
+                        SymbolKind::Function
+                    };
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        kind,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "class_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Class,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Class,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     if let Some(body) = child.child_by_field_name("body") {
                         extract_js_ts(ctx, body, Some((id, name)));
                     }
@@ -344,20 +532,41 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
             }
             "interface_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Interface,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Interface,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "enum_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Enum,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Enum,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "type_alias_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Type,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Type,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "lexical_declaration" | "variable_declaration" => {
@@ -365,11 +574,23 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                 for decl in child.children(&mut dc) {
                     if decl.kind() == "variable_declarator" {
                         if let Some(name) = ctx.child_text(decl, "name") {
-                            let has_fn_value = decl.child_by_field_name("value")
-                                .is_some_and(|v| v.kind() == "arrow_function" || v.kind() == "function");
-                            let kind = if has_fn_value { SymbolKind::Function } else { SymbolKind::Const };
-                            ctx.push_symbol(name, parent.map(|p| p.1), kind,
-                                Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                            let has_fn_value = decl.child_by_field_name("value").is_some_and(|v| {
+                                v.kind() == "arrow_function" || v.kind() == "function"
+                            });
+                            let kind = if has_fn_value {
+                                SymbolKind::Function
+                            } else {
+                                SymbolKind::Const
+                            };
+                            ctx.push_symbol(
+                                name,
+                                parent.map(|p| p.1),
+                                kind,
+                                Some(ctx.first_line(child)),
+                                ctx.leading_doc(child),
+                                parent.map(|p| p.0),
+                                child,
+                            );
                         }
                     }
                 }
@@ -394,14 +615,28 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
         match child.kind() {
             "function_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Function,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Function,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "method_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Method,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Method,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "type_declaration" => {
@@ -414,8 +649,15 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                                 Some("interface_type") => SymbolKind::Interface,
                                 _ => SymbolKind::Type,
                             };
-                            ctx.push_symbol(name, parent.map(|p| p.1), kind,
-                                Some(ctx.first_line(spec)), ctx.leading_doc(child), parent.map(|p| p.0), spec);
+                            ctx.push_symbol(
+                                name,
+                                parent.map(|p| p.1),
+                                kind,
+                                Some(ctx.first_line(spec)),
+                                ctx.leading_doc(child),
+                                parent.map(|p| p.0),
+                                spec,
+                            );
                         }
                     }
                 }
@@ -427,9 +669,20 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                     if spec.kind() == "const_spec" || spec.kind() == "var_spec" {
                         if let Some(name_node) = spec.child_by_field_name("name") {
                             let name = &ctx.src[name_node.byte_range()];
-                            let kind = if is_const { SymbolKind::Const } else { SymbolKind::Static };
-                            ctx.push_symbol(name, parent.map(|p| p.1), kind,
-                                Some(ctx.first_line(spec)), ctx.leading_doc(child), parent.map(|p| p.0), spec);
+                            let kind = if is_const {
+                                SymbolKind::Const
+                            } else {
+                                SymbolKind::Static
+                            };
+                            ctx.push_symbol(
+                                name,
+                                parent.map(|p| p.1),
+                                kind,
+                                Some(ctx.first_line(spec)),
+                                ctx.leading_doc(child),
+                                parent.map(|p| p.0),
+                                spec,
+                            );
                         }
                     }
                 }
@@ -451,14 +704,28 @@ fn extract_java(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
         match child.kind() {
             "method_declaration" | "constructor_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Method,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Method,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "class_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Class,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Class,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     if let Some(body) = child.child_by_field_name("body") {
                         extract_java(ctx, body, Some((id, name)));
                     }
@@ -466,8 +733,15 @@ fn extract_java(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
             }
             "interface_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Interface,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Interface,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     if let Some(body) = child.child_by_field_name("body") {
                         extract_java(ctx, body, Some((id, name)));
                     }
@@ -475,8 +749,15 @@ fn extract_java(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
             }
             "enum_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Enum,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Enum,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             _ => {
@@ -495,21 +776,40 @@ fn extract_c_cpp(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
     for child in node.children(&mut cursor) {
         match child.kind() {
             "function_definition" => {
-                let name = ctx.child_text(child, "declarator")
+                let name = ctx
+                    .child_text(child, "declarator")
                     .or_else(|| ctx.child_text(child, "name"));
                 if let Some(name) = name {
                     let actual_name = name.split('(').next().unwrap_or(name).trim();
                     if !actual_name.is_empty() {
-                        ctx.push_symbol(actual_name, parent.map(|p| p.1), SymbolKind::Function,
-                            Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                        ctx.push_symbol(
+                            actual_name,
+                            parent.map(|p| p.1),
+                            SymbolKind::Function,
+                            Some(ctx.first_line(child)),
+                            ctx.leading_doc(child),
+                            parent.map(|p| p.0),
+                            child,
+                        );
                     }
                 }
             }
             "struct_specifier" | "class_specifier" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    let kind = if child.kind() == "class_specifier" { SymbolKind::Class } else { SymbolKind::Struct };
-                    let id = ctx.push_symbol(name, parent.map(|p| p.1), kind,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    let kind = if child.kind() == "class_specifier" {
+                        SymbolKind::Class
+                    } else {
+                        SymbolKind::Struct
+                    };
+                    let id = ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        kind,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                     if let Some(body) = child.child_by_field_name("body") {
                         extract_c_cpp(ctx, body, Some((id, name)));
                     }
@@ -517,8 +817,15 @@ fn extract_c_cpp(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
             }
             "enum_specifier" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(name, parent.map(|p| p.1), SymbolKind::Enum,
-                        Some(ctx.first_line(child)), ctx.leading_doc(child), parent.map(|p| p.0), child);
+                    ctx.push_symbol(
+                        name,
+                        parent.map(|p| p.1),
+                        SymbolKind::Enum,
+                        Some(ctx.first_line(child)),
+                        ctx.leading_doc(child),
+                        parent.map(|p| p.0),
+                        child,
+                    );
                 }
             }
             "declaration" => {
@@ -597,7 +904,10 @@ def validate_email(email: str) -> bool:
         assert!(names.contains(&"User"), "missing User: {names:?}");
         assert!(names.contains(&"__init__"), "missing __init__: {names:?}");
         assert!(names.contains(&"greet"), "missing greet: {names:?}");
-        assert!(names.contains(&"validate_email"), "missing validate_email: {names:?}");
+        assert!(
+            names.contains(&"validate_email"),
+            "missing validate_email: {names:?}"
+        );
     }
 
     #[test]
@@ -626,7 +936,10 @@ const DEFAULT_PORT = 8080;
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Config"), "missing Config: {names:?}");
         assert!(names.contains(&"Server"), "missing Server: {names:?}");
-        assert!(names.contains(&"createServer"), "missing createServer: {names:?}");
+        assert!(
+            names.contains(&"createServer"),
+            "missing createServer: {names:?}"
+        );
     }
 
     #[test]
@@ -654,7 +967,10 @@ const DefaultPort = 8080
         assert!(names.contains(&"Config"), "missing Config: {names:?}");
         assert!(names.contains(&"Handler"), "missing Handler: {names:?}");
         assert!(names.contains(&"NewConfig"), "missing NewConfig: {names:?}");
-        assert!(names.contains(&"DefaultPort"), "missing DefaultPort: {names:?}");
+        assert!(
+            names.contains(&"DefaultPort"),
+            "missing DefaultPort: {names:?}"
+        );
     }
 
     #[test]
@@ -669,7 +985,11 @@ impl Foo {
 }
 "#;
         let result = extract_symbols(src, Language::Rust, Path::new("src/lib.rs"));
-        let baz = result.symbols.iter().find(|s| s.name.as_str() == "baz").unwrap();
+        let baz = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "baz")
+            .unwrap();
         assert_eq!(baz.qualified_name.as_str(), "Foo::baz");
         assert_eq!(baz.kind, SymbolKind::Method);
     }
