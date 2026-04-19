@@ -1,22 +1,24 @@
-//! Core indexing logic: parallel parse, batch store.
+//! Core indexing logic: parallel parse with pooled parsers, batch store.
 
 use crate::walker;
 use recon_core::error::Error;
 use recon_core::lang::Language;
 use recon_core::symbol::{FileMeta, Ref, Symbol};
 use recon_parser::extract;
+use recon_parser::pool::LanguagePools;
 use recon_storage::hash;
 use recon_storage::store::Store;
 use rayon::prelude::*;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 /// Result of parsing a single file (before storing).
-struct ParsedFile {
-    meta: FileMeta,
-    symbols: Vec<Symbol>,
-    refs: Vec<Ref>,
+pub struct ParsedFile {
+    pub meta: FileMeta,
+    pub symbols: Vec<Symbol>,
+    pub refs: Vec<Ref>,
 }
 
 fn now_secs() -> i64 {
@@ -26,26 +28,24 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
-/// Parse a single file: hash, extract symbols. Does NOT touch the store.
-fn parse_file(path: &Path, repo_root: &Path) -> Result<Option<ParsedFile>, Error> {
+/// Parse a single file using pooled parsers. Does NOT touch the store.
+/// Content is passed in to avoid double reads.
+pub fn parse_file_with_content(
+    content: &[u8],
+    path: &Path,
+    repo_root: &Path,
+    pools: &LanguagePools,
+) -> Option<ParsedFile> {
     let rel_path = path.strip_prefix(repo_root).unwrap_or(path);
-
     let lang = Language::from_path(path);
     if lang == Language::Unknown {
-        return Ok(None);
+        return None;
     }
 
-    if walker::is_generated(path) {
-        debug!(?path, "skipping generated file");
-        return Ok(None);
-    }
+    let content_hash = hash::blake3_bytes(content);
 
-    let content = std::fs::read(path)?;
-    let content_hash = hash::blake3_bytes(&content);
-
-    let fs_meta = std::fs::metadata(path)?;
-    let mtime = fs_meta
-        .modified()
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH)
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -60,22 +60,36 @@ fn parse_file(path: &Path, repo_root: &Path) -> Result<Option<ParsedFile>, Error
         indexed_at: now_secs(),
     };
 
-    let extracted = extract::extract_symbols(&content, lang, rel_path);
+    // Use pooled parser if available, otherwise fall back to one-off
+    let extracted = match pools.get(lang) {
+        Some(pool) => extract::extract_symbols_pooled(content, lang, rel_path, pool),
+        None => extract::extract_symbols(content, lang, rel_path),
+    };
 
-    Ok(Some(ParsedFile {
+    Some(ParsedFile {
         meta,
         symbols: extracted.symbols,
         refs: extracted.refs,
-    }))
+    })
 }
 
-/// Index a single file: hash, parse, store symbols.
+/// Index a single file: read once, hash, parse, store.
 pub fn index_file(store: &Store, path: &Path, repo_root: &Path) -> Result<(), Error> {
     let rel_path = path.strip_prefix(repo_root).unwrap_or(path);
+    let lang = Language::from_path(path);
+    if lang == Language::Unknown {
+        return Ok(());
+    }
 
-    // Skip if unchanged
+    if walker::is_generated(path) {
+        return Ok(());
+    }
+
+    // Single read — used for both hashing and parsing
     let content = std::fs::read(path)?;
     let content_hash = hash::blake3_bytes(&content);
+
+    // Skip if unchanged
     if let Some(existing_hash) = store.get_file_hash(rel_path)? {
         if existing_hash == content_hash {
             debug!(?rel_path, "unchanged, skipping");
@@ -83,7 +97,8 @@ pub fn index_file(store: &Store, path: &Path, repo_root: &Path) -> Result<(), Er
         }
     }
 
-    if let Some(parsed) = parse_file(path, repo_root)? {
+    let pools = LanguagePools::new(1);
+    if let Some(parsed) = parse_file_with_content(&content, path, repo_root, &pools) {
         store.batch_index_file(&parsed.meta, &parsed.symbols, &parsed.refs)?;
         debug!(
             ?rel_path,
@@ -95,44 +110,47 @@ pub fn index_file(store: &Store, path: &Path, repo_root: &Path) -> Result<(), Er
     Ok(())
 }
 
-/// Index all files in a repo — parallel parse, sequential store.
+/// Index all files in a repo — parallel parse with pooled parsers, sequential batch store.
 pub fn index_repo(store: &Store, repo_root: &Path) -> Result<IndexStats, Error> {
     let paths = walker::walk_repo(repo_root);
     info!(files = paths.len(), "starting repo indexing");
 
-    // Phase 1: Parallel parse (CPU-bound, no DB access)
+    // Shared parser pools — one pool per language, reused across rayon threads
+    let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
+
+    // Phase 1: Parallel read + parse (CPU-bound, no DB access)
     let parsed: Vec<_> = paths
         .par_iter()
         .filter_map(|path| {
-            match parse_file(path, repo_root) {
-                Ok(Some(p)) => Some(Ok(p)),
-                Ok(None) => None,
-                Err(e) => {
-                    warn!(?path, "parse error: {e}");
-                    Some(Err(e))
-                }
+            if walker::is_generated(path) {
+                return None;
             }
+
+            let content = match std::fs::read(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(?path, "read error: {e}");
+                    return None;
+                }
+            };
+
+            parse_file_with_content(&content, path, repo_root, &pools)
         })
         .collect();
 
     // Phase 2: Sequential batch store (single-writer SQLite)
     let mut stats = IndexStats::default();
-    for result in parsed {
-        match result {
-            Ok(parsed_file) => {
-                match store.batch_index_file(
-                    &parsed_file.meta,
-                    &parsed_file.symbols,
-                    &parsed_file.refs,
-                ) {
-                    Ok(()) => stats.files_indexed += 1,
-                    Err(e) => {
-                        warn!(path = ?parsed_file.meta.path, "store error: {e}");
-                        stats.errors += 1;
-                    }
-                }
+    for parsed_file in &parsed {
+        match store.batch_index_file(
+            &parsed_file.meta,
+            &parsed_file.symbols,
+            &parsed_file.refs,
+        ) {
+            Ok(()) => stats.files_indexed += 1,
+            Err(e) => {
+                warn!(path = ?parsed_file.meta.path, "store error: {e}");
+                stats.errors += 1;
             }
-            Err(_) => stats.errors += 1,
         }
     }
 

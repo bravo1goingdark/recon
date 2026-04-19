@@ -104,6 +104,7 @@ impl<'a> Ctx<'a> {
 type ParentCtx<'a> = Option<(u64, &'a str)>;
 
 /// Extract symbols and refs from source code.
+/// Creates a one-off parser. For batch work, use `extract_symbols_pooled`.
 pub fn extract_symbols(src: &[u8], lang: Language, path: &Path) -> Extracted {
     let ts_lang = match crate::languages::ts_language(lang) {
         Some(l) => l,
@@ -115,6 +116,24 @@ pub fn extract_symbols(src: &[u8], lang: Language, path: &Path) -> Extracted {
         Some(t) => t,
         None => return Extracted { symbols: vec![], refs: vec![] },
     };
+    extract_from_tree(&tree, src, lang, path)
+}
+
+/// Extract symbols using a pooled parser (avoids parser creation overhead).
+pub fn extract_symbols_pooled(
+    src: &[u8],
+    lang: Language,
+    path: &Path,
+    pool: &crate::pool::ParserPool,
+) -> Extracted {
+    let tree = pool.with(|parser| parser.parse(src, None));
+    match tree {
+        Some(tree) => extract_from_tree(&tree, src, lang, path),
+        None => Extracted { symbols: vec![], refs: vec![] },
+    }
+}
+
+fn extract_from_tree(tree: &tree_sitter::Tree, src: &[u8], lang: Language, path: &Path) -> Extracted {
     let src_str = std::str::from_utf8(src).unwrap_or("");
     let mut ctx = Ctx::new(src_str, path, lang);
     let root = tree.root_node();
