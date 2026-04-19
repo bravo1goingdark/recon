@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use recon_indexer::indexer;
@@ -140,18 +143,14 @@ fn init_server(repo: PathBuf) -> Result<(ReconServer, PathBuf)> {
     Ok((ReconServer::new(repo.clone(), store, tantivy), repo))
 }
 
-/// Index and return the server, suppressing logs for query commands.
-async fn query_server(repo: PathBuf) -> Result<ReconServer> {
+/// Open an existing index for read-only CLI queries (no re-index on startup).
+fn read_server(repo: PathBuf) -> Result<ReconServer> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(EnvFilter::new("warn"))
         .init();
 
     let (server, _) = init_server(repo)?;
-    server
-        .index_repo()
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(server)
 }
 
@@ -206,7 +205,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Find { name, kind, lang } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "name": name, "kind": kind, "lang": lang });
             println!(
                 "{}",
@@ -221,7 +220,7 @@ async fn main() -> Result<()> {
             mode,
             filter,
         } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "query": query, "mode": mode, "filter": filter });
             println!(
                 "{}",
@@ -230,7 +229,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Outline { path } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "path": path });
             println!(
                 "{}",
@@ -239,7 +238,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Skeleton { path, depth } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "path": path, "depth": depth });
             println!(
                 "{}",
@@ -248,7 +247,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Symbol { path, name } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "path": path, "symbol_or_line": name });
             println!(
                 "{}",
@@ -259,7 +258,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Refs { symbol } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "symbol": symbol });
             println!(
                 "{}",
@@ -268,7 +267,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Ls { glob, lang, filter } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "glob": glob, "lang": lang, "filter": filter });
             println!(
                 "{}",
@@ -277,7 +276,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Map { budget, focus } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let focus = if focus.is_empty() { None } else { Some(focus) };
             let args = serde_json::json!({ "focus_files": focus, "token_budget": budget });
             println!(
@@ -291,7 +290,7 @@ async fn main() -> Result<()> {
             kind,
             filter,
         } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "pattern": pattern, "kind": kind, "filter": filter });
             println!(
                 "{}",
@@ -302,7 +301,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Multi { patterns } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             let args = serde_json::json!({ "patterns": patterns });
             println!(
                 "{}",
@@ -313,17 +312,17 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Stats => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             println!("{}", server.query_tool("code_stats", "{}").await);
             Ok(())
         }
         Command::Reindex => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             println!("{}", server.query_tool("code_reindex", "{}").await);
             Ok(())
         }
         Command::Query { tool, args } => {
-            let server = query_server(repo).await?;
+            let server = read_server(repo)?;
             println!("{}", server.query_tool(&tool, &args).await);
             Ok(())
         }
