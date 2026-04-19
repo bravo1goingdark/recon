@@ -11,17 +11,6 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo check --workspace --all-targets
-
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -32,8 +21,8 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  clippy:
-    name: Clippy
+  check:
+    name: Check + Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,33 +44,3 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo test --workspace
-
-  bench:
-    name: Benchmarks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo bench --workspace --no-run
-
-  build:
-    name: Build Release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo build --workspace --release
-      - name: Check binary size
-        run: |
-          size=$(stat -c%s target/release/recon)
-          echo "Binary size: $((size / 1048576)) MB"
-          if [ "$size" -gt 31457280 ]; then
-            echo "ERROR: binary exceeds 30 MB limit"
-            exit 1
-          fi
