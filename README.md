@@ -1,88 +1,156 @@
 # recon
 
-Token-lean code intelligence MCP server. Replaces Claude Code's `Read`, `Grep`, and `Glob` with symbol-aware, structure-first tools that deliver 5-10x token reduction on typical coding tasks.
+Token-lean code intelligence MCP server. Replaces `Read`, `Grep`, and `Glob` with symbol-aware tools that deliver **15-30x token reduction** on code exploration tasks.
 
-## Performance
+Offered as a **hosted MCP server** -- no binary to install, no local indexing. Point your agent at the endpoint, hand it an API key, and it gets 12 symbol-aware tools instantly.
 
-| Metric | Measured |
-|---|---|
-| Cold index (44 files, 638 symbols) | 156 ms |
-| Incremental skip (HEAD unchanged) | 6 ms |
-| Merkle diff (1 file changed) | 39 ms |
-| Symbol exact lookup (10K symbols) | 25 us |
-| Symbol fuzzy search (10K symbols) | 150 us |
-| Tantivy BM25 query (1K symbols) | 10 us |
-| Text grep (50 files, fff-grep) | 377 us |
-| Repo map render (500 symbols) | 3.4 ms |
-| Token counting (tiktoken cl100k) | 55 us |
-| Batch insert (1K symbols) | 46 ms |
-| Binary size (release, stripped) | 26 MB |
-| Index size vs repo | <1% at scale |
-| Languages | 9 (Rust, Python, TypeScript, TSX, JavaScript, Go, Java, C, C++) |
-| Index freshness | <1s via notify watcher (250ms debounce) |
+## Benchmarks
 
-All read-path operations are well under the 100 ms p99 target.
+Measured on real codebases, release build, warm cache:
 
-## Install
+| | Zed (80K symbols) | Rust compiler (318K symbols) |
+|---|---|---|
+| **stats** | 11 ms | 28 ms |
+| **find** | 10 ms | 11 ms |
+| **search** | 14-39 ms | 33-95 ms |
+| **outline** | 16 ms | 20 ms |
+| **skeleton** | 18 ms | 16 ms |
+| **refs** | 16 ms | 9 ms |
+| **map (cached)** | 8 ms | 18 ms |
+| **map (cold)** | 405 ms | 2.0 s |
+| **reindex** | 31 s | -- |
 
-```bash
-# From source
-cargo install --path crates/recon-cli
+All read-path queries under 100 ms p99. Binary size: 24 MB.
 
-# Or via install script (downloads prebuilt binary)
-curl -sL https://raw.githubusercontent.com/bravo1goingdark/recon/main/scripts/install.sh | bash
-```
+## Token reduction
 
-## Setup with Claude Code
+Measured on the Rust compiler (318K symbols), recon vs Read/Grep/Glob:
 
-Add to your project's `.claude/settings.json`:
+| Scenario | Before | After | Reduction |
+|---|---|---|---|
+| Read one function | ~23,838 tok | ~111 tok | **215x** |
+| Find a symbol | ~17,500 tok | ~226 tok | **77x** |
+| Repo orientation | ~52,500 tok | ~2,170 tok | **24x** |
+| Find references | ~15,000 tok | ~638 tok | **24x** |
+| Outline a file | ~23,838 tok | ~1,350 tok | **18x** |
+| Understand a file | ~23,838 tok | ~6,412 tok | **3.7x** |
+
+A typical "find and fix a bug" task: **~3.2K tokens** with recon vs **~100K+** with Read/Grep/Glob.
+
+## Connect your agent (hosted)
+
+### Step 1: Get an API key
+
+Contact us to get a server key for your workspace.
+
+### Step 2: Add to your MCP config
+
+Drop this into `.mcp.json` at your project root:
 
 ```json
 {
   "mcpServers": {
     "recon": {
-      "command": "recon",
-      "args": ["serve", "--repo", "."]
+      "url": "https://mcp.recon.dev/v1",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY"
+      }
     }
   }
 }
 ```
 
-Add a `CLAUDE.md` rule in your project for maximum token savings:
+### Step 3: Teach your agent
+
+Add this to your `CLAUDE.md` (or equivalent agent system prompt):
 
 ```markdown
-Use `code_*` tools (code_outline, code_skeleton, code_find_symbol, code_search,
-code_repo_map) before Read/Grep/Glob when exploring code. They return structured,
-token-efficient results.
+Prefer code_* tools (code_outline, code_skeleton, code_find_symbol,
+code_search, code_repo_map) over Read/Grep/Glob for code exploration.
+They return structured, token-efficient results.
 ```
 
-## Usage
+### Step 4: Restart your agent
+
+Restart Claude Code (or your MCP client). The 12 `code_*` tools are now available. Indexing, watching, and ranking all run server-side.
+
+## Self-hosted setup
+
+If you run your own server:
 
 ```bash
-recon serve --repo .          # Start MCP server over stdio (with live file watching)
-recon index --repo .          # Index without serving (incremental via Merkle diff)
+# One-command setup: indexes repo, writes .mcp.json, updates .gitignore
+recon init
+
+# Or manual
+recon index                     # index the repo
+recon serve                     # start MCP server over stdio
+recon serve --port 3100         # start over Streamable HTTP
 ```
+
+### Multi-tenant hosted server
+
+```bash
+# Create a keys.json
+cat > keys.json << 'EOF'
+{
+  "keys": {
+    "sk-customer-a": "/srv/repos/customer-a",
+    "sk-customer-b": "/srv/repos/customer-b"
+  }
+}
+EOF
+
+# Start the hosted server with API key auth
+recon serve-hosted --keys keys.json --port 3100
+```
+
+Requests without a valid `Authorization: Bearer <key>` header get `401`. Invalid keys get `403`. Each key routes to its own isolated repo index via DashMap.
+
+## CLI (`rr` -- recon remote)
+
+Public CLI client for querying hosted recon servers. No local deps, just HTTP:
+
+```bash
+cargo install rr
+
+# Set server URL
+export RECON_URL=https://mcp.recon.dev/v1
+
+# Query
+rr find TyCtxt
+rr search 'fn render'
+rr outline src/main.rs
+rr skeleton src/lib.rs
+rr refs Editor
+rr map --budget 2000
+rr stats
+rr ping                         # check connectivity
+rr update                       # self-update from GitHub Releases
+```
+
+All output is human-readable by default. Pass `--json` for machine consumption.
 
 ## Tools (12)
 
-| Tool | Replaces | What it does |
-|---|---|---|
-| `code_outline(path)` | Read | One line per symbol -- kind, name, line |
-| `code_skeleton(path)` | Read | Signatures + docs, bodies as `...` (10x compression) |
-| `code_read_symbol(path, symbol)` | Read | Full source of one symbol + callers |
-| `code_find_symbol(name)` | Grep | 3-tier: exact SQLite -> Tantivy BM25 -> FTS5 + nucleo fuzzy |
-| `code_find_refs(symbol)` | Grep | Reference count + top-k call sites |
-| `code_search(query, mode, filter?)` | Grep | exact/regex/hybrid/semantic + filter DSL |
-| `code_list(glob?, lang?, filter?)` | Glob | Structured file listing with top symbols |
-| `code_repo_map(budget)` | -- | PageRank-ranked symbol overview (tiktoken-budgeted) |
-| `code_find_strings(pattern, filter?)` | -- | Search string literals and comments |
-| `code_multi_find(patterns[], filter?)` | -- | Multi-pattern search via TextSearcher trait |
-| `code_reindex()` | -- | Agent-triggered re-indexing |
-| `code_stats()` | -- | Index health report |
+| Tool | Replaces | What it does | Latency |
+|---|---|---|---|
+| `code_outline(path)` | Read | One line per symbol -- kind, name, line | <20 ms |
+| `code_skeleton(path)` | Read | Signatures + docs, bodies as `...` (10x compression) | <20 ms |
+| `code_read_symbol(path, symbol)` | Read | Full source of one symbol + callers | <10 ms |
+| `code_find_symbol(name)` | Grep | 3-tier: exact SQLite -> Tantivy BM25 -> FTS5 + nucleo fuzzy | <15 ms |
+| `code_find_refs(symbol)` | Grep | Reference count + top-k call sites | <50 ms |
+| `code_search(query, mode, filter?)` | Grep | exact/regex/hybrid + filter DSL, Tantivy-first | <100 ms |
+| `code_list(glob?, lang?, filter?)` | Glob | Structured file listing with symbol counts | <30 ms |
+| `code_repo_map(budget)` | -- | PageRank-ranked symbol overview under token budget | <20 ms cached |
+| `code_find_strings(pattern)` | -- | Search string literals and comments | <30 ms |
+| `code_multi_find(patterns[])` | -- | Multi-pattern search in one call | <30 ms |
+| `code_reindex()` | -- | Agent-triggered re-indexing | varies |
+| `code_stats()` | -- | Index health: files, symbols, freshness | <30 ms |
 
 ### Filter DSL
 
-Search tools accept an optional `filter` parameter powered by fff-query-parser:
+Search tools accept an optional `filter` parameter:
 
 ```
 *.rs                   # extension filter
@@ -99,11 +167,11 @@ crates/
   recon-core/       # Types, errors, 5 output shapes, config, secret redaction
   recon-parser/     # Tree-sitter pools (9 langs), symbol extraction
   recon-storage/    # SQLite + FTS5 trigram, blake3, batch inserts
-  recon-search/     # Tantivy BM25, fff-grep text search, nucleo fuzzy, PageRank
+  recon-search/     # Tantivy BM25, fff-grep, nucleo fuzzy, PageRank, token counting
   recon-embed/      # fastembed + LanceDB vector search (feature-gated)
   recon-indexer/    # Merkle tree, gix ColdStart, file watcher, rayon parallel parse
-  recon-server/     # rmcp MCP handler, 12 tools, FffBackend, filter DSL
-  recon-cli/        # CLI binary (serve + index)
+  recon-server/     # rmcp MCP handler, 12 tools, parking_lot Mutex, redaction
+  recon-cli/        # CLI: serve, serve-hosted, init, index, purge, query tools
 ```
 
 ### Search tiers
@@ -112,76 +180,50 @@ crates/
 |---|---|---|
 | T0 -- Symbol exact | SQLite btree index | <1 ms |
 | T1 -- Symbol fuzzy | SQLite FTS5 trigram + nucleo rescore | 2-8 ms |
-| T2 -- Structured BM25 | Tantivy with CodeTokenizer (camelCase/snake_case split) | 5-15 ms |
-| T3 -- Raw text/regex | fff-grep (SIMD + memmap2) via TextSearcher trait | 3-20 ms |
-| T4 -- Semantic | fastembed + LanceDB (feature-gated, `--features embed`) | 50-150 ms |
+| T2 -- Structured BM25 | Tantivy with CodeSplitTokenizer | 5-15 ms |
+| T3 -- Raw text/regex | fff-grep (SIMD + memmap2) | 3-95 ms |
+| T4 -- Semantic | fastembed + LanceDB (feature-gated) | 50-150 ms |
 
 ### Incremental indexing
 
-1. **ColdStart**: gix reads HEAD SHA -- if it matches the last indexed commit, skip entirely (6 ms).
-2. **Merkle diff**: blake3 hash tree built from file contents. On HEAD change, diff against the previous snapshot and reindex only changed files (39 ms for 1 file).
-3. **Full index**: first run or missing snapshot, parallel parse via rayon (156 ms for 44 files).
-4. **Live watcher**: notify-debouncer-full (250 ms debounce) triggers per-file reindex. On overflow, falls back to gix status.
+1. **ColdStart** -- gix reads HEAD SHA. If unchanged since last index, skip entirely.
+2. **Merkle diff** -- blake3 hash tree. On HEAD change, reindex only changed files.
+3. **Full index** -- first run, parallel parse via rayon.
+4. **Live watcher** -- notify-debouncer-full (250 ms debounce) triggers per-file reindex.
 
-## Configuration
+### PageRank repo map
 
-Create `.recon/config.toml` in your repo root:
+`code_repo_map` builds a directed graph from symbol references, applies Aider-style edge weights (10x long identifiers, 0.1x private names, 50x focus files), runs power iteration with early convergence, and renders the top-ranked symbols within a token budget. Result is cached in SQLite, keyed on `max(indexed_at)` -- invalidates automatically on any reindex.
 
-```toml
-# Additional ignore patterns (on top of .gitignore)
-ignore_patterns = ["*.generated.*", "dist/"]
+## Performance engineering
 
-# Max file size to index (default 1MB)
-max_file_size = 1048576
-
-# Max search results per tool call (default 30)
-max_search_results = 30
-
-# Token budget for code_repo_map (default 2000)
-default_map_budget = 2000
-
-# Enable secret redaction (default true)
-redact_secrets = true
-
-# Allow .env/.pem/.key files (default false)
-allow_sensitive = false
-```
-
-## Optimization highlights
-
-- **Rayon parallel parsing** -- tree-sitter across all CPU cores
-- **LanguagePools** -- parser reuse via ArrayQueue (no per-file creation overhead)
-- **Batch SQLite inserts** -- single transaction per file (symbols + refs)
-- **prepare_cached** -- all queries use cached prepared statements
-- **SQLite tuning** -- WAL, mmap_size=256MB, cache_size=8000, temp_store=MEMORY
-- **Tantivy BM25** -- CodeSplitTokenizer for camelCase/snake_case recall
-- **fff-grep** -- SIMD-accelerated text search via memmap2, pinned to =0.4.0
-- **TextSearcher trait** -- backend-agnostic search interface (FffBackend default, GrepBackend fallback)
-- **Hybrid RRF** -- reciprocal rank fusion of Tantivy + text results
-- **PageRank repo-map** -- Aider-style personalized ranking with edge weights
-- **tiktoken-rs** -- accurate cl100k_base token counting (replaces len/4 heuristic)
-- **Merkle snapshots** -- blake3 hash tree for O(changed) incremental reindexing
-- **gix ColdStart** -- skip reparse entirely when HEAD is unchanged
-- **Parser hot path** -- cached PathBuf, reusable qname buffer, SmallVec doc lines, pre-sized vectors
-- **Streaming blake3** -- memmap2 for files >64KB
-- **LTO thin + codegen-units=1** -- optimized release binary
-- **Secret redaction** -- 13 regex patterns + PEM blocks + blocked paths on every response
-- **Path traversal guard** -- canonicalize + prefix check on every tool call
+- **mimalloc** global allocator
+- **parking_lot::Mutex** instead of tokio::sync::Mutex (no async overhead on sync SQLite)
+- **DashMap** for multi-tenant repo routing (sharded RwLock, zero contention on reads)
+- **Fat LTO + panic=abort + opt-level=3** -- 24 MB binary
+- **SQLite tuning** -- WAL, mmap 256MB, cache 32MB, PRAGMA optimize
+- **Tantivy-first search** -- try BM25 index before falling back to grep
+- **Token heuristic** -- estimate_tokens (len/4) in hot loops, tiktoken for accuracy checks
+- **Map caching** -- PageRank cached in SQLite meta, invalidated on max(indexed_at) change
+- **Early convergence** -- PageRank stops when L1 norm delta < 1e-6 (typically 8-12 iterations)
+- **Bulk SQL** -- all_symbols() and all_refs() single-query loads for PageRank
+- **Secret redaction** -- regex scanner on all tool responses returning code content
+- **Path traversal guard** -- canonicalize + prefix check, repo root cached
 - **Stdout hygiene** -- all logging to stderr, verified by CI test
 
 ## Testing
 
 ```bash
-cargo test --workspace        # 110 tests (unit + integration + E2E)
-cargo bench --workspace       # criterion benchmarks (storage, search, parser)
+cargo test --workspace           # 107 tests across 19 suites
+cargo clippy --workspace -- -D warnings
 ```
 
-Test coverage:
-- Unit tests per module (core, storage, parser, search, embed, indexer)
-- Fixture-based parser tests (9 languages)
-- Stdout hygiene subprocess test (JSON-RPC validation)
+- Zero `unwrap()` in production library code
+- `#[deny(missing_docs)]` on all 7 crate roots
+- Secret redaction on all code-returning tool responses
+- Stdout hygiene subprocess test
 - Self-host E2E (index this repo, verify symbols)
-- Incremental E2E (cold index, HEAD skip, merkle diff, delete cascade, multi-lang)
+- Incremental E2E (cold index, HEAD skip, merkle diff, delete cascade)
 - Tool description length enforcement (<2 KB each)
 
 ## ADRs
