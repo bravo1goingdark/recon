@@ -182,16 +182,21 @@ pub fn index_repo(
     Ok(stats)
 }
 
-/// Index a repo with git-aware incremental optimization.
+/// Index a repo with Merkle-based incremental optimization.
 ///
-/// - If HEAD matches the last indexed commit, skips entirely.
-/// - Otherwise, falls back to a full `index_repo`.
-/// - Stores the current HEAD SHA in the meta table after indexing.
+/// 1. If HEAD matches the last indexed commit → skip entirely.
+/// 2. Otherwise, build a new Merkle snapshot and diff against the previous one.
+/// 3. Only reindex changed files; cascade-delete removed files.
+/// 4. If no previous snapshot exists, falls back to full `index_repo`.
+/// 5. Saves the new Merkle snapshot and HEAD SHA after indexing.
 pub fn index_repo_incremental(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
     repo_root: &Path,
 ) -> Result<IndexStats, Error> {
+    let store_dir = repo_root.join(".recon");
+    let snap_path = store_dir.join("merkle_snapshot.json");
+
     let last_commit = store.get_meta("last_indexed_commit")?;
     let current_head = match crate::git::head_sha(repo_root) {
         Ok(sha) => Some(sha),
@@ -214,16 +219,125 @@ pub fn index_repo_incremental(
         }
     }
 
-    // Full index (incremental diff by individual files is handled by the watcher)
-    let stats = index_repo(store, tantivy, repo_root)?;
+    // Walk and hash all current files
+    let paths = walker::walk_repo(repo_root);
+    let file_hashes: Vec<(std::path::PathBuf, [u8; 32])> = paths
+        .iter()
+        .filter_map(|p| {
+            let content = std::fs::read(p).ok()?;
+            let rel = p.strip_prefix(repo_root).unwrap_or(p).to_path_buf();
+            Some((rel, hash::blake3_bytes(&content)))
+        })
+        .collect();
 
-    // Record current HEAD so next startup can skip
+    let new_snapshot = crate::merkle::MerkleSnapshot::build(file_hashes);
+
+    // Try incremental diff against previous snapshot
+    let prev_snapshot = crate::merkle::MerkleSnapshot::load(&snap_path).ok();
+    let stats = if let Some(ref prev) = prev_snapshot {
+        let diff = new_snapshot.diff(prev);
+        if diff.changed.is_empty() && diff.deleted.is_empty() {
+            let total = store.symbol_count().unwrap_or(0);
+            info!(symbols = total, "merkle diff: no changes");
+            IndexStats {
+                files_indexed: 0,
+                total_symbols: total,
+                errors: 0,
+            }
+        } else {
+            info!(
+                changed = diff.changed.len(),
+                deleted = diff.deleted.len(),
+                "merkle diff: incremental reindex"
+            );
+            index_diff(store, tantivy, repo_root, &diff)?
+        }
+    } else {
+        info!("no previous merkle snapshot, full index");
+        index_repo(store, tantivy, repo_root)?
+    };
+
+    // Save new snapshot and HEAD
+    let _ = std::fs::create_dir_all(&store_dir);
+    if let Err(e) = new_snapshot.save(&snap_path) {
+        warn!("failed to save merkle snapshot: {e}");
+    }
     if let Some(sha) = &current_head {
         if let Err(e) = store.set_meta("last_indexed_commit", sha) {
             warn!("failed to store last_indexed_commit: {e}");
         }
     }
 
+    Ok(stats)
+}
+
+/// Index only the files identified by a Merkle diff.
+fn index_diff(
+    store: &Store,
+    tantivy: Option<&TantivyBackend>,
+    repo_root: &Path,
+    diff: &crate::merkle::MerkleDiff,
+) -> Result<IndexStats, Error> {
+    let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
+    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(50_000_000).ok());
+    let mut stats = IndexStats::default();
+
+    // Delete removed files
+    for rel_path in &diff.deleted {
+        if let Err(e) = store.delete_file_cascade(rel_path) {
+            warn!(?rel_path, "delete cascade error: {e}");
+            stats.errors += 1;
+        }
+    }
+
+    // Parse and index changed files (parallel parse, sequential store)
+    let abs_changed: Vec<std::path::PathBuf> =
+        diff.changed.iter().map(|p| repo_root.join(p)).collect();
+    let parsed: Vec<_> = abs_changed
+        .par_iter()
+        .filter_map(|path| {
+            if walker::is_generated(path) {
+                return None;
+            }
+            let content = match std::fs::read(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(?path, "read error: {e}");
+                    return None;
+                }
+            };
+            parse_file_with_content(&content, path, repo_root, &pools)
+        })
+        .collect();
+
+    for parsed_file in &parsed {
+        match store.batch_index_file(&parsed_file.meta, &parsed_file.symbols, &parsed_file.refs) {
+            Ok(()) => {
+                stats.files_indexed += 1;
+                if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
+                    let _ = tb.index_symbols(writer, &parsed_file.meta.path, &parsed_file.symbols);
+                }
+            }
+            Err(e) => {
+                warn!(path = ?parsed_file.meta.path, "store error: {e}");
+                stats.errors += 1;
+            }
+        }
+    }
+
+    if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
+        if let Err(e) = tb.commit(writer) {
+            warn!("tantivy commit error: {e}");
+        }
+    }
+
+    stats.total_symbols = store.symbol_count().unwrap_or(0);
+    info!(
+        files = stats.files_indexed,
+        deleted = diff.deleted.len(),
+        symbols = stats.total_symbols,
+        "incremental indexing complete"
+    );
     Ok(stats)
 }
 

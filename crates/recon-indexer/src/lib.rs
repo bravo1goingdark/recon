@@ -3,5 +3,6 @@
 
 pub mod git;
 pub mod indexer;
+pub mod merkle;
 pub mod walker;
 pub mod watcher;

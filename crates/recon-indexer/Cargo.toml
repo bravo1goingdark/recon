@@ -20,6 +20,8 @@ rayon = { workspace = true }
 gix = { workspace = true }
 tracing = { workspace = true }
 crossbeam-queue = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 recon-embed = { workspace = true, optional = true }
 
