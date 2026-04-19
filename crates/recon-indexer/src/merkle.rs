@@ -100,10 +100,14 @@ impl MerkleSnapshot {
 
     /// Check if a path is a directory entry (has children in the map).
     fn is_directory_entry(&self, path: &Path) -> bool {
-        let prefix = path.to_string_lossy();
+        // Use BTreeMap range to check for any child path efficiently
+        use std::ops::Bound;
+        let mut child_start = path.to_path_buf();
+        child_start.push("");
         self.hashes
-            .keys()
-            .any(|k| k != path && k.to_string_lossy().starts_with(prefix.as_ref()))
+            .range((Bound::Excluded(child_start), Bound::Unbounded))
+            .next()
+            .is_some_and(|(k, _)| k.starts_with(path))
     }
 
     /// Save snapshot to a JSON file.
