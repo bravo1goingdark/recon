@@ -114,7 +114,7 @@ impl ReconServer {
             Ok(p) => p,
             Err(e) => return format!("Error: {e}"),
         };
-        let content = match std::fs::read_to_string(&abs_path) {
+        let content = match tokio::fs::read_to_string(&abs_path).await {
             Ok(c) => c,
             Err(e) => return format!("Error reading file: {e}"),
         };
@@ -165,7 +165,7 @@ impl ReconServer {
             Ok(p) => p,
             Err(e) => return format!("Error: {e}"),
         };
-        let content = match std::fs::read_to_string(&abs_path) {
+        let content = match tokio::fs::read_to_string(&abs_path).await {
             Ok(c) => c,
             Err(e) => return format!("Error: {e}"),
         };
@@ -303,7 +303,6 @@ impl ReconServer {
         let abs_paths: Vec<PathBuf> = paths
             .iter()
             .map(|p| self.repo_root.join(p))
-            .filter(|p| p.exists())
             .collect();
 
         let is_regex = params.0.mode == "regex";
@@ -436,7 +435,6 @@ impl ReconServer {
         let abs_paths: Vec<PathBuf> = paths
             .iter()
             .map(|p| self.repo_root.join(p))
-            .filter(|p| p.exists())
             .collect();
 
         let hits = text::search_files(&params.0.pattern, &abs_paths, false, 30)
@@ -468,7 +466,6 @@ impl ReconServer {
         let abs_paths: Vec<PathBuf> = paths
             .iter()
             .map(|p| self.repo_root.join(p))
-            .filter(|p| p.exists())
             .collect();
 
         let mut results: Vec<serde_json::Value> = Vec::new();

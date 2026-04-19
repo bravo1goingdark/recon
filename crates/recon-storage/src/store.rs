@@ -1,4 +1,4 @@
-//! SQLite-backed symbol store.
+//! SQLite-backed symbol store — optimized for batch inserts and cached queries.
 
 use crate::schema;
 use compact_str::CompactString;
@@ -30,7 +30,10 @@ impl Store {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             PRAGMA foreign_keys=ON;",
+             PRAGMA foreign_keys=ON;
+             PRAGMA cache_size=-8000;
+             PRAGMA mmap_size=268435456;
+             PRAGMA temp_store=MEMORY;",
         )
         .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -44,24 +47,23 @@ impl Store {
     /// Insert or update a file metadata record.
     pub fn upsert_file(&self, meta: &FileMeta) -> Result<(), Error> {
         self.conn
-            .execute(
+            .prepare_cached(
                 "INSERT INTO files(path, lang, size_bytes, content_hash, mtime, indexed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(path) DO UPDATE SET
-                    lang=excluded.lang,
-                    size_bytes=excluded.size_bytes,
-                    content_hash=excluded.content_hash,
-                    mtime=excluded.mtime,
+                    lang=excluded.lang, size_bytes=excluded.size_bytes,
+                    content_hash=excluded.content_hash, mtime=excluded.mtime,
                     indexed_at=excluded.indexed_at",
-                params![
-                    meta.path.to_str().unwrap_or(""),
-                    meta.lang.name(),
-                    meta.size_bytes,
-                    meta.content_hash.as_slice(),
-                    meta.mtime,
-                    meta.indexed_at,
-                ],
             )
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .execute(params![
+                meta.path.to_str().unwrap_or(""),
+                meta.lang.name(),
+                meta.size_bytes,
+                meta.content_hash.as_slice(),
+                meta.mtime,
+                meta.indexed_at,
+            ])
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
@@ -69,14 +71,12 @@ impl Store {
     /// Delete a file and cascade to its symbols and refs.
     pub fn delete_file_cascade(&self, path: &Path) -> Result<(), Error> {
         let path_str = path.to_str().unwrap_or("");
-        // Delete refs for symbols in this file
         self.conn
             .execute(
                 "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
                 params![path_str],
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
-        // Symbols cascade via FK
         self.conn
             .execute("DELETE FROM symbols WHERE path = ?1", params![path_str])
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -89,11 +89,50 @@ impl Store {
     /// Insert a symbol, returning its assigned ID.
     pub fn upsert_symbol(&self, sym: &Symbol) -> Result<u64, Error> {
         self.conn
-            .execute(
+            .prepare_cached(
                 "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
                                      byte_start, byte_end, line_start, line_end, body_hash)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .execute(params![
+                sym.path.to_str().unwrap_or(""),
+                sym.name.as_str(),
+                sym.qualified_name.as_str(),
+                sym.kind.label(),
+                sym.signature.as_deref(),
+                sym.doc.as_deref(),
+                sym.parent_id,
+                sym.byte_range.start,
+                sym.byte_range.end,
+                *sym.line_range.start(),
+                *sym.line_range.end(),
+                sym.body_hash.as_slice(),
+            ])
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
+
+    /// Batch-insert symbols in a single transaction. Much faster than individual inserts.
+    pub fn upsert_symbols_batch(&self, symbols: &[Symbol]) -> Result<(), Error> {
+        if symbols.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
+                                         byte_start, byte_end, line_start, line_end, body_hash)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?;
+
+            for sym in symbols {
+                stmt.execute(params![
                     sym.path.to_str().unwrap_or(""),
                     sym.name.as_str(),
                     sym.qualified_name.as_str(),
@@ -106,10 +145,111 @@ impl Store {
                     *sym.line_range.start(),
                     *sym.line_range.end(),
                     sym.body_hash.as_slice(),
-                ],
+                ])
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            }
+        }
+        tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Batch-insert file metadata + symbols + refs in a single transaction.
+    pub fn batch_index_file(
+        &self,
+        meta: &FileMeta,
+        symbols: &[Symbol],
+        refs: &[Ref],
+    ) -> Result<(), Error> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        {
+            let path_str = meta.path.to_str().unwrap_or("");
+
+            // Delete old data
+            tx.execute(
+                "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
+                params![path_str],
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
-        Ok(self.conn.last_insert_rowid() as u64)
+            tx.execute("DELETE FROM symbols WHERE path = ?1", params![path_str])
+                .map_err(|e| Error::Storage(e.to_string()))?;
+
+            // Upsert file
+            tx.prepare_cached(
+                "INSERT INTO files(path, lang, size_bytes, content_hash, mtime, indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(path) DO UPDATE SET
+                    lang=excluded.lang, size_bytes=excluded.size_bytes,
+                    content_hash=excluded.content_hash, mtime=excluded.mtime,
+                    indexed_at=excluded.indexed_at",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .execute(params![
+                path_str,
+                meta.lang.name(),
+                meta.size_bytes,
+                meta.content_hash.as_slice(),
+                meta.mtime,
+                meta.indexed_at,
+            ])
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+            // Batch symbols
+            if !symbols.is_empty() {
+                let mut sym_stmt = tx
+                    .prepare_cached(
+                        "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
+                                             byte_start, byte_end, line_start, line_end, body_hash)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    )
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+
+                for sym in symbols {
+                    sym_stmt
+                        .execute(params![
+                            sym.path.to_str().unwrap_or(""),
+                            sym.name.as_str(),
+                            sym.qualified_name.as_str(),
+                            sym.kind.label(),
+                            sym.signature.as_deref(),
+                            sym.doc.as_deref(),
+                            sym.parent_id,
+                            sym.byte_range.start,
+                            sym.byte_range.end,
+                            *sym.line_range.start(),
+                            *sym.line_range.end(),
+                            sym.body_hash.as_slice(),
+                        ])
+                        .map_err(|e| Error::Storage(e.to_string()))?;
+                }
+            }
+
+            // Batch refs
+            if !refs.is_empty() {
+                let mut ref_stmt = tx
+                    .prepare_cached(
+                        "INSERT INTO refs(src_path, src_symbol_id, ident, dst_symbol_id, weight)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                    )
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+
+                for r in refs {
+                    ref_stmt
+                        .execute(params![
+                            r.src_path.to_str().unwrap_or(""),
+                            r.src_symbol_id,
+                            r.ident.as_str(),
+                            r.dst_symbol_id,
+                            r.weight,
+                        ])
+                        .map_err(|e| Error::Storage(e.to_string()))?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
     }
 
     /// Delete all symbols for a given file path.
@@ -146,7 +286,7 @@ impl Store {
     pub fn find_symbols_exact(&self, name: &str, limit: usize) -> Result<Vec<Symbol>, Error> {
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
                         byte_start, byte_end, line_start, line_end, body_hash
                  FROM symbols WHERE name = ?1 COLLATE NOCASE LIMIT ?2",
@@ -157,10 +297,9 @@ impl Store {
             .query_map(params![name, limit], |row| Ok(row_to_symbol(row)))
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(limit.min(64));
         for r in rows {
-            let sym = r.map_err(|e| Error::Storage(e.to_string()))??;
-            results.push(sym);
+            results.push(r.map_err(|e| Error::Storage(e.to_string()))??);
         }
         Ok(results)
     }
@@ -173,7 +312,7 @@ impl Store {
 
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature, s.doc,
                         s.parent_id, s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
                  FROM symbols_fts f
@@ -187,23 +326,25 @@ impl Store {
             .query_map(params![query, limit], |row| Ok(row_to_symbol(row)))
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(limit.min(64));
         for r in rows {
-            let sym = r.map_err(|e| Error::Storage(e.to_string()))??;
-            results.push(sym);
+            results.push(r.map_err(|e| Error::Storage(e.to_string()))??);
         }
         Ok(results)
     }
 
     /// Insert a batch of refs.
     pub fn upsert_refs(&self, refs: &[Ref]) -> Result<(), Error> {
+        if refs.is_empty() {
+            return Ok(());
+        }
         let tx = self
             .conn
             .unchecked_transaction()
             .map_err(|e| Error::Storage(e.to_string()))?;
         {
             let mut stmt = tx
-                .prepare(
+                .prepare_cached(
                     "INSERT INTO refs(src_path, src_symbol_id, ident, dst_symbol_id, weight)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                 )
@@ -228,7 +369,7 @@ impl Store {
     pub fn refs_for_ident(&self, ident: &str) -> Result<Vec<Ref>, Error> {
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT src_path, src_symbol_id, ident, dst_symbol_id, weight
                  FROM refs WHERE ident = ?1",
             )
@@ -246,7 +387,7 @@ impl Store {
             })
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(32);
         for r in rows {
             results.push(r.map_err(|e| Error::Storage(e.to_string()))?);
         }
@@ -263,7 +404,9 @@ impl Store {
                 |row| {
                     let blob: Vec<u8> = row.get(0)?;
                     let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&blob);
+                    if blob.len() == 32 {
+                        hash.copy_from_slice(&blob);
+                    }
                     Ok(hash)
                 },
             )
@@ -307,7 +450,7 @@ impl Store {
         let path_str = path.to_str().unwrap_or("");
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
                         byte_start, byte_end, line_start, line_end, body_hash
                  FROM symbols WHERE path = ?1 ORDER BY byte_start",
@@ -318,7 +461,7 @@ impl Store {
             .query_map(params![path_str], |row| Ok(row_to_symbol(row)))
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(32);
         for r in rows {
             results.push(r.map_err(|e| Error::Storage(e.to_string()))??);
         }
@@ -329,7 +472,7 @@ impl Store {
     pub fn all_file_paths(&self) -> Result<Vec<PathBuf>, Error> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path FROM files ORDER BY path")
+            .prepare_cached("SELECT path FROM files ORDER BY path")
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let rows = stmt
@@ -339,7 +482,7 @@ impl Store {
             })
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(128);
         for r in rows {
             results.push(r.map_err(|e| Error::Storage(e.to_string()))?);
         }
@@ -478,7 +621,6 @@ mod tests {
             .unwrap();
 
         let results = store.find_symbols_exact("foo", 10).unwrap();
-        // Case-insensitive, both match
         assert_eq!(results.len(), 2);
     }
 
@@ -494,7 +636,6 @@ mod tests {
             ))
             .unwrap();
 
-        // Trigram search should match substring
         let results = store.search_symbols_fuzzy("validate", 10).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].name.as_str(), "validate_email");
@@ -540,16 +681,22 @@ mod tests {
         let store = Store::open_memory().unwrap();
         store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
 
+        let symbols: Vec<Symbol> = (0..10_000)
+            .map(|i| {
+                let name = format!("sym_{i}");
+                let qname = format!("mod::sym_{i}");
+                make_symbol(&name, &qname, SymbolKind::Function)
+            })
+            .collect();
+
         let start = std::time::Instant::now();
-        for i in 0..10_000 {
-            let name = format!("sym_{i}");
-            let qname = format!("mod::sym_{i}");
-            let sym = make_symbol(&name, &qname, SymbolKind::Function);
-            store.upsert_symbol(&sym).unwrap();
-        }
+        store.upsert_symbols_batch(&symbols).unwrap();
         let elapsed = start.elapsed();
-        eprintln!("10K symbol inserts took {elapsed:?}");
-        assert!(elapsed.as_secs() < 5, "10K inserts took too long: {elapsed:?}");
+        eprintln!("10K batched symbol inserts took {elapsed:?}");
+        assert!(
+            elapsed.as_millis() < 2000,
+            "10K inserts took too long: {elapsed:?}"
+        );
         assert_eq!(store.symbol_count().unwrap(), 10_000);
     }
 
@@ -561,5 +708,26 @@ mod tests {
             store.get_meta("last_commit").unwrap().as_deref(),
             Some("abc123")
         );
+    }
+
+    #[test]
+    fn batch_index_file_works() {
+        let store = Store::open_memory().unwrap();
+        let meta = make_file_meta("src/lib.rs");
+        let symbols = vec![
+            make_symbol("foo", "mod::foo", SymbolKind::Function),
+            make_symbol("bar", "mod::bar", SymbolKind::Function),
+        ];
+        let refs = vec![Ref {
+            src_path: PathBuf::from("src/lib.rs"),
+            src_symbol_id: 1,
+            ident: CompactString::new("bar"),
+            dst_symbol_id: None,
+            weight: 1.0,
+        }];
+
+        store.batch_index_file(&meta, &symbols, &refs).unwrap();
+        assert_eq!(store.symbol_count().unwrap(), 2);
+        assert_eq!(store.refs_for_ident("bar").unwrap().len(), 1);
     }
 }

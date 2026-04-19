@@ -54,11 +54,18 @@ pub fn walk_repo(root: &Path) -> Vec<PathBuf> {
 
 /// Check if a path looks like a generated file by scanning first 8 lines.
 pub fn is_generated(path: &Path) -> bool {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    use std::io::{BufRead, BufReader};
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(_) => return false,
     };
-    for line in content.lines().take(8) {
+    let reader = BufReader::with_capacity(4096, file);
+    for line in reader.lines().take(8) {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
         for marker in GENERATED_MARKERS {
             if line.contains(marker) {
                 return true;

@@ -13,17 +13,17 @@ pub fn fuzzy_rank(symbols: &[Symbol], query: &str, limit: usize) -> Vec<(usize, 
     let pattern = Pattern::new(query, CaseMatching::Smart, Normalization::Smart, nucleo::pattern::AtomKind::Fuzzy);
     let mut matcher = Matcher::default();
 
-    let mut scored: Vec<(usize, u32)> = symbols
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, sym)| {
-            let name = sym.name.as_str();
-            let mut buf = Vec::new();
-            let haystack = Utf32Str::new(name, &mut buf);
-            let score = pattern.score(haystack, &mut matcher)?;
-            Some((idx, score))
-        })
-        .collect();
+    let mut buf = Vec::with_capacity(128);
+    let mut scored: Vec<(usize, u32)> = Vec::with_capacity(symbols.len().min(256));
+
+    for (idx, sym) in symbols.iter().enumerate() {
+        buf.clear();
+        let name = sym.name.as_str();
+        let haystack = Utf32Str::new(name, &mut buf);
+        if let Some(score) = pattern.score(haystack, &mut matcher) {
+            scored.push((idx, score));
+        }
+    }
 
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     scored.truncate(limit);

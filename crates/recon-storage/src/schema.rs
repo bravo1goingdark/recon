@@ -36,6 +36,8 @@ CREATE TABLE symbols (
 CREATE INDEX symbols_name ON symbols(name COLLATE NOCASE);
 CREATE INDEX symbols_qname ON symbols(qualified_name COLLATE NOCASE);
 CREATE INDEX symbols_path ON symbols(path);
+CREATE INDEX symbols_kind ON symbols(kind);
+CREATE INDEX symbols_path_parent ON symbols(path, parent_id);
 
 CREATE VIRTUAL TABLE symbols_fts USING fts5(
     name,
@@ -76,6 +78,7 @@ CREATE TABLE refs (
 CREATE INDEX refs_ident ON refs(ident);
 CREATE INDEX refs_src ON refs(src_symbol_id);
 CREATE INDEX refs_dst ON refs(dst_symbol_id);
+CREATE INDEX refs_src_ident ON refs(src_symbol_id, ident);
 
 CREATE TABLE meta (
     key   TEXT PRIMARY KEY,

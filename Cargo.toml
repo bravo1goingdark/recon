@@ -20,71 +20,71 @@ recon-indexer = { path = "crates/recon-indexer" }
 recon-server = { path = "crates/recon-server" }
 
 # Async runtime
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "signal", "sync", "fs"] }
+tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs"] }
 
 # MCP SDK
-rmcp = { version = "1.5", features = ["server", "transport-async-rw", "transport-io"] }
+rmcp = { version = "1.5.0", features = ["server", "transport-async-rw", "transport-io"] }
 
 # Tree-sitter
-tree-sitter = "0.25"
-tree-sitter-rust = "0.24"
-tree-sitter-python = "0.25"
-tree-sitter-typescript = "0.23"
-tree-sitter-javascript = "0.25"
-tree-sitter-go = "0.25"
-tree-sitter-java = "0.23"
-tree-sitter-c = "0.24"
-tree-sitter-cpp = "0.23"
+tree-sitter = "0.26.8"
+tree-sitter-rust = "0.24.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-c = "0.24.1"
+tree-sitter-cpp = "0.23.4"
 
 # Storage
 rusqlite = { version = "0.37", features = ["bundled", "blob", "array", "modern_sqlite"] }
-rusqlite_migration = "2"
+rusqlite_migration = "2.3"
 blake3 = "1"
-tantivy = "0.25"
+tantivy = "0.26.0"
 
 # Search
-nucleo = "0.5"
-grep-matcher = "0.1"
-grep-regex = "0.1"
-grep-searcher = "0.1"
+nucleo = "0.5.0"
+grep-matcher = "0.1.8"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.16"
 
 # Embeddings (optional)
 # fastembed = "5"
 # lancedb = "0.23"
 
 # Git & file watching
-gix = { version = "0.70", default-features = false, features = ["blob-diff", "worktree-stream", "status"] }
-ignore = "0.4"
-notify = "8.2"
-notify-debouncer-full = "0.6"
+gix = { version = "0.81.0", default-features = false, features = ["blob-diff", "worktree-stream", "status"] }
+ignore = "0.4.25"
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
 
 # Graph / ranking
-petgraph = "0.7"
+petgraph = "0.8.3"
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-schemars = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+schemars = "1.2.1"
 
 # Error handling
-thiserror = "2"
-anyhow = "1"
+thiserror = "2.0.18"
+anyhow = "1.0.102"
 
 # CLI
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 
 # Observability
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 
 # Hot-path performance
-smallvec = "1"
-compact_str = { version = "0.9", features = ["serde"] }
-ahash = "0.8"
-arc-swap = "1"
-rayon = "1"
-crossbeam-queue = "0.3"
-memmap2 = "0.9"
+smallvec = "1.15.1"
+compact_str = { version = "0.9.0", features = ["serde"] }
+ahash = "0.8.12"
+arc-swap = "1.9.1"
+rayon = "1.12.0"
+crossbeam-queue = "0.3.12"
+memmap2 = "0.9.10"
 
 # Misc
-tempfile = "3"
+tempfile = "3.27.0"

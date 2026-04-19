@@ -6,6 +6,7 @@ use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 use recon_core::error::Error;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A single text search hit.
 #[derive(Debug, Clone)]
@@ -30,22 +31,21 @@ pub fn search_files(
     }
     .map_err(|e| Error::Search(format!("invalid pattern: {e}")))?;
 
-    let mut hits = Vec::new();
+    let mut hits = Vec::with_capacity(max_results.min(64));
     let mut searcher = Searcher::new();
 
     for path in paths {
         if hits.len() >= max_results {
             break;
         }
-        let p = path.clone();
+        let shared_path: Arc<PathBuf> = Arc::new(path.clone());
         let result = searcher.search_path(
             &matcher,
             path,
             UTF8(|line_num, line_text| {
                 if hits.len() >= max_results {
-                    return Ok(false); // stop early
+                    return Ok(false);
                 }
-                // Find column of match
                 let col = matcher
                     .find(line_text.as_bytes())
                     .ok()
@@ -53,7 +53,7 @@ pub fn search_files(
                     .map(|m| m.start() as u32 + 1);
 
                 hits.push(TextHit {
-                    path: p.clone(),
+                    path: (*shared_path).clone(),
                     line: line_num as u32,
                     col,
                     line_text: line_text.trim_end().to_string(),
