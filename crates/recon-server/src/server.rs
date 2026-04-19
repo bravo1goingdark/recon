@@ -654,34 +654,29 @@ impl ReconServer {
     )]
     async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
         let store = self.store.lock().await;
-        let paths = store.all_file_paths().unwrap_or_default();
 
-        let mut all_symbols = Vec::new();
-        let mut all_refs = Vec::new();
-        for path in &paths {
-            all_symbols.extend(store.symbols_for_path(path).unwrap_or_default());
-        }
-        let mut seen = std::collections::HashSet::new();
-        for sym in &all_symbols {
-            if seen.insert(sym.name.as_str()) {
-                all_refs.extend(store.refs_for_ident(sym.name.as_str()).unwrap_or_default());
-            }
-        }
+        // Bulk load everything in two queries instead of O(files + unique_names)
+        let all_symbols = store.all_symbols().unwrap_or_default();
+        let all_refs = store.all_refs().unwrap_or_default();
+        drop(store);
 
-        let focus_indices: Vec<usize> = params
-            .0
-            .focus_files
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .flat_map(|f| {
-                all_symbols
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| s.path.to_string_lossy().contains(f.as_str()))
-                    .map(|(i, _)| i)
-            })
-            .collect();
+        let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
+        let focus_set: std::collections::HashSet<&str> =
+            focus_files.iter().map(|s| s.as_str()).collect();
+
+        let focus_indices: Vec<usize> = if focus_set.is_empty() {
+            Vec::new()
+        } else {
+            all_symbols
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    let p = s.path.to_string_lossy();
+                    focus_set.iter().any(|f| p.contains(f))
+                })
+                .map(|(i, _)| i)
+                .collect()
+        };
 
         let ranked = pagerank::pagerank(&all_symbols, &all_refs, &focus_indices, 0.85, 30);
         let content = pagerank::render_repo_map(&all_symbols, &ranked, params.0.token_budget);

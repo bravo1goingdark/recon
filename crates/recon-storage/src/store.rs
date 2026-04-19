@@ -468,6 +468,56 @@ impl Store {
         Ok(results)
     }
 
+    /// Load all refs in a single query (for bulk operations like PageRank).
+    pub fn all_refs(&self) -> Result<Vec<Ref>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT src_path, src_symbol_id, ident, dst_symbol_id, weight FROM refs",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(Ref {
+                    src_path: PathBuf::from(row.get::<_, String>(0)?),
+                    src_symbol_id: row.get(1)?,
+                    ident: CompactString::new(row.get::<_, String>(2)?),
+                    dst_symbol_id: row.get(3)?,
+                    weight: row.get(4)?,
+                })
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut results = Vec::with_capacity(1024);
+        for r in rows {
+            results.push(r.map_err(|e| Error::Storage(e.to_string()))?);
+        }
+        Ok(results)
+    }
+
+    /// Load all symbols in a single query (for bulk operations like PageRank).
+    pub fn all_symbols(&self) -> Result<Vec<Symbol>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
+                        byte_start, byte_end, line_start, line_end, body_hash
+                 FROM symbols ORDER BY path, byte_start",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| Ok(row_to_symbol(row)))
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut results = Vec::with_capacity(1024);
+        for r in rows {
+            results.push(r.map_err(|e| Error::Storage(e.to_string()))??);
+        }
+        Ok(results)
+    }
+
     /// List all indexed file paths.
     pub fn all_file_paths(&self) -> Result<Vec<PathBuf>, Error> {
         let mut stmt = self
