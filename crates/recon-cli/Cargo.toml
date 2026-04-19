@@ -24,6 +24,11 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 mimalloc = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+tower-service = { workspace = true }
+tokio-util = { workspace = true }
 
 [features]
 default = []

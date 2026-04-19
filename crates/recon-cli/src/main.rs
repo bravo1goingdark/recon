@@ -27,11 +27,17 @@ struct Cli {
 enum Command {
     /// Index the repo and register recon as an MCP server in .mcp.json
     Init,
-    /// Start the MCP server over stdio
+    /// Start the MCP server (stdio by default, HTTP with --port)
     Serve {
         /// Log level
         #[arg(long, default_value = "info")]
         log: String,
+        /// Port for Streamable HTTP transport (omit for stdio)
+        #[arg(short, long)]
+        port: Option<u16>,
+        /// Bind address for HTTP transport
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
     },
     /// Index a repository without starting the server
     Index,
@@ -158,6 +164,70 @@ fn read_server(repo: PathBuf) -> Result<ReconServer> {
     Ok(server)
 }
 
+/// Serve the MCP server over Streamable HTTP.
+async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
+    use hyper_util::rt::TokioIo;
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(true)
+        .with_sse_keep_alive(Some(std::time::Duration::from_secs(15)))
+        .with_json_response(false)
+        .with_cancellation_token(cancel.clone())
+        .with_allowed_hosts(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+            format!("localhost:{port}"),
+            format!("127.0.0.1:{port}"),
+            format!("::1:{port}"),
+        ]);
+
+    let session_manager = Arc::new(LocalSessionManager::default());
+    let service = StreamableHttpService::new(move || Ok(server.clone()), session_manager, config);
+
+    let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("Streamable HTTP server listening on http://{addr}/mcp");
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, _peer) = accept?;
+                let io = TokioIo::new(stream);
+                let svc = service.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(io, hyper::service::service_fn(move |req| {
+                        let mut svc = svc.clone();
+                        async move {
+                            use tower_service::Service;
+                            svc.call(req).await
+                        }
+                    }))
+                    .await
+                    {
+                        tracing::warn!("HTTP connection error: {e}");
+                    }
+                });
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutting down");
+                cancel.cancel();
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -274,7 +344,7 @@ async fn main() -> Result<()> {
             eprintln!("Restart Claude Code to activate recon tools.");
             Ok(())
         }
-        Command::Serve { log } => {
+        Command::Serve { log, port, host } => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
                 .with_env_filter(EnvFilter::new(&log))
@@ -289,10 +359,16 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             server.start_watcher();
 
-            let (stdin, stdout) = rmcp::transport::io::stdio();
-            let _service = server.serve((stdin, stdout)).await?;
-            tokio::signal::ctrl_c().await?;
-            Ok(())
+            if let Some(port) = port {
+                // Streamable HTTP transport
+                serve_http(server, &host, port).await
+            } else {
+                // Stdio transport (default)
+                let (stdin, stdout) = rmcp::transport::io::stdio();
+                let _service = server.serve((stdin, stdout)).await?;
+                tokio::signal::ctrl_c().await?;
+                Ok(())
+            }
         }
         Command::Index => {
             tracing_subscriber::fmt()

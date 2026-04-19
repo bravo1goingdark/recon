@@ -20,10 +20,10 @@ recon-indexer = { path = "crates/recon-indexer" }
 recon-server = { path = "crates/recon-server" }
 
 # Async runtime
-tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs"] }
+tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs", "net"] }
 
 # MCP SDK
-rmcp = { version = "1.5.0", features = ["server", "transport-async-rw", "transport-io"] }
+rmcp = { version = "1.5.0", features = ["server", "transport-async-rw", "transport-io", "transport-streamable-http-server"] }
 
 # Tree-sitter
 tree-sitter = "0.26.8"
@@ -100,6 +100,13 @@ toml = "1"
 
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
+
+# HTTP server
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
+http-body-util = "0.1"
+tower-service = "0.3"
+tokio-util = { version = "0.7", features = ["codec"] }
 
 # Allocator
 mimalloc = "0.1"
