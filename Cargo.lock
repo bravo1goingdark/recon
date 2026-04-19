@@ -6355,7 +6355,9 @@ name = "recon-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
+ "dashmap",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -6370,6 +6372,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "toml",
  "tower-service",
  "tracing",
  "tracing-subscriber",

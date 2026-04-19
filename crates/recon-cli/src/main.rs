@@ -1,6 +1,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod hosted;
 mod pretty;
 
 use anyhow::Result;
@@ -11,7 +12,7 @@ use recon_server::server::ReconServer;
 use recon_storage::store::Store;
 use rmcp::ServiceExt;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -33,6 +34,21 @@ struct Cli {
 enum Command {
     /// Index the repo and register recon as an MCP server in .mcp.json
     Init,
+    /// Start a multi-repo hosted server with API key auth
+    ServeHosted {
+        /// Port to listen on
+        #[arg(short, long, default_value = "3100")]
+        port: u16,
+        /// Bind address
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+        /// Path to keys.toml config file
+        #[arg(short, long)]
+        keys: PathBuf,
+        /// Log level
+        #[arg(long, default_value = "info")]
+        log: String,
+    },
     /// Start the MCP server (stdio by default, HTTP with --port)
     Serve {
         /// Log level
@@ -234,6 +250,160 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Multi-repo hosted server with API key auth.
+///
+/// Auth flow: client sends `Authorization: Bearer <key>` header.
+/// The key maps to a repo path via keys.toml. The request is routed
+/// to the correct ReconServer instance via DashMap lookup.
+async fn serve_hosted(
+    key_config: hosted::KeyConfig,
+    router: std::sync::Arc<hosted::RepoRouter>,
+    host: &str,
+    port: u16,
+) -> Result<()> {
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper_util::rt::TokioIo;
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+
+    let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("Hosted server listening on http://{addr}");
+
+    // Each API key gets its own MCP session manager and service.
+    // We create them lazily per-connection based on the auth header.
+    let key_config = Arc::new(key_config);
+    let router = router;
+
+    // Cache of StreamableHttpService per repo path
+    let services: Arc<
+        dashmap::DashMap<
+            std::path::PathBuf,
+            StreamableHttpService<ReconServer, LocalSessionManager>,
+        >,
+    > = Arc::new(dashmap::DashMap::new());
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, peer) = accept?;
+                let io = TokioIo::new(stream);
+                let key_config = key_config.clone();
+                let router = router.clone();
+                let services = services.clone();
+                let cancel = cancel.clone();
+
+                tokio::spawn(async move {
+                    let key_config = key_config.clone();
+                    let router = router.clone();
+                    let services = services.clone();
+                    let cancel = cancel.clone();
+
+                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(io, hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                        let key_config = key_config.clone();
+                        let router = router.clone();
+                        let services = services.clone();
+                        let cancel = cancel.clone();
+
+                        async move {
+                            // Extract and validate API key
+                            let auth = req.headers()
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(hosted::extract_bearer);
+
+                            let api_key = match auth {
+                                Some(k) => k.to_string(),
+                                None => {
+                                    return Ok::<_, std::convert::Infallible>(
+                                        hyper::Response::builder()
+                                            .status(401)
+                                            .header("content-type", "application/json")
+                                            .body(Full::new(Bytes::from(
+                                                r#"{"error":"missing or invalid Authorization: Bearer <key> header"}"#,
+                                            )).boxed())
+                                            .expect("valid response"),
+                                    );
+                                }
+                            };
+
+                            let repo_path = match key_config.repo_for_key(&api_key) {
+                                Some(p) => p.to_path_buf(),
+                                None => {
+                                    return Ok(
+                                        hyper::Response::builder()
+                                            .status(403)
+                                            .header("content-type", "application/json")
+                                            .body(Full::new(Bytes::from(
+                                                r#"{"error":"invalid API key"}"#,
+                                            )).boxed())
+                                            .expect("valid response"),
+                                    );
+                                }
+                            };
+
+                            // Get or create the MCP service for this repo
+                            if !services.contains_key(&repo_path) {
+                                let server = match router.get_or_load(&repo_path) {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        return Ok(
+                                            hyper::Response::builder()
+                                                .status(500)
+                                                .header("content-type", "application/json")
+                                                .body(Full::new(Bytes::from(
+                                                    format!(r#"{{"error":"failed to load repo: {e}"}}"#),
+                                                )).boxed())
+                                                .expect("valid response"),
+                                        );
+                                    }
+                                };
+
+                                let config = StreamableHttpServerConfig::default()
+                                    .with_stateful_mode(true)
+                                    .with_sse_keep_alive(Some(std::time::Duration::from_secs(15)))
+                                    .with_cancellation_token(cancel.clone())
+                                    .with_allowed_hosts(Vec::<String>::new()); // Disable host check — Cloudflare handles this
+
+                                let session_manager = Arc::new(LocalSessionManager::default());
+                                let svc = StreamableHttpService::new(
+                                    move || Ok(server.clone()),
+                                    session_manager,
+                                    config,
+                                );
+                                services.insert(repo_path.clone(), svc);
+                            }
+
+                            let mut svc = services.get(&repo_path).unwrap().clone();
+                            use tower_service::Service;
+                            svc.call(req).await
+                        }
+                    }))
+                    .await
+                    {
+                        tracing::debug!(%peer, "connection closed: {e}");
+                    }
+                });
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutting down hosted server");
+                cancel.cancel();
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -242,6 +412,31 @@ async fn main() -> Result<()> {
     let out = |s: &str| pretty::print_output(s, raw_json);
 
     match cli.command {
+        Command::ServeHosted {
+            port,
+            host,
+            keys,
+            log,
+        } => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(EnvFilter::new(&log))
+                .init();
+
+            let key_config = hosted::KeyConfig::load(&keys)?;
+            let router = std::sync::Arc::new(hosted::RepoRouter::new());
+
+            // Pre-load all configured repos
+            for (api_key, repo_path) in &key_config.keys {
+                info!(key = &api_key[..8.min(api_key.len())], repo = %repo_path.display(), "pre-loading repo");
+                if let Err(e) = router.get_or_load(repo_path) {
+                    warn!(repo = %repo_path.display(), "failed to load: {e}");
+                }
+            }
+            info!(repos = router.repo_count(), "all repos loaded");
+
+            serve_hosted(key_config, router, &host, port).await
+        }
         Command::Init => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
