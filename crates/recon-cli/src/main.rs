@@ -25,6 +25,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Index the repo and register recon as an MCP server in .mcp.json
+    Init,
     /// Start the MCP server over stdio
     Serve {
         /// Log level
@@ -162,6 +164,68 @@ async fn main() -> Result<()> {
     let repo = cli.repo;
 
     match cli.command {
+        Command::Init => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(EnvFilter::new("info"))
+                .init();
+
+            let repo = repo.canonicalize()?;
+
+            // 1. Index the repo
+            let store_dir = repo.join(".recon");
+            std::fs::create_dir_all(&store_dir)?;
+            let store =
+                Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let stats = indexer::index_repo_incremental(&store, Some(&tantivy), &repo)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            eprintln!(
+                "Indexed {} files, {} symbols ({} errors)",
+                stats.files_indexed, stats.total_symbols, stats.errors
+            );
+
+            // 2. Find the recon binary path
+            let recon_bin = std::env::current_exe()?
+                .canonicalize()?
+                .to_string_lossy()
+                .to_string();
+
+            // 3. Write .mcp.json
+            let mcp_path = repo.join(".mcp.json");
+            let mcp_config = serde_json::json!({
+                "mcpServers": {
+                    "recon": {
+                        "command": recon_bin,
+                        "args": ["--repo", repo.to_string_lossy(), "serve"]
+                    }
+                }
+            });
+
+            let existing: serde_json::Value = if mcp_path.exists() {
+                let content = std::fs::read_to_string(&mcp_path)?;
+                serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+
+            // Merge: preserve existing servers, add/update recon
+            let mut merged = existing;
+            if let Some(obj) = merged.as_object_mut() {
+                let servers = obj
+                    .entry("mcpServers")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(servers_obj) = servers.as_object_mut() {
+                    servers_obj.insert("recon".into(), mcp_config["mcpServers"]["recon"].clone());
+                }
+            }
+
+            std::fs::write(&mcp_path, serde_json::to_string_pretty(&merged)?)?;
+            eprintln!("Wrote {}", mcp_path.display());
+            eprintln!("Restart Claude Code to activate recon tools.");
+            Ok(())
+        }
         Command::Serve { log } => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
