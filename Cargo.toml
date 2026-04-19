@@ -88,6 +88,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 
 # Concurrency
 dashmap = "6.1"
+parking_lot = "0.12"
 
 # Hot-path performance
 smallvec = "1.15.1"

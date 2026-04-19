@@ -6486,6 +6486,7 @@ name = "recon-server"
 version = "0.1.0"
 dependencies = [
  "compact_str",
+ "parking_lot",
  "recon-core",
  "recon-embed",
  "recon-indexer",

@@ -1,6 +1,7 @@
 //! MCP server — fully wired: Tantivy search, PageRank, redaction, live watching.
 
 use crate::tools::*;
+use parking_lot::Mutex;
 use recon_core::lang::Language;
 use recon_core::redact;
 use recon_core::shapes::*;
@@ -16,7 +17,6 @@ use rmcp::model::{Implementation, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 /// The recon MCP server.
@@ -63,15 +63,15 @@ impl ReconServer {
         let vs = recon_embed::VectorStore::open(&store_dir.join("vectors"))
             .await
             .map_err(|e| recon_core::error::Error::Search(format!("vector store: {e}")))?;
-        *self.embedder.lock().await = Some(embedder);
-        *self.vector_store.lock().await = Some(vs);
+        *self.embedder.lock() = Some(embedder);
+        *self.vector_store.lock() = Some(vs);
         info!("embedding engine initialized");
         Ok(())
     }
 
     /// Run initial indexing of the repo (SQLite + Tantivy).
     pub async fn index_repo(&self) -> Result<(), recon_core::error::Error> {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let stats = indexer::index_repo_incremental(&store, Some(&self.tantivy), &self.repo_root)?;
         info!(
             files = stats.files_indexed,
@@ -155,7 +155,7 @@ impl ReconServer {
             info!("file watcher started");
 
             while let Some(changed_paths) = watcher.recv() {
-                let store = store.lock().await;
+                let store = store.lock();
                 let mut writer = match tantivy.writer(15_000_000) {
                     Ok(w) => w,
                     Err(e) => {
@@ -191,11 +191,8 @@ impl ReconServer {
         let canonical = path
             .canonicalize()
             .map_err(|e| format!("path not found: {rel}: {e}"))?;
-        let root_canonical = self
-            .repo_root
-            .canonicalize()
-            .map_err(|e| format!("repo root error: {e}"))?;
-        if !canonical.starts_with(&root_canonical) {
+        // repo_root is already canonicalized at construction time
+        if !canonical.starts_with(&self.repo_root) {
             return Err(format!("path traversal denied: {rel}"));
         }
         Ok(canonical)
@@ -228,7 +225,7 @@ impl ReconServer {
         if let Err(e) = self.resolve_path(&params.0.path) {
             return format!("Error: {e}");
         }
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let rel_path = PathBuf::from(&params.0.path);
         let symbols = match store.symbols_for_path(&rel_path) {
             Ok(s) => s,
@@ -277,7 +274,7 @@ impl ReconServer {
             Err(e) => return format!("Error reading file: {e}"),
         };
 
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let rel_path = PathBuf::from(&params.0.path);
         let symbols = store.symbols_for_path(&rel_path).unwrap_or_default();
 
@@ -306,7 +303,7 @@ impl ReconServer {
             skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
         }
 
-        let token_est = recon_search::tokens::count_tokens(&skeleton);
+        let token_est = recon_search::tokens::estimate_tokens(&skeleton);
         let view = ToolOutput::Skeleton(SkeletonView {
             path: Some(rel_path),
             content: skeleton,
@@ -329,7 +326,7 @@ impl ReconServer {
             Err(e) => return format!("Error: {e}"),
         };
 
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let rel_path = PathBuf::from(&params.0.path);
         let symbols = store.symbols_for_path(&rel_path).unwrap_or_default();
 
@@ -384,7 +381,7 @@ impl ReconServer {
         description = "Find symbols by name across the codebase. Tiered: exact SQLite match -> Tantivy BM25 -> FTS5 trigram + nucleo fuzzy. Use instead of Grep when searching for functions, types, or classes."
     )]
     async fn code_find_symbol(&self, params: Parameters<FindSymbolParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
 
         // Tier 0: exact match via SQLite index
         let mut results = store
@@ -449,7 +446,7 @@ impl ReconServer {
         description = "Find all references to a symbol. Returns a count and top-k call sites as path:line triples. Use instead of Grep for finding usages of a function or type."
     )]
     async fn code_find_refs(&self, params: Parameters<FindRefsParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let refs = store.refs_for_ident(&params.0.symbol).unwrap_or_default();
 
         let top_k: Vec<RefEntry> = refs
@@ -477,7 +474,7 @@ impl ReconServer {
         description = "Search for text patterns. Modes: exact (default), regex, hybrid (BM25 + text fused via reciprocal rank fusion). Use instead of Grep for code search."
     )]
     async fn code_search(&self, params: Parameters<SearchParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let paths = store.all_file_paths().unwrap_or_default();
         drop(store);
 
@@ -486,13 +483,20 @@ impl ReconServer {
         // Semantic mode via embed feature
         #[cfg(feature = "embed")]
         if params.0.mode == "semantic" {
-            let mut eg = self.embedder.lock().await;
-            let vg = self.vector_store.lock().await;
-            if let (Some(embedder), Some(vs)) = (eg.as_mut(), vg.as_ref()) {
-                let query_vec = match embedder.embed_one(&params.0.query) {
-                    Ok(v) => v,
-                    Err(e) => return format!("embed error: {e}"),
-                };
+            // Embed the query under lock, then drop locks before async search
+            let embed_result = {
+                let mut eg = self.embedder.lock();
+                let vg = self.vector_store.lock();
+                match (eg.as_mut(), vg.as_ref()) {
+                    (Some(embedder), Some(vs)) => match embedder.embed_one(&params.0.query) {
+                        Ok(v) => Some((v, vs.clone())),
+                        Err(e) => return format!("embed error: {e}"),
+                    },
+                    _ => None,
+                }
+            };
+            // Locks dropped — safe to await
+            if let Some((query_vec, vs)) = embed_result {
                 let results = match vs.search(query_vec, None, 20).await {
                     Ok(r) => r,
                     Err(e) => return format!("vector search error: {e}"),
@@ -635,7 +639,7 @@ impl ReconServer {
         description = "List indexed source files with language, line count, and top symbols. Use instead of Glob when you need structured file listings. Supports language filter."
     )]
     async fn code_list(&self, params: Parameters<ListParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
 
         // Single query for all files + symbol counts + top symbols
         let summaries = store.file_symbol_summaries().unwrap_or_default();
@@ -684,7 +688,7 @@ impl ReconServer {
         description = "Generate a ranked overview of the most important symbols in the repo. Uses personalized PageRank over the reference graph with Aider-style edge weights. Output fits within a token budget (default 2000). Best first tool to call for orientation."
     )]
     async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
         let budget = params.0.token_budget;
 
@@ -704,7 +708,7 @@ impl ReconServer {
             let ranked = pagerank::pagerank(&all_symbols, &all_refs, &[], 0.85, 30);
             let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
 
-            let token_est = recon_search::tokens::count_tokens(&content);
+            let token_est = recon_search::tokens::estimate_tokens(&content);
             let view = ToolOutput::Skeleton(SkeletonView {
                 path: None,
                 content,
@@ -743,7 +747,7 @@ impl ReconServer {
         let ranked = pagerank::pagerank(&all_symbols, &all_refs, &focus_indices, 0.85, 30);
         let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
 
-        let token_est = recon_search::tokens::count_tokens(&content);
+        let token_est = recon_search::tokens::estimate_tokens(&content);
         let view = ToolOutput::Skeleton(SkeletonView {
             path: None,
             content,
@@ -757,7 +761,7 @@ impl ReconServer {
         description = "Search for patterns in string literals and comments. Finds SQL fragments, i18n keys, log messages that structural search misses."
     )]
     async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let paths = store.all_file_paths().unwrap_or_default();
         drop(store);
 
@@ -786,7 +790,7 @@ impl ReconServer {
         description = "Search for multiple patterns at once. More efficient than multiple code_search calls. Returns results grouped by pattern."
     )]
     async fn code_multi_find(&self, params: Parameters<MultiFindParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let paths = store.all_file_paths().unwrap_or_default();
         drop(store);
 
@@ -819,7 +823,7 @@ impl ReconServer {
         description = "Trigger a full re-index of the repository. Use when you suspect the index is stale or after major file changes outside the editor."
     )]
     async fn code_reindex(&self, _params: Parameters<ReindexParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         // Explicitly clear map cache before reindexing
         if let Err(e) = store.delete_meta_prefix("map_cache:") {
             warn!("failed to clear map cache on reindex: {e}");
@@ -841,7 +845,7 @@ impl ReconServer {
         description = "Report index health: total files, symbols, last indexed time, Tantivy doc count. Use to check if the index is fresh and complete."
     )]
     async fn code_stats(&self, _params: Parameters<StatsParams>) -> String {
-        let store = self.store.lock().await;
+        let store = self.store.lock();
         let file_count = store.all_file_paths().map(|p| p.len()).unwrap_or(0);
         let symbol_count = store.symbol_count().unwrap_or(0);
         let tantivy_docs = self.tantivy.doc_count();
