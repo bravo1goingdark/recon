@@ -1,5 +1,6 @@
 //! Shared types, error enums, and output shapes for recon.
 
+pub mod config;
 pub mod error;
 pub mod lang;
 pub mod redact;

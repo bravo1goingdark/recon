@@ -14,7 +14,13 @@ const GENERATED_MARKERS: &[&str] = &[
 ];
 
 /// Walk a directory, yielding paths that should be indexed.
+/// Uses default max file size of 1MB.
 pub fn walk_repo(root: &Path) -> Vec<PathBuf> {
+    walk_repo_with_limit(root, 1_048_576)
+}
+
+/// Walk a directory with a configurable max file size.
+pub fn walk_repo_with_limit(root: &Path, max_file_size: u64) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let walker = WalkBuilder::new(root)
         .hidden(true)
@@ -36,13 +42,11 @@ pub fn walk_repo(root: &Path) -> Vec<PathBuf> {
         if lang == Language::Unknown {
             continue;
         }
-        // Skip large files (>1 MB)
         if let Ok(meta) = std::fs::metadata(path) {
-            if meta.len() > 1_048_576 {
+            if meta.len() > max_file_size {
                 continue;
             }
         }
-        // Skip known vendored/build directories
         let path_str = path.to_string_lossy();
         if is_vendored(&path_str) {
             continue;
