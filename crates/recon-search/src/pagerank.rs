@@ -31,69 +31,76 @@ pub fn pagerank(
         return Vec::new();
     }
 
-    // Build name → index map for fast lookup
+    // Build name → index map for target resolution
     let mut name_to_idx: HashMap<&str, Vec<usize>> = HashMap::with_capacity(n);
+    // Build id → index map for source resolution
+    let mut id_to_idx: HashMap<u64, usize> = HashMap::with_capacity(n);
     for (i, sym) in symbols.iter().enumerate() {
         name_to_idx.entry(sym.name.as_str()).or_default().push(i);
+        id_to_idx.insert(sym.id, i);
     }
 
+    let focus_set: std::collections::HashSet<usize> = focus_symbols.iter().copied().collect();
+
     // Build adjacency list with weights
+    // Edge direction: source symbol (r.src_symbol_id) → targets named r.ident
     let mut out_edges: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut in_degree: Vec<usize> = vec![0; n];
 
     for r in refs {
-        // Find source symbol index
-        let src_indices = name_to_idx.get(r.ident.as_str());
-        if src_indices.is_none() {
-            continue;
+        // Resolve source by symbol ID
+        let src_idx = match id_to_idx.get(&r.src_symbol_id) {
+            Some(&idx) => idx,
+            None => continue,
+        };
+
+        // Resolve targets by identifier name
+        let target_indices = match name_to_idx.get(r.ident.as_str()) {
+            Some(indices) => indices,
+            None => continue,
+        };
+
+        let mut weight = r.weight as f64;
+        let ident = r.ident.as_str();
+
+        // Aider-style weight heuristics on the referenced identifier
+        // Boost long mixed-case identifiers (more specific = more important)
+        if ident.len() > 8
+            && (ident.contains('_') || ident.chars().any(|c| c.is_uppercase()))
+        {
+            weight *= 10.0;
         }
 
-        // For each source, create edges to potential targets
-        for &src_idx in src_indices.unwrap() {
-            let sym = &symbols[src_idx];
-            let mut weight = r.weight as f64;
+        // Demote private/internal names
+        if ident.starts_with('_') {
+            weight *= 0.1;
+        }
 
-            // Aider-style weight heuristics
-            let name = sym.name.as_str();
+        // Demote identifiers that appear in many files (common = less distinctive)
+        if target_indices.len() > 5 {
+            weight *= 0.1;
+        }
 
-            // Boost long mixed-case identifiers (more specific = more important)
-            if name.len() > 8 && (name.contains('_') || name.chars().any(|c| c.is_uppercase())) {
-                weight *= 10.0;
-            }
+        // Boost references from focus files
+        if focus_set.contains(&src_idx) {
+            weight *= 50.0;
+        }
 
-            // Demote private/internal names
-            if name.starts_with('_') {
-                weight *= 0.1;
-            }
-
-            // Check if identifier appears in many files (common = less distinctive)
-            if let Some(targets) = name_to_idx.get(r.ident.as_str()) {
-                if targets.len() > 5 {
-                    weight *= 0.1;
-                }
-            }
-
-            // Boost references from focus files
-            if focus_symbols.contains(&src_idx) {
-                weight *= 50.0;
-            }
-
-            for &target_idx in name_to_idx.get(r.ident.as_str()).unwrap_or(&Vec::new()) {
-                if target_idx != src_idx {
-                    out_edges[src_idx].push((target_idx, weight));
-                    in_degree[target_idx] += 1;
-                }
+        for &target_idx in target_indices {
+            if target_idx != src_idx {
+                out_edges[src_idx].push((target_idx, weight));
+                in_degree[target_idx] += 1;
             }
         }
     }
 
     // Personalization vector — uniform or biased toward focus symbols
     let mut personalization = vec![1.0 / n as f64; n];
-    if !focus_symbols.is_empty() {
-        let focus_weight = 0.8 / focus_symbols.len() as f64;
-        let other_weight = 0.2 / (n - focus_symbols.len()).max(1) as f64;
+    if !focus_set.is_empty() {
+        let focus_weight = 0.8 / focus_set.len() as f64;
+        let other_weight = 0.2 / (n - focus_set.len()).max(1) as f64;
         for (i, p) in personalization.iter_mut().enumerate() {
-            *p = if focus_symbols.contains(&i) {
+            *p = if focus_set.contains(&i) {
                 focus_weight
             } else {
                 other_weight
@@ -101,33 +108,38 @@ pub fn pagerank(
         }
     }
 
+    // Precompute total outgoing weight per node to avoid recomputing each iteration
+    let total_weights: Vec<f64> = out_edges
+        .iter()
+        .map(|edges| edges.iter().map(|(_, w)| w).sum())
+        .collect();
+
     // Power iteration
     let mut scores = vec![1.0 / n as f64; n];
     let mut new_scores = vec![0.0f64; n];
+    let inv_n = 1.0 / n as f64;
 
     for _ in 0..iterations {
         new_scores.fill(0.0);
 
+        // Accumulate dangling node mass as a scalar, then distribute once
+        let mut dangling_sum = 0.0f64;
         for (i, edges) in out_edges.iter().enumerate() {
-            if edges.is_empty() {
-                // Dangling node: distribute rank evenly
-                let share = scores[i] / n as f64;
-                for s in new_scores.iter_mut() {
-                    *s += share;
-                }
+            if edges.is_empty() || total_weights[i] == 0.0 {
+                dangling_sum += scores[i];
             } else {
-                let total_weight: f64 = edges.iter().map(|(_, w)| w).sum();
-                if total_weight > 0.0 {
-                    for &(target, weight) in edges {
-                        new_scores[target] += scores[i] * weight / total_weight;
-                    }
+                let inv_weight = 1.0 / total_weights[i];
+                for &(target, weight) in edges {
+                    new_scores[target] += scores[i] * weight * inv_weight;
                 }
             }
         }
 
-        // Apply damping with personalization
+        // Distribute dangling mass evenly + apply damping with personalization
+        let dangling_share = dangling_sum * inv_n;
         for i in 0..n {
-            new_scores[i] = damping * new_scores[i] + (1.0 - damping) * personalization[i];
+            new_scores[i] = damping * (new_scores[i] + dangling_share)
+                + (1.0 - damping) * personalization[i];
         }
 
         std::mem::swap(&mut scores, &mut new_scores);
