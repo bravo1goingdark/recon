@@ -574,10 +574,49 @@ impl ReconServer {
             );
         }
 
-        let is_regex = params.0.mode == "regex";
+        if params.0.mode == "regex" {
+            let q = TextQuery {
+                pattern: params.0.query.clone(),
+                is_regex: true,
+                max_results: 30,
+                scope: abs_paths,
+            };
+            let hits = self.text_searcher.search(&q).unwrap_or_default();
+
+            let entries: Vec<serde_json::Value> = hits
+                .iter()
+                .map(|h| {
+                    let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
+                    serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "col": h.col, "text": h.line_text })
+                })
+                .collect();
+
+            return redact_response(
+                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+            );
+        }
+
+        // Exact mode: try Tantivy first (sub-ms), fall back to grep only if empty
+        let tantivy_hits = self.tantivy.search(&params.0.query, 30).unwrap_or_default();
+        if !tantivy_hits.is_empty() {
+            let entries: Vec<serde_json::Value> = tantivy_hits
+                .iter()
+                .map(|hit| {
+                    serde_json::json!({
+                        "path": hit.path, "line": 0, "col": null,
+                        "text": hit.signature.as_deref().unwrap_or(&hit.name),
+                    })
+                })
+                .collect();
+            return redact_response(
+                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+            );
+        }
+
+        // Tantivy had no hits — fall back to text grep
         let q = TextQuery {
             pattern: params.0.query.clone(),
-            is_regex,
+            is_regex: false,
             max_results: 30,
             scope: abs_paths,
         };
@@ -654,32 +693,60 @@ impl ReconServer {
     )]
     async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
         let store = self.store.lock().await;
+        let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
+        let budget = params.0.token_budget;
 
-        // Bulk load everything in two queries instead of O(files + unique_names)
+        // Cache key: symbol_count:budget (unfocused maps only — focused are rare)
+        if focus_files.is_empty() {
+            let sym_count = store.symbol_count().unwrap_or(0);
+            let cache_key = format!("map_cache:{}:{}", sym_count, budget);
+            if let Ok(Some(cached)) = store.get_meta(&cache_key) {
+                drop(store);
+                return cached;
+            }
+
+            // Compute, cache, return
+            let all_symbols = store.all_symbols().unwrap_or_default();
+            let all_refs = store.all_refs().unwrap_or_default();
+
+            let ranked = pagerank::pagerank(&all_symbols, &all_refs, &[], 0.85, 30);
+            let content =
+                pagerank::render_repo_map(&all_symbols, &ranked, budget);
+
+            let token_est = recon_search::tokens::count_tokens(&content);
+            let view = ToolOutput::Skeleton(SkeletonView {
+                path: None,
+                content,
+                token_estimate: token_est,
+            });
+            let result =
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"));
+
+            let _ = store.set_meta(&cache_key, &result);
+            drop(store);
+            return result;
+        }
+
+        // Focused map: no caching, compute fresh
         let all_symbols = store.all_symbols().unwrap_or_default();
         let all_refs = store.all_refs().unwrap_or_default();
         drop(store);
 
-        let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
         let focus_set: std::collections::HashSet<&str> =
             focus_files.iter().map(|s| s.as_str()).collect();
 
-        let focus_indices: Vec<usize> = if focus_set.is_empty() {
-            Vec::new()
-        } else {
-            all_symbols
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    let p = s.path.to_string_lossy();
-                    focus_set.iter().any(|f| p.contains(f))
-                })
-                .map(|(i, _)| i)
-                .collect()
-        };
+        let focus_indices: Vec<usize> = all_symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                let p = s.path.to_string_lossy();
+                focus_set.iter().any(|f| p.contains(f))
+            })
+            .map(|(i, _)| i)
+            .collect();
 
         let ranked = pagerank::pagerank(&all_symbols, &all_refs, &focus_indices, 0.85, 30);
-        let content = pagerank::render_repo_map(&all_symbols, &ranked, params.0.token_budget);
+        let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
 
         let token_est = recon_search::tokens::count_tokens(&content);
         let view = ToolOutput::Skeleton(SkeletonView {
