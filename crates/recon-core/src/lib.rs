@@ -2,5 +2,6 @@
 
 pub mod error;
 pub mod lang;
+pub mod redact;
 pub mod shapes;
 pub mod symbol;
