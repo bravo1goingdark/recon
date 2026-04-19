@@ -488,21 +488,13 @@ impl ReconServer {
         // Semantic mode via embed feature
         #[cfg(feature = "embed")]
         if params.0.mode == "semantic" {
-            let embedder_guard = self.embedder.lock().await;
-            let vs_guard = self.vector_store.lock().await;
-            if let (Some(embedder), Some(vs)) = (embedder_guard.as_ref(), vs_guard.as_ref()) {
-                // Need mut for embed — drop and re-acquire
-                drop(embedder_guard);
-                drop(vs_guard);
-                let mut eg = self.embedder.lock().await;
-                let embedder = eg.as_mut().unwrap();
+            let mut eg = self.embedder.lock().await;
+            let vg = self.vector_store.lock().await;
+            if let (Some(embedder), Some(vs)) = (eg.as_mut(), vg.as_ref()) {
                 let query_vec = match embedder.embed_one(&params.0.query) {
                     Ok(v) => v,
                     Err(e) => return format!("embed error: {e}"),
                 };
-                drop(eg);
-                let vg = self.vector_store.lock().await;
-                let vs = vg.as_ref().unwrap();
                 let results = match vs.search(query_vec, None, 20).await {
                     Ok(r) => r,
                     Err(e) => return format!("vector search error: {e}"),
