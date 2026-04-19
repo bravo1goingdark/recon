@@ -146,8 +146,10 @@ pub fn index_repo(
         .collect();
 
     // Phase 2: Sequential batch store (SQLite single-writer + Tantivy single-writer)
-    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(50_000_000).ok());
+    // Use 15MB heap for Tantivy to reduce memory pressure on large repos
+    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(15_000_000).ok());
     let mut stats = IndexStats::default();
+    let mut tantivy_docs_since_commit = 0usize;
 
     for parsed_file in &parsed {
         match store.batch_index_file(&parsed_file.meta, &parsed_file.symbols, &parsed_file.refs) {
@@ -156,6 +158,14 @@ pub fn index_repo(
                 // Index into Tantivy
                 if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
                     let _ = tb.index_symbols(writer, &parsed_file.meta.path, &parsed_file.symbols);
+                    tantivy_docs_since_commit += parsed_file.symbols.len();
+                    // Commit every 5000 docs to bound memory usage
+                    if tantivy_docs_since_commit >= 5000 {
+                        if let Err(e) = tb.commit(writer) {
+                            warn!("tantivy interim commit error: {e}");
+                        }
+                        tantivy_docs_since_commit = 0;
+                    }
                 }
             }
             Err(e) => {
@@ -165,7 +175,7 @@ pub fn index_repo(
         }
     }
 
-    // Commit Tantivy
+    // Final Tantivy commit
     if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
         if let Err(e) = tb.commit(writer) {
             warn!("tantivy commit error: {e}");
@@ -279,7 +289,7 @@ fn index_diff(
     diff: &crate::merkle::MerkleDiff,
 ) -> Result<IndexStats, Error> {
     let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
-    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(50_000_000).ok());
+    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(15_000_000).ok());
     let mut stats = IndexStats::default();
 
     // Delete removed files
