@@ -696,10 +696,10 @@ impl ReconServer {
         let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
         let budget = params.0.token_budget;
 
-        // Cache key: symbol_count:budget (unfocused maps only — focused are rare)
+        // Cache key: last_indexed_at:budget — invalidates when any file is reindexed
         if focus_files.is_empty() {
-            let sym_count = store.symbol_count().unwrap_or(0);
-            let cache_key = format!("map_cache:{}:{}", sym_count, budget);
+            let last_idx = store.max_indexed_at().unwrap_or(0);
+            let cache_key = format!("map_cache:{}:{}", last_idx, budget);
             if let Ok(Some(cached)) = store.get_meta(&cache_key) {
                 drop(store);
                 return cached;
@@ -722,6 +722,7 @@ impl ReconServer {
             let result =
                 serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"));
 
+            let _ = store.delete_meta_prefix("map_cache:");
             let _ = store.set_meta(&cache_key, &result);
             drop(store);
             return result;

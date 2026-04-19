@@ -446,6 +446,28 @@ impl Store {
             .map_err(|e| Error::Storage(e.to_string()))
     }
 
+    /// Most recent `indexed_at` across all files — changes on any reindex.
+    pub fn max_indexed_at(&self) -> Result<i64, Error> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(indexed_at), 0) FROM files",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// Delete all meta entries whose key starts with a given prefix.
+    pub fn delete_meta_prefix(&self, prefix: &str) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "DELETE FROM meta WHERE key LIKE ?1",
+                params![format!("{prefix}%")],
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     /// List all symbols for a path.
     pub fn symbols_for_path(&self, path: &Path) -> Result<Vec<Symbol>, Error> {
         let path_str = path.to_str().unwrap_or("");
