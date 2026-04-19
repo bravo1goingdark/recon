@@ -815,7 +815,25 @@ impl ReconServer {
 #[tool_handler]
 impl ServerHandler for ReconServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::default()
-            .with_server_info(Implementation::new("recon", env!("CARGO_PKG_VERSION")))
+        ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new("recon", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            "recon is a code intelligence MCP server. \
+             Prefer code_* tools over Read/Grep/Glob: \
+             code_outline for file structure, \
+             code_skeleton for API overview (10x compression), \
+             code_find_symbol for symbol search (3-tier: exact/BM25/fuzzy), \
+             code_search for text patterns (supports filter DSL), \
+             code_repo_map for orientation (PageRank-ranked overview). \
+             These tools return structured, token-efficient results. \
+             Use Read only when you need the exact source of a specific symbol \
+             (prefer code_read_symbol for that)."
+                .to_string(),
+        )
     }
 }
