@@ -257,7 +257,7 @@ impl ReconServer {
             entries,
         });
         redact_response(
-            serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
         )
     }
 
@@ -311,7 +311,7 @@ impl ReconServer {
             token_estimate: token_est,
         });
         redact_response(
-            serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
         )
     }
 
@@ -377,7 +377,7 @@ impl ReconServer {
             callees: vec![],
         });
         redact_response(
-            serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
         )
     }
 
@@ -443,7 +443,7 @@ impl ReconServer {
             })
             .collect();
 
-        serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}"))
+        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}"))
     }
 
     #[tool(
@@ -471,7 +471,7 @@ impl ReconServer {
             total: refs.len(),
             top_k,
         });
-        serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}"))
+        serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"))
     }
 
     #[tool(
@@ -504,7 +504,7 @@ impl ReconServer {
                     .map(|(id, dist)| serde_json::json!({"symbol_id": id, "distance": dist}))
                     .collect();
                 return redact_response(
-                    serde_json::to_string_pretty(&entries)
+                    serde_json::to_string(&entries)
                         .unwrap_or_else(|e| format!("Error: {e}")),
                 );
             } else {
@@ -570,7 +570,7 @@ impl ReconServer {
                 sorted.into_iter().take(30).map(|(_, v)| v).collect();
 
             return redact_response(
-                serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
             );
         }
 
@@ -592,7 +592,7 @@ impl ReconServer {
             .collect();
 
         redact_response(
-            serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+            serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
         )
     }
 
@@ -645,7 +645,7 @@ impl ReconServer {
             }));
         }
 
-        serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}"))
+        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}"))
     }
 
     #[tool(
@@ -687,7 +687,7 @@ impl ReconServer {
             content,
             token_estimate: token_est,
         });
-        serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("Error: {e}"))
+        serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}"))
     }
 
     #[tool(
@@ -717,7 +717,7 @@ impl ReconServer {
             .collect();
 
         redact_response(
-            serde_json::to_string_pretty(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+            serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
         )
     }
 
@@ -752,7 +752,7 @@ impl ReconServer {
             .collect();
 
         redact_response(
-            serde_json::to_string_pretty(&results).unwrap_or_else(|e| format!("Error: {e}")),
+            serde_json::to_string(&results).unwrap_or_else(|e| format!("Error: {e}")),
         )
     }
 
@@ -763,7 +763,7 @@ impl ReconServer {
     async fn code_reindex(&self, _params: Parameters<ReindexParams>) -> String {
         let store = self.store.lock().await;
         match indexer::index_repo(&store, Some(&self.tantivy), &self.repo_root) {
-            Ok(stats) => serde_json::to_string_pretty(&serde_json::json!({
+            Ok(stats) => serde_json::to_string(&serde_json::json!({
                 "status": "ok",
                 "files_indexed": stats.files_indexed,
                 "total_symbols": stats.total_symbols,
@@ -788,7 +788,7 @@ impl ReconServer {
             .unwrap_or(None)
             .unwrap_or_default();
 
-        serde_json::to_string_pretty(&serde_json::json!({
+        serde_json::to_string(&serde_json::json!({
             "files_indexed": file_count,
             "total_symbols": symbol_count,
             "tantivy_docs": tantivy_docs,
