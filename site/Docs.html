@@ -163,11 +163,12 @@
 <body>
 
 <nav class="top">
-  <a href="Landing Page.html" class="mark">recon<span class="dot"></span></a>
+  <a href="index.html" class="mark">recon<span class="dot"></span></a>
   <ul>
-    <li><a href="Landing Page.html#tools">Tools</a></li>
-    <li><a href="Landing Page.html#how">How it works</a></li>
-    <li><a href="Landing Page.html#install">Install</a></li>
+    <li><a href="index.html#tools">Tools</a></li>
+    <li><a href="index.html#how">How it works</a></li>
+    <li><a href="index.html#benchmarks">Benchmarks</a></li>
+    <li><a href="index.html#install">Connect</a></li>
     <li><a class="active" href="Docs.html">Docs</a></li>
   </ul>
   <div style="display:flex;align-items:center;gap:16px">
@@ -286,8 +287,8 @@ exploring code. They return structured, token-efficient results.</pre>
 <pre><span class="c"># Additional ignore patterns (on top of .gitignore)</span>
 ignore_patterns = [<span class="h">"*.generated.*"</span>, <span class="h">"dist/"</span>]
 
-<span class="c"># Max file size to index (default 1 MB)</span>
-max_file_size = <span class="h">1048576</span>
+<span class="c"># Max file size to index (default 2 MB)</span>
+max_file_size = <span class="h">2097152</span>
 
 <span class="c"># Max search results per tool call (default 30)</span>
 max_search_results = <span class="h">30</span>
@@ -361,9 +362,9 @@ allow_sensitive = <span class="h">false</span></pre>
     <h2 id="incremental"><span class="no">06</span>Incremental indexing</h2>
     <p>recon is aggressive about never reparsing a file it doesn't need to. Four layers:</p>
     <ul class="bul">
-      <li><b>ColdStart.</b> <code>gix</code> reads the HEAD SHA. If it matches the last indexed commit, the whole pass is skipped (~6 ms).</li>
-      <li><b>Merkle diff.</b> A <code>blake3</code> hash tree of file contents is snapshotted per index. On HEAD change, only the diff is reparsed (~39 ms for a single file).</li>
-      <li><b>Full index.</b> First run or missing snapshot falls back to a rayon-parallel parse (~156 ms for the 44-file seed repo).</li>
+      <li><b>ColdStart.</b> <code>gix</code> reads the HEAD SHA. If it matches the last indexed commit, the whole pass is skipped.</li>
+      <li><b>Merkle diff.</b> A <code>blake3</code> hash tree of file contents is snapshotted per index. On HEAD change, only the diff is reparsed.</li>
+      <li><b>Full index.</b> First run or missing snapshot falls back to a rayon-parallel parse with chunked bulk SQLite inserts (500 files/tx). Zed (80K symbols): 19s. Rust compiler (320K symbols): 53s.</li>
       <li><b>Live watcher.</b> <code>notify-debouncer-full</code> flushes per-file reindex after a 250 ms quiet window. On overflow, falls back to <code>gix status</code>.</li>
     </ul>
 
@@ -438,22 +439,53 @@ allow_sensitive = <span class="h">false</span></pre>
 
     <!-- PERFORMANCE -->
     <h2 id="performance"><span class="no">10</span>Performance</h2>
-    <p>All numbers below are criterion medians on a 2024 M-series laptop against the recon repo itself.</p>
+    <p>Benchmarked on real codebases. Release build, warm cache, mimalloc, fat LTO.</p>
 
+    <h3>Query latency</h3>
     <table>
-      <thead><tr><th>Metric</th><th>Measured</th></tr></thead>
+      <thead><tr><th>Tool</th><th>Zed (80K sym)</th><th>Rust compiler (320K sym)</th></tr></thead>
       <tbody>
-        <tr><td>Cold index · 44 files, 638 symbols</td><td>156 ms</td></tr>
-        <tr><td>Incremental skip · HEAD unchanged</td><td>6 ms</td></tr>
-        <tr><td>Merkle diff · 1 file changed</td><td>39 ms</td></tr>
-        <tr><td>Symbol exact · 10K symbols</td><td>25 µs</td></tr>
-        <tr><td>Symbol fuzzy · 10K symbols</td><td>150 µs</td></tr>
-        <tr><td>Tantivy BM25 · 1K symbols</td><td>10 µs</td></tr>
-        <tr><td>Text grep · 50 files (fff-grep)</td><td>377 µs</td></tr>
-        <tr><td>Repo map render · 500 symbols</td><td>3.4 ms</td></tr>
-        <tr><td>Token counting · tiktoken cl100k</td><td>55 µs</td></tr>
-        <tr><td>Batch insert · 1K symbols</td><td>46 ms</td></tr>
-        <tr><td>Binary size · release, stripped</td><td>26 MB</td></tr>
+        <tr><td>stats</td><td>10 ms</td><td>29 ms</td></tr>
+        <tr><td>find</td><td>8 ms</td><td>8 ms</td></tr>
+        <tr><td>search</td><td>11 ms</td><td>33 ms</td></tr>
+        <tr><td>outline</td><td>14 ms</td><td>13 ms</td></tr>
+        <tr><td>skeleton</td><td>11 ms</td><td>11 ms</td></tr>
+        <tr><td>refs</td><td>8 ms</td><td>12 ms</td></tr>
+        <tr><td>map (cached)</td><td>8 ms</td><td>19 ms</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Indexing</h3>
+    <table>
+      <thead><tr><th>Repo</th><th>Files</th><th>Symbols</th><th>Cold index</th><th>Index size</th></tr></thead>
+      <tbody>
+        <tr><td>Zed (1.3M LOC)</td><td>1,780</td><td>80,427</td><td>19 s</td><td>96 MB</td></tr>
+        <tr><td>Rust compiler (3.8M LOC)</td><td>36,030</td><td>320,161</td><td>53 s</td><td>291 MB</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Token reduction</h3>
+    <table>
+      <thead><tr><th>Scenario</th><th>Read/Grep/Glob</th><th>recon</th><th>Reduction</th></tr></thead>
+      <tbody>
+        <tr><td>Read one function</td><td>~23,838 tok</td><td>~111 tok</td><td>215×</td></tr>
+        <tr><td>Find a symbol</td><td>~17,500 tok</td><td>~226 tok</td><td>77×</td></tr>
+        <tr><td>Repo orientation</td><td>~52,500 tok</td><td>~2,170 tok</td><td>24×</td></tr>
+        <tr><td>Find references</td><td>~15,000 tok</td><td>~638 tok</td><td>24×</td></tr>
+        <tr><td>Typical bug-fix task</td><td>~109,000 tok</td><td>~3,100 tok</td><td>35×</td></tr>
+      </tbody>
+    </table>
+
+    <h3>System</h3>
+    <table>
+      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>Binary size (release, stripped)</td><td>24 MB</td></tr>
+        <tr><td>Languages</td><td>9 (Rust, Python, TS, TSX, JS, Go, Java, C, C++)</td></tr>
+        <tr><td>Tests</td><td>107 across 19 suites</td></tr>
+        <tr><td>Allocator</td><td>mimalloc</td></tr>
+        <tr><td>Mutex</td><td>parking_lot (not tokio::sync)</td></tr>
+        <tr><td>Hash maps</td><td>ahash::AHashMap in hot paths</td></tr>
       </tbody>
     </table>
 
@@ -467,17 +499,31 @@ allow_sensitive = <span class="h">false</span></pre>
     </ul>
 
     <h2 id="changelog"><span class="no">12</span>Changelog</h2>
-    <p><b>v0.1.0</b> — Initial release. Hosted MCP server, 12 tools, 9 languages, SQLite + FTS5, Tantivy BM25, fff-grep, Merkle incremental indexing, secret redaction.</p>
+    <p><b>v0.1.0</b> — Initial release.</p>
+    <ul class="bul">
+      <li>Hosted MCP server with API key auth and multi-tenant DashMap routing</li>
+      <li>Streamable HTTP transport (MCP spec 2025-11-25) + stdio</li>
+      <li>12 tools, 9 languages, 5 output shapes</li>
+      <li>3-tier symbol search: exact SQLite → Tantivy BM25 → FTS5 trigram + nucleo fuzzy</li>
+      <li>Tantivy-first text search with grep fallback</li>
+      <li>PageRank repo map with early convergence, cached in SQLite</li>
+      <li>Merkle incremental indexing with chunked bulk inserts (500 files/tx)</li>
+      <li>Secret redaction on all code-returning tool responses</li>
+      <li>mimalloc, parking_lot::Mutex, ahash::AHashMap, fat LTO</li>
+      <li>107 tests, zero unwrap in production code, #[deny(missing_docs)] on all crates</li>
+      <li><code>rr</code> — public CLI client for remote servers</li>
+      <li>Tested on Zed (1.3M LOC) and Rust compiler (3.8M LOC)</li>
+    </ul>
 
     <h2 id="license"><span class="no">13</span>License</h2>
     <p><b>recon</b> is proprietary software. © 2026. All rights reserved. Use is governed by the recon Terms of Service.</p>
 
     <div class="next">
-      <a href="Landing Page.html#install">
+      <a href="index.html#install">
         <div class="k">Up next</div>
         <div class="t">Install → <span class="arr">→</span></div>
       </a>
-      <a href="Landing Page.html#tools">
+      <a href="index.html#tools">
         <div class="k">Explore</div>
         <div class="t">The 12 tools <span class="arr">→</span></div>
       </a>
