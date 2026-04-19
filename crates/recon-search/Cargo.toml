@@ -12,9 +12,12 @@ recon-storage = { workspace = true }
 grep-matcher = { workspace = true }
 grep-regex = { workspace = true }
 grep-searcher = { workspace = true }
+tantivy = { workspace = true }
 nucleo = { workspace = true }
 tracing = { workspace = true }
 compact_str = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
