@@ -25,8 +25,8 @@
 <meta name="twitter:description" content="Hosted MCP server. 12 tools. 8ms queries. 15-30x token reduction." />
 <meta name="twitter:image" content="https://mcprecon.pages.dev/og.svg" />
 
-<!-- Favicon (inline SVG radar mark) -->
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 80 80' fill='none'%3E%3Ccircle cx='40' cy='40' r='4' fill='%23333'/%3E%3Ccircle cx='40' cy='40' r='14' stroke='%23333' stroke-width='1.5'/%3E%3Ccircle cx='40' cy='40' r='24' stroke='%23333' stroke-width='1' opacity='0.55'/%3E%3Ccircle cx='40' cy='40' r='34' stroke='%23333' stroke-width='1' opacity='0.25'/%3E%3Cline x1='40' y1='40' x2='68' y2='20' stroke='oklch(58%25 0.14 45)' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='68' cy='20' r='3.5' fill='oklch(58%25 0.14 45)'/%3E%3C/svg%3E" />
+<!-- Favicon — light/dark via media query -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 80 80'%3E%3Cstyle%3Ecircle,line%7Bstroke:%23333%7D.dot%7Bfill:%23333%7D@media(prefers-color-scheme:dark)%7Bcircle,line%7Bstroke:%23e5e5e5%7D.dot%7Bfill:%23e5e5e5%7D%7D%3C/style%3E%3Ccircle class='dot' cx='40' cy='40' r='4'/%3E%3Ccircle cx='40' cy='40' r='14' fill='none' stroke-width='1.5'/%3E%3Ccircle cx='40' cy='40' r='24' fill='none' stroke-width='1' opacity='.55'/%3E%3Ccircle cx='40' cy='40' r='34' fill='none' stroke-width='1' opacity='.25'/%3E%3Cline x1='40' y1='40' x2='68' y2='20' stroke='%23b07040' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='68' cy='20' r='3.5' fill='%23b07040'/%3E%3C/svg%3E" />
 
 <!-- Structured data -->
 <script type="application/ld+json">
@@ -276,13 +276,37 @@
   .langs em{font-style:italic;color:var(--clay);margin:0 4px}
   .langs .sep{width:4px;height:4px;background:var(--ink-3);border-radius:50%;display:inline-block}
 
+  /* ─────── RESPONSIVE FIXES ─────── */
+  @media (max-width:720px){
+    nav.top .ship{display:none}
+    h1.display{font-size:clamp(48px,10vw,72px)}
+    .lede{font-size:16px}
+    .strip .v{font-size:36px}
+    .strip .cell{padding:24px 16px}
+    .langs{font-size:20px;gap:24px;padding:16px 0}
+    .langs span{gap:24px}
+    .sechdr h2{font-size:clamp(28px,5vw,40px)}
+    .compare pre{font-size:11px;line-height:1.6}
+    .quote blockquote{font-size:clamp(24px,4vw,36px)}
+    .step pre{font-size:11.5px}
+    .panel{font-size:11.5px;padding:14px 16px}
+  }
+  @media (max-width:480px){
+    .strip{grid-template-columns:1fr 1fr}
+    .strip .cell:nth-child(3){border-left:none}
+    .cta{flex-direction:column}
+    .cta .btn{width:100%;justify-content:center}
+    .hero{padding:48px 0 40px}
+    section{padding:56px 0}
+  }
+
 </style>
 </head>
 <body>
 
 <!-- NAV -->
 <nav class="top">
-  <a href="#" class="mark" aria-label="recon home"><svg width="28" height="28" viewBox="0 0 80 80" fill="none" style="vertical-align:-4px;margin-right:8px"><circle cx="40" cy="40" r="4" fill="currentColor"/><circle cx="40" cy="40" r="14" stroke="currentColor" stroke-width="1.5"/><circle cx="40" cy="40" r="24" stroke="currentColor" stroke-width="1" opacity="0.55"/><circle cx="40" cy="40" r="34" stroke="currentColor" stroke-width="1" opacity="0.25"/><line x1="40" y1="40" x2="68" y2="20" stroke="var(--clay)" stroke-width="2" stroke-linecap="round"/><circle cx="68" cy="20" r="3.5" fill="var(--clay)"/></svg>recon<span class="dot"></span></a>
+  <a href="#" class="mark" aria-label="recon home" style="display:flex;align-items:center;gap:10px"><svg width="24" height="24" viewBox="0 0 80 80" fill="none"><circle cx="40" cy="40" r="4" fill="currentColor"/><circle cx="40" cy="40" r="14" stroke="currentColor" stroke-width="1.5"/><circle cx="40" cy="40" r="24" stroke="currentColor" stroke-width="1" opacity="0.55"/><circle cx="40" cy="40" r="34" stroke="currentColor" stroke-width="1" opacity="0.25"/><line x1="40" y1="40" x2="68" y2="20" stroke="var(--clay)" stroke-width="2" stroke-linecap="round"/><circle cx="68" cy="20" r="3.5" fill="var(--clay)"/></svg><span>recon<span class="dot"></span></span></a>
   <ul>
     <li><a href="#tools">Tools</a></li>
     <li><a href="#how">How it works</a></li>
@@ -627,16 +651,18 @@ cargo install rr
   <div class="wrap">
     <div class="grid">
       <div>
-        <div class="mark">recon<em>.</em></div>
-        <p class="blurb">Token-lean code intelligence for AI coding agents. MIT / Apache-2.0.</p>
+        <div class="mark" style="display:flex;align-items:center;gap:12px">
+          <svg width="36" height="36" viewBox="0 0 80 80" fill="none"><circle cx="40" cy="40" r="4" fill="var(--ink)"/><circle cx="40" cy="40" r="14" stroke="var(--ink)" stroke-width="1.5" fill="none"/><circle cx="40" cy="40" r="24" stroke="var(--ink)" stroke-width="1" fill="none" opacity="0.55"/><circle cx="40" cy="40" r="34" stroke="var(--ink)" stroke-width="1" fill="none" opacity="0.25"/><line x1="40" y1="40" x2="68" y2="20" stroke="var(--clay)" stroke-width="2" stroke-linecap="round"/><circle cx="68" cy="20" r="3.5" fill="var(--clay)"/></svg>
+          <span>recon<em>.</em></span>
+        </div>
+        <p class="blurb">Token-lean code intelligence for AI coding agents.</p>
       </div>
       <div>
         <h4>Product</h4>
         <ul>
           <li><a href="#tools">Tools</a></li>
           <li><a href="#how">How it works</a></li>
-          <li><a href="#install">Install</a></li>
-          <li><a href="#">Changelog</a></li>
+          <li><a href="#install">Connect</a></li>
         </ul>
       </div>
       <div>
@@ -644,8 +670,8 @@ cargo install rr
         <ul>
           <li><a href="./Docs.html#introduction">Architecture</a></li>
           <li><a href="./Docs.html#filter-dsl">Filter DSL</a></li>
-          <li><a href="./Docs.html#adrs">ADRs</a></li>
           <li><a href="./Docs.html#performance">Benchmarks</a></li>
+          <li><a href="./Docs.html#adrs">ADRs</a></li>
         </ul>
       </div>
       <div>
@@ -653,14 +679,13 @@ cargo install rr
         <ul>
           <li><a href="./Docs.html#changelog">Changelog</a></li>
           <li><a href="./Docs.html#security">Security</a></li>
-          <li><a href="./Docs.html#adrs">ADRs</a></li>
           <li><a href="./Docs.html#license">License</a></li>
         </ul>
       </div>
     </div>
     <div class="bottom wrap" style="padding-left:0;padding-right:0">
       <div>© 2026 recon · crafted in Rust</div>
-      <div>p99 &lt; 100 ms · 107 tests · 24 MB binary</div>
+      <div>p99 &lt; 33 ms · 107 tests · 24 MB binary</div>
     </div>
   </div>
 </footer>
