@@ -3740,7 +3740,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -6368,7 +6367,6 @@ dependencies = [
  "recon-search",
  "recon-server",
  "recon-storage",
- "reqwest",
  "rmcp",
  "serde_json",
  "tempfile",
@@ -6643,7 +6641,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]

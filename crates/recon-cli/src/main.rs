@@ -155,8 +155,6 @@ enum Command {
     Purge,
     /// Show version
     Version,
-    /// Update to the latest release
-    Update,
     /// Raw tool query (JSON args)
     Query {
         /// Tool name (e.g. code_find_symbol)
@@ -703,100 +701,10 @@ async fn main() -> Result<()> {
             println!("recon {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::Update => self_update("bravo1goingdark", "recon", "recon").await,
         Command::Query { tool, args } => {
             let server = read_server(repo)?;
             out(&server.query_tool(&tool, &args).await);
             Ok(())
         }
     }
-}
-
-/// Download the latest release binary from GitHub and replace the current one.
-async fn self_update(owner: &str, repo: &str, bin_name: &str) -> Result<()> {
-    let current = env!("CARGO_PKG_VERSION");
-    eprintln!("Current version: {current}");
-
-    // Fetch latest release tag from GitHub API
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
-    let client = reqwest::Client::builder()
-        .user_agent("recon-updater")
-        .build()?;
-
-    let resp = client.get(&url).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Failed to check for updates: HTTP {}", resp.status());
-    }
-
-    let release: serde_json::Value = resp.json().await?;
-    let latest = release["tag_name"]
-        .as_str()
-        .unwrap_or("")
-        .trim_start_matches('v');
-
-    if latest == current {
-        eprintln!("Already up to date.");
-        return Ok(());
-    }
-    eprintln!("New version available: {latest}");
-
-    // Determine platform asset name
-    let target = if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
-        "x86_64-unknown-linux-gnu"
-    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
-        "aarch64-unknown-linux-gnu"
-    } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
-        "x86_64-apple-darwin"
-    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-        "aarch64-apple-darwin"
-    } else {
-        anyhow::bail!("Unsupported platform for self-update. Download manually from GitHub.");
-    };
-
-    let asset_name = format!("{bin_name}-{target}");
-
-    // Find matching asset
-    let assets = release["assets"].as_array().unwrap_or(&Vec::new()).clone();
-    let asset = assets
-        .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.contains(target)));
-
-    let download_url = match asset {
-        Some(a) => a["browser_download_url"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("no download URL for {asset_name}"))?,
-        None => {
-            anyhow::bail!(
-                "No binary for {target} in release {latest}. Available: {}",
-                assets
-                    .iter()
-                    .filter_map(|a| a["name"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-    };
-
-    eprintln!("Downloading {download_url}...");
-    let binary = client.get(download_url).send().await?.bytes().await?;
-
-    // Replace current binary
-    let current_exe = std::env::current_exe()?;
-    let backup = current_exe.with_extension("old");
-
-    // Move current → backup, write new, remove backup
-    std::fs::rename(&current_exe, &backup)?;
-    std::fs::write(&current_exe, &binary)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&current_exe, std::fs::Permissions::from_mode(0o755))?;
-    }
-
-    // Clean up backup
-    let _ = std::fs::remove_file(&backup);
-
-    eprintln!("Updated to {latest}");
-    Ok(())
 }
