@@ -30,7 +30,7 @@ pub fn fuzzy_rank(symbols: &[Symbol], query: &str, limit: usize) -> Vec<(usize, 
         }
     }
 
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|item| std::cmp::Reverse(item.1));
     scored.truncate(limit);
     scored
 }
