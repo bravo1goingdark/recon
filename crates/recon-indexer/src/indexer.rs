@@ -145,23 +145,26 @@ pub fn index_repo(
         })
         .collect();
 
-    // Phase 2: Bulk store — one SQLite transaction for all files, fewer Tantivy commits.
+    // Phase 2: Bulk store — chunked transactions (500 files each) for safety + speed.
+    // Small repos go through in one transaction. If a chunk fails, only that chunk is lost.
     let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(50_000_000).ok());
     let mut stats = IndexStats::default();
+    const CHUNK_SIZE: usize = 500;
 
-    // Collect tuples for the bulk SQLite insert
-    let bulk: Vec<_> = parsed
-        .iter()
-        .map(|p| (p.meta.clone(), p.symbols.clone(), p.refs.clone()))
-        .collect();
+    for chunk in parsed.chunks(CHUNK_SIZE) {
+        let bulk: Vec<_> = chunk
+            .iter()
+            .map(|p| (p.meta.clone(), p.symbols.clone(), p.refs.clone()))
+            .collect();
 
-    match store.batch_index_files(&bulk) {
-        Ok(()) => {
-            stats.files_indexed = bulk.len();
-        }
-        Err(e) => {
-            warn!("bulk store error: {e}");
-            stats.errors = bulk.len();
+        match store.batch_index_files(&bulk) {
+            Ok(()) => {
+                stats.files_indexed += bulk.len();
+            }
+            Err(e) => {
+                warn!(chunk_size = bulk.len(), "bulk store error: {e}");
+                stats.errors += bulk.len();
+            }
         }
     }
 
