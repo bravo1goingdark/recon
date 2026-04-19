@@ -457,6 +457,52 @@ impl Store {
             .map_err(|e| Error::Storage(e.to_string()))
     }
 
+    /// Get symbol counts and top-3 symbol names per file in a single query.
+    ///
+    /// Returns `(path, symbol_count, top_symbols)` tuples. Much faster than
+    /// calling `symbols_for_path` per file.
+    pub fn file_symbol_summaries(&self) -> Result<Vec<(PathBuf, usize, Vec<String>)>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT f.path,
+                        COUNT(s.id) AS cnt,
+                        GROUP_CONCAT(
+                            CASE WHEN s.parent_id IS NULL
+                                 THEN s.kind || ' ' || s.name
+                                 ELSE NULL
+                            END, '|'
+                        ) AS top
+                 FROM files f
+                 LEFT JOIN symbols s ON s.path = f.path
+                 GROUP BY f.path
+                 ORDER BY f.path",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let path: String = row.get(0)?;
+                let count: usize = row.get(1)?;
+                let top_raw: Option<String> = row.get(2)?;
+                let top: Vec<String> = top_raw
+                    .unwrap_or_default()
+                    .split('|')
+                    .filter(|s| !s.is_empty())
+                    .take(3)
+                    .map(String::from)
+                    .collect();
+                Ok((PathBuf::from(path), count, top))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut results = Vec::with_capacity(128);
+        for r in rows {
+            results.push(r.map_err(|e| Error::Storage(e.to_string()))?);
+        }
+        Ok(results)
+    }
+
     /// Delete all meta entries whose key starts with a given prefix.
     pub fn delete_meta_prefix(&self, prefix: &str) -> Result<(), Error> {
         self.conn

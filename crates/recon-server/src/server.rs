@@ -636,22 +636,26 @@ impl ReconServer {
     )]
     async fn code_list(&self, params: Parameters<ListParams>) -> String {
         let store = self.store.lock().await;
-        let all_paths = store.all_file_paths().unwrap_or_default();
 
-        // Apply filter DSL first
-        let paths = match params.0.filter.as_deref() {
-            Some(f) if !f.is_empty() => match filters::parse_filter(f) {
-                Ok(pf) => filters::apply_filter(&all_paths, &pf),
-                Err(e) => {
-                    warn!("filter parse error: {e}");
-                    all_paths
+        // Single query for all files + symbol counts + top symbols
+        let summaries = store.file_symbol_summaries().unwrap_or_default();
+        drop(store);
+
+        // Apply filters in memory
+        let filter_parsed = params
+            .0
+            .filter
+            .as_deref()
+            .filter(|f| !f.is_empty())
+            .and_then(|f| filters::parse_filter(f).ok());
+
+        let mut entries: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
+        for (path, sym_count, top_syms) in &summaries {
+            if let Some(ref pf) = filter_parsed {
+                if filters::apply_filter(std::slice::from_ref(path), pf).is_empty() {
+                    continue;
                 }
-            },
-            _ => all_paths,
-        };
-
-        let mut entries: Vec<serde_json::Value> = Vec::with_capacity(paths.len());
-        for path in &paths {
+            }
             let lang = Language::from_path(path);
             if let Some(lang_filter) = &params.0.lang {
                 let filter_lang = Language::from_extension(lang_filter);
@@ -665,17 +669,10 @@ impl ReconServer {
                     continue;
                 }
             }
-            let syms = store.symbols_for_path(path).unwrap_or_default();
-            let top_syms: Vec<String> = syms
-                .iter()
-                .filter(|s| s.parent_id.is_none())
-                .take(3)
-                .map(|s| format!("{} {}", s.kind.label(), s.name))
-                .collect();
 
             entries.push(serde_json::json!({
                 "path": path.to_string_lossy(), "lang": lang.name(),
-                "symbol_count": syms.len(), "top_symbols": top_syms,
+                "symbol_count": sym_count, "top_symbols": top_syms,
             }));
         }
 
@@ -823,6 +820,10 @@ impl ReconServer {
     )]
     async fn code_reindex(&self, _params: Parameters<ReindexParams>) -> String {
         let store = self.store.lock().await;
+        // Explicitly clear map cache before reindexing
+        if let Err(e) = store.delete_meta_prefix("map_cache:") {
+            warn!("failed to clear map cache on reindex: {e}");
+        }
         match indexer::index_repo(&store, Some(&self.tantivy), &self.repo_root) {
             Ok(stats) => serde_json::to_string(&serde_json::json!({
                 "status": "ok",
