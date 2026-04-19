@@ -298,6 +298,9 @@
     .step pre{font-size:11.5px}
     .panel{font-size:11.5px;padding:14px 16px}
   }
+  @media (max-width:720px){
+    #benchmarks .sechdr + div{grid-template-columns:1fr !important}
+  }
   @media (max-width:480px){
     .strip{grid-template-columns:1fr 1fr}
     .strip .cell:nth-child(3){border-left:none}
@@ -317,7 +320,8 @@
   <ul>
     <li><a href="#tools">Tools</a></li>
     <li><a href="#how">How it works</a></li>
-    <li><a href="#install">Install</a></li>
+    <li><a href="#benchmarks">Benchmarks</a></li>
+    <li><a href="#install">Connect</a></li>
     <li><a href="./Docs.html">Docs</a></li>
   </ul>
   <div style="display:flex;align-items:center;gap:16px">
@@ -583,11 +587,79 @@
   </div>
 </section>
 
+<!-- REAL REPOS -->
+<section id="benchmarks">
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>04</em> &nbsp;— &nbsp;Benchmarks</div>
+      <h2>Tested on <em>real</em> codebases. Not toy repos.</h2>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft)">
+
+      <!-- Zed -->
+      <div style="background:var(--paper);padding:36px 32px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:20px">
+          <div>
+            <div style="font-family:var(--serif);font-size:32px;letter-spacing:-0.02em;font-weight:400">Zed</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:0.08em;margin-top:4px">EDITOR · RUST</div>
+          </div>
+          <a href="https://github.com/zed-industries/zed" style="font-family:var(--mono);font-size:11px;color:var(--clay);letter-spacing:0.04em" target="_blank" rel="noopener">github →</a>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-family:var(--mono);font-size:12px;color:var(--ink-2)">
+          <div><span style="color:var(--ink-3)">LOC</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">1.3M</span></div>
+          <div><span style="color:var(--ink-3)">SYMBOLS</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">80K</span></div>
+          <div><span style="color:var(--ink-3)">COLD INDEX</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">19<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">s</sub></span></div>
+          <div><span style="color:var(--ink-3)">QUERY P50</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--clay);letter-spacing:-0.02em">8<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">ms</sub></span></div>
+        </div>
+        <div style="margin-top:20px;padding-top:16px;border-top:1px dashed var(--rule);font-family:var(--mono);font-size:11px;color:var(--ink-3);display:flex;flex-wrap:wrap;gap:12px">
+          <span>find <span style="color:var(--ink)">8ms</span></span>
+          <span>outline <span style="color:var(--ink)">14ms</span></span>
+          <span>skeleton <span style="color:var(--ink)">11ms</span></span>
+          <span>search <span style="color:var(--ink)">11ms</span></span>
+          <span>refs <span style="color:var(--ink)">8ms</span></span>
+          <span>map <span style="color:var(--ink)">8ms</span></span>
+        </div>
+      </div>
+
+      <!-- Rust compiler -->
+      <div style="background:var(--paper);padding:36px 32px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:20px">
+          <div>
+            <div style="font-family:var(--serif);font-size:32px;letter-spacing:-0.02em;font-weight:400">Rust compiler</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:0.08em;margin-top:4px">COMPILER · RUST</div>
+          </div>
+          <a href="https://github.com/rust-lang/rust" style="font-family:var(--mono);font-size:11px;color:var(--clay);letter-spacing:0.04em" target="_blank" rel="noopener">github →</a>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-family:var(--mono);font-size:12px;color:var(--ink-2)">
+          <div><span style="color:var(--ink-3)">LOC</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">3.8M</span></div>
+          <div><span style="color:var(--ink-3)">SYMBOLS</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">320K</span></div>
+          <div><span style="color:var(--ink-3)">COLD INDEX</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">53<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">s</sub></span></div>
+          <div><span style="color:var(--ink-3)">QUERY P50</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--clay);letter-spacing:-0.02em">10<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">ms</sub></span></div>
+        </div>
+        <div style="margin-top:20px;padding-top:16px;border-top:1px dashed var(--rule);font-family:var(--mono);font-size:11px;color:var(--ink-3);display:flex;flex-wrap:wrap;gap:12px">
+          <span>find <span style="color:var(--ink)">8ms</span></span>
+          <span>outline <span style="color:var(--ink)">13ms</span></span>
+          <span>skeleton <span style="color:var(--ink)">11ms</span></span>
+          <span>search <span style="color:var(--ink)">33ms</span></span>
+          <span>refs <span style="color:var(--ink)">12ms</span></span>
+          <span>map <span style="color:var(--ink)">19ms</span></span>
+        </div>
+      </div>
+
+    </div>
+
+    <div style="margin-top:24px;font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:0.04em;text-align:center">
+      All numbers: release build · warm cache · mimalloc · fat LTO · parking_lot::Mutex · ahash · 24 MB binary
+    </div>
+  </div>
+</section>
+
 <!-- INSTALL -->
 <section id="install">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>04</em> &nbsp;— &nbsp;Connect</div>
+      <div class="no"><em>05</em> &nbsp;— &nbsp;Connect</div>
       <h2>A hosted MCP server. No <em>install,</em> no binary.</h2>
     </div>
 
