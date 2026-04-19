@@ -172,8 +172,10 @@ pub fn pagerank(
 /// Render a ranked symbol list into a skeleton string within a token budget.
 pub fn render_repo_map(symbols: &[Symbol], ranked: &[RankedSymbol], token_budget: usize) -> String {
     let mut output = String::with_capacity(token_budget * 4);
-    let mut tokens = 0usize;
+    let mut est_tokens = 0usize;
 
+    // Use fast heuristic in the loop; it slightly overestimates so we won't
+    // blow past the budget.  One accurate count at the end for the response.
     for entry in ranked {
         let sym = &symbols[entry.index];
         let line = format!(
@@ -191,14 +193,14 @@ pub fn render_repo_map(symbols: &[Symbol], ranked: &[RankedSymbol], token_budget
             .unwrap_or_default();
 
         let full_line = format!("{line}{sig_suffix}\n");
-        let line_tokens = crate::tokens::count_tokens(&full_line);
+        let line_est = crate::tokens::estimate_tokens(&full_line);
 
-        if tokens + line_tokens > token_budget {
+        if est_tokens + line_est > token_budget {
             break;
         }
 
         output.push_str(&full_line);
-        tokens += line_tokens;
+        est_tokens += line_est;
     }
 
     output

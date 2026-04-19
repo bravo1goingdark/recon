@@ -16,6 +16,14 @@ pub fn count_tokens(text: &str) -> usize {
     bpe().encode_ordinary(text).len()
 }
 
+/// Fast heuristic token estimate (~4 chars per token for code).
+/// Use in tight loops where accuracy can be verified once at the end.
+pub fn estimate_tokens(text: &str) -> usize {
+    // Code averages ~3.5-4.5 chars/token with cl100k_base.
+    // Use 4 as a conservative divisor (slightly overestimates).
+    text.len().div_ceil(4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
