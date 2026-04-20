@@ -18,68 +18,145 @@ use tracing::{info, warn};
 /// Global monotonic counter for access ordering.
 static ACCESS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Subscription tier controlling repo limits and lifecycle.
+/// Resource limits for a tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TierLimits {
+    /// Maximum number of concurrently loaded repos.
+    pub max_repos: usize,
+    /// Maximum source files per repo (checked before indexing).
+    pub max_files: usize,
+    /// Approximate maximum lines of code per repo.
+    pub max_loc: usize,
+}
+
+/// Default limits per tier.
+impl TierLimits {
+    /// Free tier defaults: 1 repo, 2K files, 200K LOC.
+    pub const FREE: Self = Self {
+        max_repos: 1,
+        max_files: 2_000,
+        max_loc: 200_000,
+    };
+
+    /// Pro tier defaults: 50 repos, 20K files, 2M LOC.
+    pub const PRO: Self = Self {
+        max_repos: 50,
+        max_files: 20_000,
+        max_loc: 2_000_000,
+    };
+
+    /// Uncapped (self-hosted / enterprise).
+    pub const UNCAPPED: Self = Self {
+        max_repos: usize::MAX,
+        max_files: usize::MAX,
+        max_loc: usize::MAX,
+    };
+}
+
+/// Subscription tier controlling repo and indexing limits.
 ///
-/// Both tiers carry configurable `max_repos`. The key difference:
+/// Both tiers carry configurable limits. The key difference:
 /// - **Free**: no expiry, repos live forever, rejects at limit.
 /// - **Pro**: has an optional expiry. Repos live until expiry, then
 ///   `sweep_expired()` cleans them up to reclaim memory. Rejects at limit
 ///   (no LRU eviction — paying users keep their repos).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
-    /// Free tier (default 1 repo, configurable via `free:N`).
+    /// Free tier.
     Free {
-        /// Maximum number of concurrently loaded repos.
-        max_repos: usize,
+        /// Resource limits.
+        limits: TierLimits,
     },
-    /// Pro tier (default 50 repos, configurable via `pro:N`).
+    /// Pro tier.
     Pro {
-        /// Maximum number of concurrently loaded repos.
-        max_repos: usize,
+        /// Resource limits.
+        limits: TierLimits,
     },
 }
 
 impl Tier {
-    /// Maximum number of repos allowed for this tier.
-    pub fn max_repos(self) -> usize {
+    /// Get the resource limits for this tier.
+    pub fn limits(self) -> TierLimits {
         match self {
-            Tier::Free { max_repos } | Tier::Pro { max_repos } => max_repos,
+            Tier::Free { limits } | Tier::Pro { limits } => limits,
+        }
+    }
+
+    /// Maximum number of repos allowed.
+    pub fn max_repos(self) -> usize {
+        self.limits().max_repos
+    }
+
+    /// Maximum source files per repo.
+    pub fn max_files(self) -> usize {
+        self.limits().max_files
+    }
+
+    /// Maximum lines of code per repo.
+    pub fn max_loc(self) -> usize {
+        self.limits().max_loc
+    }
+
+    /// Human-readable tier name for error messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tier::Free { .. } => "Free",
+            Tier::Pro { .. } => "Pro",
         }
     }
 }
 
 impl std::fmt::Display for Tier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Tier::Free { max_repos } => write!(f, "free (max {max_repos} repos)"),
-            Tier::Pro { max_repos } => write!(f, "pro (max {max_repos} repos)"),
-        }
+        let l = self.limits();
+        write!(
+            f,
+            "{} (max {} repos, {} files, {}K LOC)",
+            self.name(),
+            l.max_repos,
+            l.max_files,
+            l.max_loc / 1000,
+        )
     }
 }
 
 impl std::str::FromStr for Tier {
     type Err = String;
 
-    /// Parse tier from CLI: `free`, `free:N`, `pro`, or `pro:N`.
+    /// Parse tier from CLI: `free`, `free:N`, `pro`, or `pro:N` (N = max repos).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let lower = s.to_lowercase();
         if lower == "free" {
-            return Ok(Tier::Free { max_repos: 1 });
+            return Ok(Tier::Free {
+                limits: TierLimits::FREE,
+            });
         }
         if lower == "pro" {
-            return Ok(Tier::Pro { max_repos: 50 });
+            return Ok(Tier::Pro {
+                limits: TierLimits::PRO,
+            });
         }
         if let Some(n_str) = lower.strip_prefix("free:") {
             let n = n_str
                 .parse::<usize>()
                 .map_err(|e| format!("invalid max_repos: {e}"))?;
-            return Ok(Tier::Free { max_repos: n });
+            return Ok(Tier::Free {
+                limits: TierLimits {
+                    max_repos: n,
+                    ..TierLimits::FREE
+                },
+            });
         }
         if let Some(n_str) = lower.strip_prefix("pro:") {
             let n = n_str
                 .parse::<usize>()
                 .map_err(|e| format!("invalid max_repos: {e}"))?;
-            return Ok(Tier::Pro { max_repos: n });
+            return Ok(Tier::Pro {
+                limits: TierLimits {
+                    max_repos: n,
+                    ..TierLimits::PRO
+                },
+            });
         }
         Err(format!(
             "unknown tier '{s}': expected 'free', 'free:N', 'pro', or 'pro:N'"
@@ -196,7 +273,7 @@ impl RepoRouter {
                 Ok(state.server.clone())
             }
             dashmap::mapref::entry::Entry::Vacant(e) => {
-                let server = Self::load_repo(&repo_path)?;
+                let server = Self::load_repo(&repo_path, self.tier)?;
                 let state = Arc::new(RepoState::new(server.clone()));
                 e.insert(state);
                 info!(repo = %repo_path.display(), "loaded repo");
@@ -251,8 +328,58 @@ impl RepoRouter {
         self.tier = tier;
     }
 
-    /// Load and index a single repo, creating a ReconServer.
-    fn load_repo(repo_path: &Path) -> Result<ReconServer, anyhow::Error> {
+    /// Load and index a single repo, enforcing tier limits on repo size.
+    ///
+    /// Walks the repo first to count files and estimate LOC. If the repo
+    /// exceeds the tier limit, returns a clear error with upgrade guidance.
+    fn load_repo(repo_path: &Path, tier: Tier) -> Result<ReconServer, anyhow::Error> {
+        let limits = tier.limits();
+        let tier_name = tier.name();
+
+        // Pre-flight: walk the repo and check file count before any indexing
+        let paths = recon_indexer::walker::walk_repo(repo_path);
+        let file_count = paths.len();
+
+        if file_count > limits.max_files {
+            return Err(anyhow::anyhow!(
+                "Repository has {} source files — exceeds the {} tier limit of {} files. \
+                 Upgrade to a higher tier for larger repositories.",
+                file_count,
+                tier_name,
+                limits.max_files,
+            ));
+        }
+
+        // Estimate LOC by sampling first 200 files, extrapolate to full repo
+        let sample_size = file_count.min(200);
+        if sample_size > 0 {
+            let sample_loc: usize = paths[..sample_size]
+                .iter()
+                .filter_map(|p| std::fs::read(p).ok())
+                .map(|c| c.iter().filter(|&&b| b == b'\n').count())
+                .sum();
+            let estimated_loc =
+                (sample_loc as f64 / sample_size as f64 * file_count as f64) as usize;
+
+            if estimated_loc > limits.max_loc {
+                return Err(anyhow::anyhow!(
+                    "Repository has approximately {}K lines of code — exceeds the {} tier \
+                     limit of {}K LOC. Upgrade to a higher tier for larger repositories.",
+                    estimated_loc / 1000,
+                    tier_name,
+                    limits.max_loc / 1000,
+                ));
+            }
+
+            info!(
+                repo = %repo_path.display(),
+                files = file_count,
+                estimated_loc,
+                "repo within {} tier limits",
+                tier_name,
+            );
+        }
+
         let store_dir = repo_path.join(".recon");
         std::fs::create_dir_all(&store_dir)?;
 
@@ -260,7 +387,6 @@ impl RepoRouter {
         let tantivy =
             TantivyBackend::open(&store_dir.join("tantivy")).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        // Incremental index on first load
         let mut writer = tantivy.writer(50_000_000).ok();
         match indexer::index_repo_incremental(&store, Some(&tantivy), repo_path, writer.as_mut()) {
             Ok(stats) => {
@@ -319,7 +445,9 @@ mod tests {
         make_test_repo(&repo1);
         make_test_repo(&repo2);
 
-        let router = RepoRouter::new(Tier::Free { max_repos: 1 });
+        let router = RepoRouter::new(Tier::Free {
+            limits: TierLimits::FREE,
+        });
         assert!(router.get_or_load(&repo1).is_ok());
         assert_eq!(router.repo_count(), 1);
 
@@ -344,7 +472,12 @@ mod tests {
         make_test_repo(&repo3);
 
         // Free tier with 2 repos allowed
-        let router = RepoRouter::new(Tier::Free { max_repos: 2 });
+        let router = RepoRouter::new(Tier::Free {
+            limits: TierLimits {
+                max_repos: 2,
+                ..TierLimits::FREE
+            },
+        });
         assert!(router.get_or_load(&repo1).is_ok());
         assert!(router.get_or_load(&repo2).is_ok());
         assert_eq!(router.repo_count(), 2);
@@ -361,7 +494,12 @@ mod tests {
         make_test_repo(&repo1);
         make_test_repo(&repo2);
 
-        let router = RepoRouter::new(Tier::Pro { max_repos: 10 });
+        let router = RepoRouter::new(Tier::Pro {
+            limits: TierLimits {
+                max_repos: 10,
+                ..TierLimits::PRO
+            },
+        });
         assert!(router.get_or_load(&repo1).is_ok());
         assert!(router.get_or_load(&repo2).is_ok());
         assert_eq!(router.repo_count(), 2);
@@ -378,7 +516,12 @@ mod tests {
         make_test_repo(&repo3);
 
         // Pro with limit of 2 — should reject 3rd, not evict
-        let router = RepoRouter::new(Tier::Pro { max_repos: 2 });
+        let router = RepoRouter::new(Tier::Pro {
+            limits: TierLimits {
+                max_repos: 2,
+                ..TierLimits::PRO
+            },
+        });
         assert!(router.get_or_load(&repo1).is_ok());
         assert!(router.get_or_load(&repo2).is_ok());
 
@@ -394,7 +537,12 @@ mod tests {
         let repo = dir.path().join("repo");
         make_test_repo(&repo);
 
-        let router = RepoRouter::new(Tier::Pro { max_repos: 10 });
+        let router = RepoRouter::new(Tier::Pro {
+            limits: TierLimits {
+                max_repos: 10,
+                ..TierLimits::PRO
+            },
+        });
         // Set expiry to the past
         router.set_expires_at(1);
 
@@ -410,7 +558,12 @@ mod tests {
         let repo = dir.path().join("repo");
         make_test_repo(&repo);
 
-        let router = RepoRouter::new(Tier::Pro { max_repos: 10 });
+        let router = RepoRouter::new(Tier::Pro {
+            limits: TierLimits {
+                max_repos: 10,
+                ..TierLimits::PRO
+            },
+        });
         router.get_or_load(&repo).unwrap();
         assert_eq!(router.repo_count(), 1);
 
@@ -427,7 +580,9 @@ mod tests {
 
     #[test]
     fn free_tier_no_expiry() {
-        let router = RepoRouter::new(Tier::Free { max_repos: 1 });
+        let router = RepoRouter::new(Tier::Free {
+            limits: TierLimits::FREE,
+        });
         // Free tier: expires_at stays 0 (no expiry)
         assert!(!router.is_expired());
         assert_eq!(router.sweep_expired(), 0);
@@ -439,7 +594,12 @@ mod tests {
         let repo = dir.path().join("repo");
         make_test_repo(&repo);
 
-        let router = Arc::new(RepoRouter::new(Tier::Pro { max_repos: 10 }));
+        let router = Arc::new(RepoRouter::new(Tier::Pro {
+            limits: TierLimits {
+                max_repos: 10,
+                ..TierLimits::PRO
+            },
+        }));
 
         let handles: Vec<_> = (0..4)
             .map(|_| {
@@ -470,5 +630,97 @@ mod tests {
         assert_eq!(pro100.max_repos(), 100);
 
         assert!("unknown".parse::<Tier>().is_err());
+    }
+
+    #[test]
+    fn file_limit_rejects_large_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("big_repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        // Create 10 source files
+        for i in 0..10 {
+            std::fs::write(
+                repo.join(format!("mod_{i}.rs")),
+                format!("fn func_{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        // Git init
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+
+        // Tier with max 5 files — should reject
+        let tiny_tier = Tier::Free {
+            limits: TierLimits {
+                max_repos: 1,
+                max_files: 5,
+                max_loc: 1_000_000,
+            },
+        };
+        let router = RepoRouter::new(tiny_tier);
+        let result = router.get_or_load(&repo);
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("source files"), "unexpected error: {err}");
+        assert!(err.contains("Upgrade"), "should suggest upgrade: {err}");
+    }
+
+    #[test]
+    fn loc_limit_rejects_large_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("loc_repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        // Create 3 files with ~100 lines each = ~300 LOC
+        for i in 0..3 {
+            let content: String = (0..100)
+                .map(|j| format!("fn func_{i}_{j}() {{ todo!() }}\n"))
+                .collect();
+            std::fs::write(repo.join(format!("mod_{i}.rs")), content).unwrap();
+        }
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+
+        // Tier with max 100 LOC — should reject (~300 LOC repo)
+        let tiny_tier = Tier::Free {
+            limits: TierLimits {
+                max_repos: 1,
+                max_files: 10_000,
+                max_loc: 100,
+            },
+        };
+        let router = RepoRouter::new(tiny_tier);
+        let result = router.get_or_load(&repo);
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("lines of code"), "unexpected error: {err}");
+        assert!(err.contains("Upgrade"), "should suggest upgrade: {err}");
     }
 }

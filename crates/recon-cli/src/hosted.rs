@@ -1,7 +1,7 @@
 //! Multi-repo hosted server with API key auth and lazy repo loading.
 
 use anyhow::Result;
-use recon_server::router::{RepoRouter, Tier};
+use recon_server::router::{RepoRouter, Tier, TierLimits};
 use recon_server::server::ReconServer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -55,7 +55,12 @@ impl KeyConfig {
 /// Uses Pro tier with a configurable max repo count.
 #[allow(dead_code)]
 pub fn hosted_router(max_repos: usize) -> RepoRouter {
-    RepoRouter::new(Tier::Pro { max_repos })
+    RepoRouter::new(Tier::Pro {
+        limits: TierLimits {
+            max_repos,
+            ..TierLimits::PRO
+        },
+    })
 }
 
 /// Resolve an API key to a `ReconServer`, loading the repo if needed.
