@@ -40,10 +40,14 @@ impl ReadPool {
     }
 
     /// Borrow a connection, run a closure, return the connection. Lock-free.
-    pub fn with<R>(&self, f: impl FnOnce(&Connection) -> R) -> R {
-        let conn = self.pool.pop().unwrap_or_else(|| {
-            Self::open_read_conn(&self.db_path).expect("failed to open overflow read connection")
-        });
+    ///
+    /// If the pool is empty and a new connection cannot be opened (DB deleted,
+    /// FD exhaustion), returns an error instead of panicking.
+    pub fn with<R>(&self, f: impl FnOnce(&Connection) -> Result<R, Error>) -> Result<R, Error> {
+        let conn = match self.pool.pop() {
+            Some(c) => c,
+            None => Self::open_read_conn(&self.db_path)?,
+        };
         let result = f(&conn);
         // Best-effort return; if pool is full, connection is dropped (acceptable)
         let _ = self.pool.push(conn);

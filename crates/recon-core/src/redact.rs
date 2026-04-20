@@ -98,7 +98,8 @@ pub fn redact_secrets(text: &str) -> Option<String> {
         return None;
     }
 
-    // Slow path: at least one pattern prefix matched, do full redaction
+    // Slow path: AC found a prefix — verify with full pattern matching.
+    // String is cloned here; if no real match is found, we return None (no cost to caller).
     let mut redacted = String::from(text);
     let mut changed = false;
 

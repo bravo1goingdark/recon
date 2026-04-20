@@ -203,79 +203,89 @@ impl ReconServer {
             let pools = LanguagePools::new(1);
 
             while let Some(changed_paths) = watcher.recv() {
-                // Phase 1: Filter to files that actually changed (lock-free via ReadPool)
-                let to_parse: Vec<(PathBuf, Vec<u8>)> = changed_paths
-                    .into_iter()
-                    .filter_map(|path| {
-                        let content = std::fs::read(&path).ok()?;
-                        if walker::is_generated_content(&content) {
-                            return None;
-                        }
-                        let rel_path = path.strip_prefix(&repo_root).unwrap_or(&path);
-                        let content_hash = recon_storage::hash::blake3_bytes(&content);
-                        let unchanged = read_pool
-                            .get_file_hash(rel_path)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|h| h == content_hash);
-                        if unchanged {
-                            return None;
-                        }
-                        Some((path, content))
-                    })
-                    .collect();
-
-                if to_parse.is_empty() {
-                    continue;
-                }
-
-                // Phase 2: Parse all files (NO locks held — pure CPU work)
-                let parsed: Vec<indexer::ParsedFile> = to_parse
-                    .iter()
-                    .filter_map(|(path, content)| {
-                        let content_hash = recon_storage::hash::blake3_bytes(content);
-                        let mtime = indexer::mtime_of(path);
-                        indexer::parse_file_with_content(
-                            content,
-                            path,
-                            &repo_root,
-                            &pools,
-                            content_hash,
-                            mtime,
-                        )
-                    })
-                    .collect();
-
-                if parsed.is_empty() {
-                    continue;
-                }
-
-                // Phase 3: Batch write to SQLite (short lock)
-                {
-                    let store = write_store.lock();
-                    let bulk: Vec<_> = parsed
-                        .iter()
-                        .map(|p| (&p.meta, p.symbols.as_slice(), p.refs.as_slice()))
+                // catch_unwind: a panic in one batch must not kill the watcher
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Phase 1: Filter to files that actually changed (lock-free via ReadPool)
+                    let to_parse: Vec<(PathBuf, Vec<u8>)> = changed_paths
+                        .into_iter()
+                        .filter_map(|path| {
+                            let content = std::fs::read(&path).ok()?;
+                            if walker::is_generated_content(&content) {
+                                return None;
+                            }
+                            let rel_path = path.strip_prefix(&repo_root).unwrap_or(&path);
+                            let content_hash = recon_storage::hash::blake3_bytes(&content);
+                            let unchanged = match read_pool.get_file_hash(rel_path) {
+                                Ok(Some(h)) => h == content_hash,
+                                Ok(None) => false,
+                                Err(e) => {
+                                    warn!(?rel_path, "hash check failed, will re-index: {e}");
+                                    false
+                                }
+                            };
+                            if unchanged {
+                                return None;
+                            }
+                            Some((path, content))
+                        })
                         .collect();
-                    if let Err(e) = store.batch_index_files(&bulk) {
-                        warn!("watcher batch store error: {e}");
-                    }
-                } // store lock released
 
-                // Phase 4: Batch write to Tantivy (short lock, separate from store)
-                {
-                    let mut tw = tantivy_writer.lock();
-                    if let Some(ref mut writer) = *tw {
-                        for pf in &parsed {
-                            let _ = tantivy.index_symbols(writer, &pf.meta.path, &pf.symbols);
-                        }
-                        if let Err(e) = tantivy.commit(writer) {
-                            warn!("watcher tantivy commit error: {e}");
+                    if to_parse.is_empty() {
+                        return;
+                    }
+
+                    // Phase 2: Parse all files (NO locks held — pure CPU work)
+                    let parsed: Vec<indexer::ParsedFile> = to_parse
+                        .iter()
+                        .filter_map(|(path, content)| {
+                            let content_hash = recon_storage::hash::blake3_bytes(content);
+                            let mtime = indexer::mtime_of(path);
+                            indexer::parse_file_with_content(
+                                content,
+                                path,
+                                &repo_root,
+                                &pools,
+                                content_hash,
+                                mtime,
+                            )
+                        })
+                        .collect();
+
+                    if parsed.is_empty() {
+                        return;
+                    }
+
+                    // Phase 3: Batch write to SQLite (short lock)
+                    {
+                        let store = write_store.lock();
+                        let bulk: Vec<_> = parsed
+                            .iter()
+                            .map(|p| (&p.meta, p.symbols.as_slice(), p.refs.as_slice()))
+                            .collect();
+                        if let Err(e) = store.batch_index_files(&bulk) {
+                            warn!("watcher batch store error: {e}");
                         }
                     }
-                } // tantivy lock released
 
-                debug!(files = parsed.len(), "watcher batch indexed");
+                    // Phase 4: Batch write to Tantivy (short lock, separate from store)
+                    {
+                        let mut tw = tantivy_writer.lock();
+                        if let Some(ref mut writer) = *tw {
+                            for pf in &parsed {
+                                let _ = tantivy.index_symbols(writer, &pf.meta.path, &pf.symbols);
+                            }
+                            if let Err(e) = tantivy.commit(writer) {
+                                warn!("watcher tantivy commit error: {e}");
+                            }
+                        }
+                    }
+
+                    debug!(files = parsed.len(), "watcher batch indexed");
+                }));
+
+                if result.is_err() {
+                    warn!("watcher batch panicked — recovering for next batch");
+                }
             }
         });
     }
