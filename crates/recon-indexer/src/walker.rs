@@ -42,7 +42,7 @@ pub fn walk_repo_with_limit(root: &Path, max_file_size: u64) -> Vec<PathBuf> {
         if lang == Language::Unknown {
             continue;
         }
-        if let Ok(meta) = std::fs::metadata(path) {
+        if let Ok(meta) = entry.metadata() {
             if meta.len() > max_file_size {
                 continue;
             }
@@ -70,6 +70,25 @@ pub fn is_generated(path: &Path) -> bool {
             Ok(l) => l,
             Err(_) => return false,
         };
+        for marker in GENERATED_MARKERS {
+            if line.contains(marker) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if already-read file content looks generated (first 8 lines).
+///
+/// Use this instead of [`is_generated`] when the file content has already been
+/// read into memory, to avoid a redundant file open + read.
+pub fn is_generated_content(content: &[u8]) -> bool {
+    let text = match std::str::from_utf8(content) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    for line in text.lines().take(8) {
         for marker in GENERATED_MARKERS {
             if line.contains(marker) {
                 return true;

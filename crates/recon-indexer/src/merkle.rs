@@ -8,13 +8,10 @@ use recon_core::error::Error;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// A flat Merkle snapshot: relative path → blake3 content hash.
-///
-/// Directory hashes are derived from children and stored at directory paths.
-/// File hashes are blake3 of file content.
+/// A flat snapshot: relative path → blake3 content hash (files only).
 #[derive(Debug, Clone, Default)]
 pub struct MerkleSnapshot {
-    /// Map of relative path → blake3 hash (32 bytes).
+    /// Map of relative file path → blake3 hash (32 bytes).
     pub hashes: BTreeMap<PathBuf, [u8; 32]>,
 }
 
@@ -29,56 +26,23 @@ pub struct MerkleDiff {
 
 impl MerkleSnapshot {
     /// Build a snapshot from a list of `(relative_path, content_hash)` pairs.
-    ///
-    /// Computes directory hashes by hashing sorted child hashes.
     pub fn build(file_hashes: Vec<(PathBuf, [u8; 32])>) -> Self {
         let mut hashes = BTreeMap::new();
-
-        // Insert file-level hashes
-        for (path, hash) in &file_hashes {
-            hashes.insert(path.clone(), *hash);
+        for (path, hash) in file_hashes {
+            hashes.insert(path, hash);
         }
-
-        // Collect all directory paths and compute their hashes bottom-up
-        let mut dir_children: BTreeMap<PathBuf, Vec<[u8; 32]>> = BTreeMap::new();
-        for (path, hash) in &file_hashes {
-            if let Some(parent) = path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    dir_children
-                        .entry(parent.to_path_buf())
-                        .or_default()
-                        .push(*hash);
-                }
-            }
-        }
-
-        // Hash each directory: sort child hashes, concatenate, blake3
-        for (dir, mut children) in dir_children {
-            children.sort();
-            let mut hasher = blake3::Hasher::new();
-            for child_hash in &children {
-                hasher.update(child_hash);
-            }
-            hashes.insert(dir, *hasher.finalize().as_bytes());
-        }
-
         Self { hashes }
     }
 
     /// Diff this snapshot against a previous one.
     ///
     /// Returns paths that changed (new or modified) and paths that were deleted.
-    /// Only returns file paths, not directory paths.
     pub fn diff(&self, previous: &MerkleSnapshot) -> MerkleDiff {
         let mut changed = Vec::new();
         let mut deleted = Vec::new();
 
         // Find changed or new paths
         for (path, hash) in &self.hashes {
-            // Skip directory entries — only report files
-            if self.is_directory_entry(path) {
-                continue;
-            }
             match previous.hashes.get(path) {
                 Some(prev_hash) if prev_hash == hash => {} // unchanged
                 _ => changed.push(path.clone()),           // new or modified
@@ -87,27 +51,12 @@ impl MerkleSnapshot {
 
         // Find deleted paths
         for path in previous.hashes.keys() {
-            if previous.is_directory_entry(path) {
-                continue;
-            }
             if !self.hashes.contains_key(path) {
                 deleted.push(path.clone());
             }
         }
 
         MerkleDiff { changed, deleted }
-    }
-
-    /// Check if a path is a directory entry (has children in the map).
-    fn is_directory_entry(&self, path: &Path) -> bool {
-        // Use BTreeMap range to check for any child path efficiently
-        use std::ops::Bound;
-        let mut child_start = path.to_path_buf();
-        child_start.push("");
-        self.hashes
-            .range((Bound::Excluded(child_start), Bound::Unbounded))
-            .next()
-            .is_some_and(|(k, _)| k.starts_with(path))
     }
 
     /// Save snapshot to a JSON file.

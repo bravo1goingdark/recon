@@ -33,25 +33,22 @@ fn now_secs() -> i64 {
 }
 
 /// Parse a single file using pooled parsers. Does NOT touch the store.
+///
+/// Accepts a pre-computed `content_hash` and `mtime` to avoid redundant
+/// blake3 rehashing and `metadata()` syscalls when the caller already has them.
 pub fn parse_file_with_content(
     content: &[u8],
     path: &Path,
     repo_root: &Path,
     pools: &LanguagePools,
+    content_hash: [u8; 32],
+    mtime: i64,
 ) -> Option<ParsedFile> {
     let rel_path = path.strip_prefix(repo_root).unwrap_or(path);
     let lang = Language::from_path(path);
     if lang == Language::Unknown {
         return None;
     }
-
-    let content_hash = hash::blake3_bytes(content);
-    let mtime = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH)
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
 
     let meta = FileMeta {
         path: rel_path.to_path_buf(),
@@ -74,31 +71,58 @@ pub fn parse_file_with_content(
     })
 }
 
+/// Read mtime from a path, returning 0 on failure.
+fn mtime_of(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 /// Index a single file: read once, hash, parse, store in SQLite + Tantivy.
+///
+/// Returns `Ok(true)` if the file was actually indexed, `Ok(false)` if skipped
+/// (unknown language, generated file, unchanged content hash, or parse failure).
 pub fn index_file(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
     tantivy_writer: Option<&mut tantivy::IndexWriter>,
     path: &Path,
     repo_root: &Path,
-) -> Result<(), Error> {
+    pools: Option<&LanguagePools>,
+) -> Result<bool, Error> {
     let rel_path = path.strip_prefix(repo_root).unwrap_or(path);
     let lang = Language::from_path(path);
-    if lang == Language::Unknown || walker::is_generated(path) {
-        return Ok(());
+    if lang == Language::Unknown {
+        return Ok(false);
     }
 
     let content = std::fs::read(path)?;
+    if walker::is_generated_content(&content) {
+        return Ok(false);
+    }
     let content_hash = hash::blake3_bytes(&content);
 
     if let Some(existing_hash) = store.get_file_hash(rel_path)? {
         if existing_hash == content_hash {
-            return Ok(());
+            return Ok(false);
         }
     }
 
-    let pools = LanguagePools::new(1);
-    if let Some(parsed) = parse_file_with_content(&content, path, repo_root, &pools) {
+    let owned_pools;
+    let pools = match pools {
+        Some(p) => p,
+        None => {
+            owned_pools = LanguagePools::new(1);
+            &owned_pools
+        }
+    };
+    let mtime = mtime_of(path);
+    if let Some(parsed) =
+        parse_file_with_content(&content, path, repo_root, pools, content_hash, mtime)
+    {
         store.batch_index_file(&parsed.meta, &parsed.symbols, &parsed.refs)?;
 
         // Also index into Tantivy
@@ -112,8 +136,9 @@ pub fn index_file(
             refs = parsed.refs.len(),
             "indexed"
         );
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Index all files in a repo — parallel parse, sequential batch store + Tantivy.
@@ -131,9 +156,6 @@ pub fn index_repo(
     let parsed: Vec<_> = paths
         .par_iter()
         .filter_map(|path| {
-            if walker::is_generated(path) {
-                return None;
-            }
             let content = match std::fs::read(path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -141,7 +163,12 @@ pub fn index_repo(
                     return None;
                 }
             };
-            parse_file_with_content(&content, path, repo_root, &pools)
+            if walker::is_generated_content(&content) {
+                return None;
+            }
+            let content_hash = hash::blake3_bytes(&content);
+            let mtime = mtime_of(path);
+            parse_file_with_content(&content, path, repo_root, &pools, content_hash, mtime)
         })
         .collect();
 
@@ -154,16 +181,16 @@ pub fn index_repo(
     for chunk in parsed.chunks(CHUNK_SIZE) {
         let bulk: Vec<_> = chunk
             .iter()
-            .map(|p| (p.meta.clone(), p.symbols.clone(), p.refs.clone()))
+            .map(|p| (&p.meta, p.symbols.as_slice(), p.refs.as_slice()))
             .collect();
 
         match store.batch_index_files(&bulk) {
             Ok(()) => {
-                stats.files_indexed += bulk.len();
+                stats.files_indexed += chunk.len();
             }
             Err(e) => {
-                warn!(chunk_size = bulk.len(), "bulk store error: {e}");
-                stats.errors += bulk.len();
+                warn!(chunk_size = chunk.len(), "bulk store error: {e}");
+                stats.errors += chunk.len();
             }
         }
     }
@@ -310,9 +337,6 @@ fn index_diff(
     let parsed: Vec<_> = abs_changed
         .par_iter()
         .filter_map(|path| {
-            if walker::is_generated(path) {
-                return None;
-            }
             let content = match std::fs::read(path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -320,7 +344,12 @@ fn index_diff(
                     return None;
                 }
             };
-            parse_file_with_content(&content, path, repo_root, &pools)
+            if walker::is_generated_content(&content) {
+                return None;
+            }
+            let content_hash = hash::blake3_bytes(&content);
+            let mtime = mtime_of(path);
+            parse_file_with_content(&content, path, repo_root, &pools, content_hash, mtime)
         })
         .collect();
 
@@ -377,7 +406,8 @@ mod tests {
         std::fs::write(&src, "pub fn hello() {}\npub struct Foo { pub x: i32 }").unwrap();
 
         let store = Store::open_memory().unwrap();
-        index_file(&store, None, None, &src, dir.path()).unwrap();
+        let indexed = index_file(&store, None, None, &src, dir.path(), None).unwrap();
+        assert!(indexed, "expected file to be indexed");
 
         let count = store.symbol_count().unwrap();
         assert!(count >= 2, "expected at least 2 symbols, got {count}");
@@ -390,10 +420,12 @@ mod tests {
         std::fs::write(&src, "pub fn hello() {}").unwrap();
 
         let store = Store::open_memory().unwrap();
-        index_file(&store, None, None, &src, dir.path()).unwrap();
+        let indexed = index_file(&store, None, None, &src, dir.path(), None).unwrap();
+        assert!(indexed, "first index should succeed");
         let count1 = store.symbol_count().unwrap();
 
-        index_file(&store, None, None, &src, dir.path()).unwrap();
+        let indexed = index_file(&store, None, None, &src, dir.path(), None).unwrap();
+        assert!(!indexed, "second index should skip (unchanged hash)");
         let count2 = store.symbol_count().unwrap();
         assert_eq!(count1, count2);
     }

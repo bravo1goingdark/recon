@@ -257,10 +257,7 @@ impl Store {
     ///
     /// Much faster than calling `batch_index_file` per file — one BEGIN/COMMIT
     /// instead of N, and WAL syncs once instead of N times.
-    pub fn batch_index_files(
-        &self,
-        files: &[(FileMeta, Vec<Symbol>, Vec<Ref>)],
-    ) -> Result<(), Error> {
+    pub fn batch_index_files(&self, files: &[(&FileMeta, &[Symbol], &[Ref])]) -> Result<(), Error> {
         if files.is_empty() {
             return Ok(());
         }
@@ -301,7 +298,7 @@ impl Store {
                 )
                 .map_err(|e| Error::Storage(e.to_string()))?;
 
-            for (meta, symbols, refs) in files {
+            for &(meta, symbols, refs) in files {
                 let path_str = meta.path.to_str().unwrap_or("");
                 del_refs_stmt
                     .execute(params![path_str])
