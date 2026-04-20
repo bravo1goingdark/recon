@@ -45,9 +45,6 @@ enum Command {
         /// Path to keys.toml config file
         #[arg(short, long)]
         keys: PathBuf,
-        /// Subscription tier: TIER[:REPOS[:FILES[:LOC]]] e.g. "free", "pro:100", "free:3:5000:500000"
-        #[arg(long, default_value = "pro")]
-        tier: recon_server::router::Tier,
         /// Log level
         #[arg(long, default_value = "info")]
         log: String,
@@ -425,7 +422,6 @@ async fn main() -> Result<()> {
             port,
             host,
             keys,
-            tier,
             log,
         } => {
             tracing_subscriber::fmt()
@@ -433,9 +429,14 @@ async fn main() -> Result<()> {
                 .with_env_filter(EnvFilter::new(&log))
                 .init();
 
-            info!(%tier, "server tier configured");
             let key_config = hosted::KeyConfig::load(&keys)?;
-            let router = std::sync::Arc::new(recon_server::router::RepoRouter::new(tier));
+            // Uncapped for hosted — each key's limits come from the DB via /v1/license/validate
+            let router = std::sync::Arc::new(recon_server::router::RepoRouter::new(
+                recon_server::router::Tier::new(
+                    "Hosted",
+                    recon_server::router::TierLimits::UNCAPPED,
+                ),
+            ));
 
             // Pre-load all configured repos
             for (api_key, repo_path) in &key_config.keys {
@@ -571,18 +572,52 @@ async fn main() -> Result<()> {
                 .with_env_filter(EnvFilter::new(&log))
                 .init();
 
-            // Validate license — determines tier limits for this session
+            // Validate license — the key determines the limits
             let cache_dir = repo.join(".recon");
             let license = recon_server::license::validate_license(key.as_deref(), &cache_dir);
+            let limits = license.tier.limits();
             info!(
                 tier = license.tier.name(),
                 source = %license.source,
-                max_repos = license.tier.max_repos(),
-                max_files = license.tier.max_files(),
-                max_loc = license.tier.max_loc(),
+                max_repos = limits.max_repos,
+                max_files = limits.max_files,
+                max_loc = limits.max_loc,
                 "license: {}",
                 license.message,
             );
+
+            // Pre-flight: check repo size against license limits before indexing
+            let paths = recon_indexer::walker::walk_repo(&repo);
+            if paths.len() > limits.max_files {
+                return Err(anyhow::anyhow!(
+                    "Repository has {} source files — exceeds your {} plan limit of {} files.\n\
+                     Upgrade at https://mcprecon.pages.dev/pricing",
+                    paths.len(),
+                    license.tier.name(),
+                    limits.max_files,
+                ));
+            }
+            // Estimate LOC by sampling first 200 files
+            let sample = paths.len().min(200);
+            if sample > 0 {
+                let sample_loc: usize = paths[..sample]
+                    .iter()
+                    .filter_map(|p| std::fs::read(p).ok())
+                    .map(|c| c.iter().filter(|&&b| b == b'\n').count())
+                    .sum();
+                let estimated_loc =
+                    (sample_loc as f64 / sample as f64 * paths.len() as f64) as usize;
+                if estimated_loc > limits.max_loc {
+                    return Err(anyhow::anyhow!(
+                        "Repository has ~{}K lines of code — exceeds your {} plan limit of {}K LOC.\n\
+                         Upgrade at https://mcprecon.pages.dev/pricing",
+                        estimated_loc / 1000,
+                        license.tier.name(),
+                        limits.max_loc / 1000,
+                    ));
+                }
+                info!(files = paths.len(), estimated_loc, "repo size OK");
+            }
 
             let (server, repo) = init_server(repo)?;
             info!(?repo, "starting recon server");
