@@ -1,8 +1,2 @@
-# API proxy — all /api/* requests forwarded to the Worker
-/api/*  https://recon-api.kumarashutosh34169.workers.dev/api/:splat  200
-
-# Page rewrites
-/docs       /Docs.html       200
-/pricing    /pricing.html    200
-/dashboard  /dashboard.html  200
-/login      /login.html      200
+# Page rewrites handled by directory structure (login/index.html, etc.)
+/docs  /Docs.html  200

@@ -3,7 +3,7 @@
  * Checks session via /v1/auth/me and updates the nav.
  */
 
-const API = "/api";
+const API = "https://recon-api.kumarashutosh34169.workers.dev/api";
 
 async function checkAuth() {
   try {

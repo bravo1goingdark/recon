@@ -2,7 +2,7 @@
  * Dashboard page logic — API keys management, billing status.
  */
 
-const API = "/api";
+const API = "https://recon-api.kumarashutosh34169.workers.dev/api";
 
 async function loadDashboard() {
   // Check auth
