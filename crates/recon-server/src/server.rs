@@ -7,6 +7,7 @@ use recon_core::redact;
 use recon_core::shapes::*;
 use recon_indexer::indexer;
 use recon_indexer::watcher::Watcher;
+use recon_parser::pool::LanguagePools;
 use recon_search::fff_backend::FffBackend;
 use recon_search::search_trait::{TextQuery, TextSearcher};
 use recon_search::{filters, fuzzy, pagerank, tantivy_backend::TantivyBackend};
@@ -139,12 +140,17 @@ impl ReconServer {
     }
 
     /// Start background file watcher that re-indexes on changes.
+    ///
+    /// Uses a single persistent `IndexWriter` across all watcher batches to
+    /// avoid the infinite segment-merge loop caused by rapid writer
+    /// creation/drop cycles. The writer is only recreated on unrecoverable
+    /// commit errors.
     pub fn start_watcher(&self) {
         let store = self.store.clone();
         let tantivy = self.tantivy.clone();
         let repo_root = self.repo_root.clone();
 
-        tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
             let watcher = match Watcher::new(&repo_root) {
                 Ok(w) => w,
                 Err(e) => {
@@ -154,30 +160,51 @@ impl ReconServer {
             };
             info!("file watcher started");
 
-            while let Some(changed_paths) = watcher.recv() {
-                let store = store.lock();
-                let mut writer = match tantivy.writer(15_000_000) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        warn!("tantivy writer error: {e}");
-                        continue;
-                    }
-                };
+            let pools = LanguagePools::new(1);
+            let mut writer = tantivy.writer(50_000_000).ok();
+            if writer.is_none() {
+                warn!("tantivy writer init failed, will retry on first batch");
+            }
 
-                for path in &changed_paths {
-                    if let Err(e) = indexer::index_file(
-                        &store,
-                        Some(&tantivy),
-                        Some(&mut writer),
-                        path,
-                        &repo_root,
-                    ) {
-                        warn!(?path, "re-index error: {e}");
-                    }
+            while let Some(changed_paths) = watcher.recv() {
+                // Recreate writer if we lost it (e.g. after a commit error)
+                if writer.is_none() {
+                    writer = match tantivy.writer(50_000_000) {
+                        Ok(w) => Some(w),
+                        Err(e) => {
+                            warn!("tantivy writer recreation error: {e}");
+                            continue;
+                        }
+                    };
                 }
 
-                if let Err(e) = tantivy.commit(&mut writer) {
-                    warn!("tantivy commit error on watch: {e}");
+                let mut indexed_any = false;
+                {
+                    let store = store.lock();
+                    for path in &changed_paths {
+                        match indexer::index_file(
+                            &store,
+                            Some(&tantivy),
+                            writer.as_mut(),
+                            path,
+                            &repo_root,
+                            Some(&pools),
+                        ) {
+                            Ok(true) => indexed_any = true,
+                            Ok(false) => {}
+                            Err(e) => warn!(?path, "re-index error: {e}"),
+                        }
+                    }
+                } // store lock released before commit
+
+                if indexed_any {
+                    if let Some(ref mut w) = writer {
+                        if let Err(e) = tantivy.commit(w) {
+                            warn!("tantivy commit error on watch: {e}");
+                            // Drop broken writer; will recreate next batch
+                            writer = None;
+                        }
+                    }
                 }
             }
         });

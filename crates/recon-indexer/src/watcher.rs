@@ -35,6 +35,7 @@ impl Watcher {
                     let paths: Vec<PathBuf> = events
                         .into_iter()
                         .flat_map(|e| e.event.paths)
+                        .filter(|p| !p.components().any(|c| c.as_os_str() == ".recon"))
                         .filter(|p| p.is_file() && Language::from_path(p) != Language::Unknown)
                         .collect();
                     if !paths.is_empty() {
@@ -55,6 +56,7 @@ impl Watcher {
                             Ok(paths) => {
                                 let paths: Vec<PathBuf> = paths
                                     .into_iter()
+                                    .filter(|p| !p.components().any(|c| c.as_os_str() == ".recon"))
                                     .filter(|p| {
                                         p.is_file() && Language::from_path(p) != Language::Unknown
                                     })
