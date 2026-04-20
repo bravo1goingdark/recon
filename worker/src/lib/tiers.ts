@@ -30,16 +30,16 @@ const FREE: TierConfig = {
 const PRO: TierConfig = {
   name: "Pro",
   limits: { max_repos: 10, max_files: 5_000, max_loc: 200_000 },
-  price_paise: 49_900, // 499 INR
-  price_display: "\u20B9499/mo",
+  price_paise: 300, // $3 USD in cents
+  price_display: "$3/mo",
 };
 
 /** Must match TierLimits::TEAM in router.rs */
 const TEAM: TierConfig = {
   name: "Team",
   limits: { max_repos: 25, max_files: 50_000, max_loc: 4_000_000 },
-  price_paise: 149_900, // 1499 INR
-  price_display: "\u20B91,499/mo",
+  price_paise: 700, // $7 USD in cents
+  price_display: "$7/mo",
 };
 
 /** Must match TierLimits::ENTERPRISE in router.rs */

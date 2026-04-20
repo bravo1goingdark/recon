@@ -25,7 +25,7 @@ billingRoutes.post("/checkout", requireAuth, async (c) => {
     c.env.RAZORPAY_KEY_ID,
     c.env.RAZORPAY_KEY_SECRET,
     tierConfig.price_paise,
-    "INR",
+    "USD",
     receipt,
     { user_id: user.id, tier: tierConfig.name },
   );
@@ -34,7 +34,7 @@ billingRoutes.post("/checkout", requireAuth, async (c) => {
   await db
     .prepare(
       `INSERT INTO payments (user_id, razorpay_order_id, amount_paise, currency, status, tier)
-       VALUES (?, ?, ?, 'INR', 'created', ?)`,
+       VALUES (?, ?, ?, 'USD', 'created', ?)`,
     )
     .bind(user.id, order.id, tierConfig.price_paise, tierConfig.name)
     .run();
