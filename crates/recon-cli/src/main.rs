@@ -63,6 +63,10 @@ enum Command {
         /// Bind address for HTTP transport
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// License key for recon.dev (enables Pro/Team/Enterprise limits).
+        /// Also reads from RECON_KEY env var. Omit for Free tier.
+        #[arg(long, env = "RECON_KEY")]
+        key: Option<String>,
     },
     /// Index a repository without starting the server
     Index,
@@ -556,11 +560,29 @@ async fn main() -> Result<()> {
             eprintln!("Restart Claude Code to activate recon tools.");
             Ok(())
         }
-        Command::Serve { log, port, host } => {
+        Command::Serve {
+            log,
+            port,
+            host,
+            key,
+        } => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
                 .with_env_filter(EnvFilter::new(&log))
                 .init();
+
+            // Validate license — determines tier limits for this session
+            let cache_dir = repo.join(".recon");
+            let license = recon_server::license::validate_license(key.as_deref(), &cache_dir);
+            info!(
+                tier = license.tier.name(),
+                source = %license.source,
+                max_repos = license.tier.max_repos(),
+                max_files = license.tier.max_files(),
+                max_loc = license.tier.max_loc(),
+                "license: {}",
+                license.message,
+            );
 
             let (server, repo) = init_server(repo)?;
             info!(?repo, "starting recon server");

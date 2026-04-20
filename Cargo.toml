@@ -77,7 +77,7 @@ thiserror = "2.0.18"
 anyhow = "1.0.102"
 
 # CLI
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
 
 # Token counting
 tiktoken-rs = "0.11.0"
@@ -115,6 +115,9 @@ tokio-util = { version = "0.7", features = ["codec"] }
 
 # Allocator
 mimalloc = "0.1"
+
+# License validation (lightweight sync HTTP client)
+ureq = { version = "3", features = ["json"] }
 
 # Misc
 tempfile = "3.27.0"
