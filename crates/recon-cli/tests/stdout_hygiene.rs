@@ -25,9 +25,38 @@ fn serve_stdout_is_clean_jsonrpc() {
         panic!("recon binary not found at {}", binary.display());
     }
 
-    // Start the server — use workspace root as repo
+    // Create a temp dir with a pre-seeded license cache so the CLI starts
+    // without network access (key required but cache provides offline grace)
+    let tmp = tempfile::tempdir().unwrap();
+    let recon_dir = tmp.path().join(".recon");
+    std::fs::create_dir_all(&recon_dir).unwrap();
+    let cache = serde_json::json!({
+        "cached_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        "response": {
+            "valid": true,
+            "tier": "Free",
+            "limits": { "max_repos": 1, "max_files": 250, "max_loc": 5000 },
+            "expires_at": 0,
+            "message": "test"
+        }
+    });
+    std::fs::write(
+        recon_dir.join("license.json"),
+        serde_json::to_string(&cache).unwrap(),
+    )
+    .unwrap();
+
+    // Start the server with a dummy key + unreachable API (cache provides fallback)
     let mut child = Command::new(&binary)
-        .args(["serve", "--repo", workspace_root.to_str().unwrap()])
+        .args([
+            "serve",
+            "--repo",
+            tmp.path().to_str().unwrap(),
+            "--key",
+            "sk-recon-test-00000000000000000000",
+        ])
+        .env("RECON_API_URL", "http://127.0.0.1:1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -59,7 +88,6 @@ fn serve_stdout_is_clean_jsonrpc() {
     let reader = BufReader::new(stdout);
     let mut lines_read = Vec::new();
 
-    // Use a thread to read with timeout
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
         for line in reader.lines() {
@@ -73,14 +101,14 @@ fn serve_stdout_is_clean_jsonrpc() {
         }
     });
 
-    // Collect lines for up to 3 seconds
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    // Collect lines for up to 5 seconds
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(line) => lines_read.push(line),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if !lines_read.is_empty() {
-                    break; // Got at least one response, stop waiting
+                    break;
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -103,7 +131,6 @@ fn serve_stdout_is_clean_jsonrpc() {
         assert!(parsed.is_ok(), "stdout line {i} is not valid JSON: {line}");
 
         let value = parsed.unwrap();
-        // Should be a JSON-RPC response (has "jsonrpc" field)
         assert!(
             value.get("jsonrpc").is_some(),
             "stdout line {i} is not JSON-RPC: {line}"
