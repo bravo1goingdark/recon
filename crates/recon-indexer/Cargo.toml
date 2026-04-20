@@ -11,6 +11,7 @@ recon-core = { workspace = true }
 recon-parser = { workspace = true }
 recon-storage = { workspace = true }
 recon-search = { workspace = true }
+aho-corasick = { workspace = true }
 blake3 = { workspace = true }
 tantivy = { workspace = true }
 ignore = { workspace = true }

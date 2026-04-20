@@ -49,6 +49,8 @@ pub struct TantivyBackend {
     index: Index,
     reader: IndexReader,
     fields: Fields,
+    /// Cached query parser — avoids reconstruction per query.
+    query_parser: QueryParser,
     #[allow(dead_code)]
     schema: Schema,
 }
@@ -76,10 +78,21 @@ impl TantivyBackend {
             .try_into()
             .map_err(|e| Error::Search(format!("tantivy reader: {e}")))?;
 
+        let query_parser = QueryParser::for_index(
+            &index,
+            vec![
+                fields.name,
+                fields.qualified_name,
+                fields.signature,
+                fields.doc,
+            ],
+        );
+
         Ok(Self {
             index,
             reader,
             fields,
+            query_parser,
             schema,
         })
     }
@@ -97,10 +110,21 @@ impl TantivyBackend {
             .try_into()
             .map_err(|e| Error::Search(format!("tantivy reader: {e}")))?;
 
+        let query_parser = QueryParser::for_index(
+            &index,
+            vec![
+                fields.name,
+                fields.qualified_name,
+                fields.signature,
+                fields.doc,
+            ],
+        );
+
         Ok(Self {
             index,
             reader,
             fields,
+            query_parser,
             schema,
         })
     }
@@ -230,17 +254,9 @@ impl TantivyBackend {
         }
 
         let searcher = self.reader.searcher();
-        let query_parser = QueryParser::for_index(
-            &self.index,
-            vec![
-                self.fields.name,
-                self.fields.qualified_name,
-                self.fields.signature,
-                self.fields.doc,
-            ],
-        );
 
-        let query = query_parser
+        let query = self
+            .query_parser
             .parse_query(query_str)
             .map_err(|e| Error::Search(format!("parse query: {e}")))?;
 
@@ -391,16 +407,14 @@ fn split_code_identifier(text: &str) -> Vec<(usize, usize)> {
     let simple = SimpleTokenizer::default();
     let mut simple_tokenizer = simple;
     let mut stream = tantivy::tokenizer::Tokenizer::token_stream(&mut simple_tokenizer, text);
-    let mut word_ranges = Vec::new();
+
+    // Process words inline — no intermediate word_ranges Vec needed
     while tantivy::tokenizer::TokenStream::advance(&mut stream) {
         let t = tantivy::tokenizer::TokenStream::token(&stream);
-        // Validate char boundaries before accepting
-        if text.is_char_boundary(t.offset_from) && text.is_char_boundary(t.offset_to) {
-            word_ranges.push((t.offset_from, t.offset_to));
+        if !text.is_char_boundary(t.offset_from) || !text.is_char_boundary(t.offset_to) {
+            continue;
         }
-    }
-
-    for &(start, end) in &word_ranges {
+        let (start, end) = (t.offset_from, t.offset_to);
         let word = &text[start..end];
 
         // Split on underscores — track byte offsets carefully
@@ -414,32 +428,32 @@ fn split_code_identifier(text: &str) -> Vec<(usize, usize)> {
                     tokens.push((part_start, part_end));
                 }
 
-                // Split camelCase: collect (char_index, byte_offset) pairs
-                let char_offsets: Vec<(usize, usize)> = part
-                    .char_indices()
-                    .enumerate()
-                    .map(|(ci, (bi, _))| (ci, part_start + bi))
-                    .collect();
-
-                let chars: Vec<char> = part.chars().collect();
+                // Split camelCase using iterators — no Vec<char> or Vec<(usize,usize)>
                 let mut seg_start_byte = part_start;
+                let mut prev_lower = false;
+                let mut prev_byte_end = part_start;
+                let bytes = part.as_bytes();
 
-                for i in 1..chars.len() {
-                    if chars[i].is_uppercase()
-                        && (i + 1 >= chars.len()
-                            || !chars[i + 1].is_uppercase()
-                            || chars[i - 1].is_lowercase())
-                    {
-                        let seg_end_byte = char_offsets[i].1;
-                        if seg_end_byte > seg_start_byte + chars[0].len_utf8() {
-                            tokens.push((seg_start_byte, seg_end_byte));
+                for (bi, ch) in part.char_indices() {
+                    let abs_bi = part_start + bi;
+                    if bi > 0 && ch.is_uppercase() {
+                        // Check if next char is lowercase or prev was lowercase
+                        let next_byte = bi + ch.len_utf8();
+                        let next_is_lower =
+                            next_byte < bytes.len() && (bytes[next_byte] as char).is_lowercase();
+                        if prev_lower || next_is_lower {
+                            if abs_bi > seg_start_byte + 1 {
+                                tokens.push((seg_start_byte, abs_bi));
+                            }
+                            seg_start_byte = abs_bi;
                         }
-                        seg_start_byte = seg_end_byte;
                     }
+                    prev_lower = ch.is_lowercase();
+                    prev_byte_end = abs_bi + ch.len_utf8();
                 }
                 // Last camel segment
                 if seg_start_byte > part_start && seg_start_byte < part_end {
-                    tokens.push((seg_start_byte, part_end));
+                    tokens.push((seg_start_byte, prev_byte_end));
                 }
             }
             byte_offset += part.len() + 1; // +1 for underscore
@@ -456,11 +470,12 @@ mod tests {
     use recon_core::lang::Language;
     use recon_core::symbol::SymbolKind;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn make_sym(id: u64, name: &str, qname: &str, kind: SymbolKind) -> Symbol {
         Symbol {
             id,
-            path: PathBuf::from("src/lib.rs"),
+            path: Arc::new(PathBuf::from("src/lib.rs")),
             name: CompactString::new(name),
             qualified_name: CompactString::new(qname),
             kind,

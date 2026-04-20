@@ -72,7 +72,7 @@ pub fn parse_file_with_content(
 }
 
 /// Read mtime from a path, returning 0 on failure.
-fn mtime_of(path: &Path) -> i64 {
+pub fn mtime_of(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .unwrap_or(UNIX_EPOCH)
@@ -142,10 +142,13 @@ pub fn index_file(
 }
 
 /// Index all files in a repo — parallel parse, sequential batch store + Tantivy.
+/// Full repo index. If `shared_writer` is provided, uses it instead of creating
+/// a new IndexWriter (avoids LockBusy when a watcher already holds the lock).
 pub fn index_repo(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
     repo_root: &Path,
+    shared_writer: Option<&mut tantivy::IndexWriter>,
 ) -> Result<IndexStats, Error> {
     let paths = walker::walk_repo(repo_root);
     info!(files = paths.len(), "starting repo indexing");
@@ -173,8 +176,6 @@ pub fn index_repo(
         .collect();
 
     // Phase 2: Bulk store — chunked transactions (500 files each) for safety + speed.
-    // Small repos go through in one transaction. If a chunk fails, only that chunk is lost.
-    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(50_000_000).ok());
     let mut stats = IndexStats::default();
     const CHUNK_SIZE: usize = 500;
 
@@ -195,8 +196,15 @@ pub fn index_repo(
         }
     }
 
-    // Tantivy indexing — batch with commits every 20K docs
-    if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
+    // Tantivy indexing — use shared writer if available, else create a local one
+    let mut local_writer = if shared_writer.is_none() {
+        tantivy.and_then(|tb| tb.writer(50_000_000).ok())
+    } else {
+        None
+    };
+    let writer_ref = shared_writer.or(local_writer.as_mut());
+
+    if let (Some(tb), Some(writer)) = (tantivy, writer_ref) {
         let mut docs_since_commit = 0usize;
         for parsed_file in &parsed {
             let _ = tb.index_symbols(writer, &parsed_file.meta.path, &parsed_file.symbols);
@@ -229,10 +237,15 @@ pub fn index_repo(
 /// 2. If HEAD differs → gix tree diff (old..new) + worktree status.
 /// 3. Non-git repos or first index → fall back to full `index_repo`.
 /// 4. Only changed files are read, parsed, and stored.
+///
+/// If `shared_writer` is provided, uses it for Tantivy writes instead of
+/// creating a new writer (prevents LockBusy).
+#[allow(clippy::needless_option_as_deref)]
 pub fn index_repo_incremental(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
     repo_root: &Path,
+    mut shared_writer: Option<&mut tantivy::IndexWriter>,
 ) -> Result<IndexStats, Error> {
     use std::collections::HashSet;
 
@@ -261,14 +274,14 @@ pub fn index_repo_incremental(
         Some(sha) => sha,
         None => {
             info!("not a git repo, full index");
-            return index_repo(store, tantivy, repo_root);
+            return index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut());
         }
     };
     let repo = repo.unwrap(); // safe: if we got a HEAD, we have a repo
 
     if last_commit.is_none() {
         info!("no previous index, full index");
-        let stats = index_repo(store, tantivy, repo_root)?;
+        let stats = index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut())?;
         if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
             warn!("failed to store last_indexed_commit: {e}");
         }
@@ -292,7 +305,7 @@ pub fn index_repo_incremental(
             }
             Err(e) => {
                 warn!("gix tree diff failed, falling back to full index: {e}");
-                let stats = index_repo(store, tantivy, repo_root)?;
+                let stats = index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut())?;
                 if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
                     warn!("failed to store last_indexed_commit: {e}");
                 }
@@ -351,7 +364,14 @@ pub fn index_repo_incremental(
         "gix diff: incremental reindex"
     );
 
-    let stats = index_diff(store, tantivy, repo_root, &modified, &deleted)?;
+    let stats = index_diff(
+        store,
+        tantivy,
+        repo_root,
+        &modified,
+        &deleted,
+        shared_writer.as_deref_mut(),
+    )?;
 
     if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
         warn!("failed to store last_indexed_commit: {e}");
@@ -361,15 +381,24 @@ pub fn index_repo_incremental(
 }
 
 /// Index only specific changed and deleted files.
+#[allow(clippy::needless_option_as_deref)]
 fn index_diff(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
     repo_root: &Path,
     changed: &[PathBuf],
     deleted: &[PathBuf],
+    shared_writer: Option<&mut tantivy::IndexWriter>,
 ) -> Result<IndexStats, Error> {
     let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
-    let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(15_000_000).ok());
+    // Use shared writer if available, else create a local one
+    let mut local_writer = if shared_writer.is_none() {
+        tantivy.and_then(|tb| tb.writer(15_000_000).ok())
+    } else {
+        None
+    };
+    let mut tantivy_writer: Option<&mut tantivy::IndexWriter> =
+        shared_writer.or(local_writer.as_mut());
     let mut stats = IndexStats::default();
 
     // Delete removed files — convert to relative paths for store
@@ -405,7 +434,7 @@ fn index_diff(
         match store.batch_index_file(&parsed_file.meta, &parsed_file.symbols, &parsed_file.refs) {
             Ok(()) => {
                 stats.files_indexed += 1;
-                if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
+                if let (Some(tb), Some(writer)) = (tantivy, tantivy_writer.as_deref_mut()) {
                     let _ = tb.index_symbols(writer, &parsed_file.meta.path, &parsed_file.symbols);
                 }
             }
@@ -416,7 +445,7 @@ fn index_diff(
         }
     }
 
-    if let (Some(tb), Some(ref mut writer)) = (tantivy, tantivy_writer.as_mut()) {
+    if let (Some(tb), Some(writer)) = (tantivy, tantivy_writer.as_deref_mut()) {
         if let Err(e) = tb.commit(writer) {
             warn!("tantivy commit error: {e}");
         }
@@ -486,7 +515,7 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "just a note").unwrap();
 
         let store = Store::open_memory().unwrap();
-        let stats = index_repo(&store, None, dir.path()).unwrap();
+        let stats = index_repo(&store, None, dir.path(), None).unwrap();
 
         assert_eq!(stats.files_indexed, 2);
         assert!(stats.total_symbols >= 2);
@@ -525,14 +554,14 @@ mod tests {
             .unwrap();
 
         let store = Store::open_memory().unwrap();
-        let stats = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
         assert!(stats.files_indexed >= 1);
 
         let commit = store.get_meta("last_indexed_commit").unwrap();
         assert!(commit.is_some(), "should store last_indexed_commit");
 
         // Second run with same HEAD should skip
-        let stats2 = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let stats2 = index_repo_incremental(&store, None, dir.path(), None).unwrap();
         assert_eq!(stats2.files_indexed, 0, "should skip when HEAD unchanged");
     }
 
@@ -547,7 +576,7 @@ mod tests {
 
         let store = Store::open_memory().unwrap();
         let tantivy = TantivyBackend::open_memory().unwrap();
-        let stats = index_repo(&store, Some(&tantivy), dir.path()).unwrap();
+        let stats = index_repo(&store, Some(&tantivy), dir.path(), None).unwrap();
 
         assert!(stats.files_indexed >= 1);
         // Tantivy should have docs
@@ -595,7 +624,7 @@ mod tests {
 
         // First index: full
         let store = Store::open_memory().unwrap();
-        let stats = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
         assert!(stats.files_indexed >= 3, "first run should index all files");
 
         // Modify only one file, commit
@@ -603,7 +632,7 @@ mod tests {
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-m", "update main"]);
 
-        let stats2 = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let stats2 = index_repo_incremental(&store, None, dir.path(), None).unwrap();
         assert_eq!(
             stats2.files_indexed, 1,
             "second run should only index the 1 changed file, got {}",
@@ -616,14 +645,14 @@ mod tests {
         let dir = init_test_repo(&[("main.rs", "fn main() {}")]);
 
         let store = Store::open_memory().unwrap();
-        let stats = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
         assert!(stats.files_indexed >= 1);
 
         // Modify file WITHOUT committing — worktree change only
         std::fs::write(dir.path().join("main.rs"), "fn main() { todo!(); }").unwrap();
 
         // HEAD is same, but worktree has changes → should still index
-        let stats2 = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let stats2 = index_repo_incremental(&store, None, dir.path(), None).unwrap();
         assert_eq!(
             stats2.files_indexed, 1,
             "uncommitted worktree change should be detected"
@@ -638,7 +667,7 @@ mod tests {
         ]);
 
         let store = Store::open_memory().unwrap();
-        let stats = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
         assert!(stats.files_indexed >= 2);
         let count_before = store.symbol_count().unwrap();
         assert!(count_before >= 2);
@@ -648,7 +677,7 @@ mod tests {
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-m", "delete extra"]);
 
-        let stats2 = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let stats2 = index_repo_incremental(&store, None, dir.path(), None).unwrap();
         let count_after = store.symbol_count().unwrap();
         assert!(
             count_after < count_before,

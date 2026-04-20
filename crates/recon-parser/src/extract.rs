@@ -4,6 +4,7 @@ use compact_str::CompactString;
 use recon_core::lang::Language;
 use recon_core::symbol::{Ref, Symbol, SymbolKind};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Result of extracting symbols from a source file.
 pub struct Extracted {
@@ -16,8 +17,8 @@ pub struct Extracted {
 /// Mutable extraction context threaded through all extractors.
 struct Ctx<'a> {
     src: &'a str,
-    /// Cached PathBuf — allocated once, cloned per symbol/ref.
-    path_buf: std::path::PathBuf,
+    /// Arc-shared path — allocated once, Arc::clone per symbol/ref (cheap atomic increment).
+    path_arc: Arc<std::path::PathBuf>,
     lang: Language,
     symbols: Vec<Symbol>,
     refs: Vec<Ref>,
@@ -33,7 +34,7 @@ impl<'a> Ctx<'a> {
         let est_symbols = (line_count / 5).max(8);
         Self {
             src,
-            path_buf: path.to_path_buf(),
+            path_arc: Arc::new(path.to_path_buf()),
             lang,
             symbols: Vec::with_capacity(est_symbols),
             refs: Vec::with_capacity(est_symbols * 3),
@@ -70,7 +71,7 @@ impl<'a> Ctx<'a> {
 
         self.symbols.push(Symbol {
             id,
-            path: self.path_buf.clone(),
+            path: Arc::clone(&self.path_arc),
             name: CompactString::new(name),
             qualified_name: qname,
             kind,
@@ -88,7 +89,7 @@ impl<'a> Ctx<'a> {
 
     fn push_ref(&mut self, src_symbol_id: u64, ident: &str) {
         self.refs.push(Ref {
-            src_path: self.path_buf.clone(),
+            src_path: Arc::clone(&self.path_arc),
             src_symbol_id,
             ident: CompactString::new(ident),
             dst_symbol_id: None,

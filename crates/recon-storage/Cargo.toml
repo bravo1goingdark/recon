@@ -8,6 +8,7 @@ description = "SQLite schema, migrations, and content hashing for recon"
 
 [dependencies]
 recon-core = { workspace = true }
+crossbeam-queue = { workspace = true }
 rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
 blake3 = { workspace = true }

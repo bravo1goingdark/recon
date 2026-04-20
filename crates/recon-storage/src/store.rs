@@ -7,26 +7,34 @@ use recon_core::lang::Language;
 use recon_core::symbol::{FileMeta, Ref, Symbol, SymbolKind};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The main storage handle (single-writer).
 pub struct Store {
     conn: Connection,
+    /// Stored so `ReadPool` can open the same database.
+    db_path: Option<PathBuf>,
 }
 
 impl Store {
     /// Open or create a store at the given path.
     pub fn open(path: &Path) -> Result<Self, Error> {
         let conn = Connection::open(path).map_err(|e| Error::Storage(e.to_string()))?;
-        Self::init(conn)
+        Self::init(conn, Some(path.to_path_buf()))
     }
 
     /// Create an in-memory store (for testing).
     pub fn open_memory() -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(|e| Error::Storage(e.to_string()))?;
-        Self::init(conn)
+        Self::init(conn, None)
     }
 
-    fn init(mut conn: Connection) -> Result<Self, Error> {
+    /// Get the database file path (None for in-memory stores).
+    pub fn db_path(&self) -> Option<&Path> {
+        self.db_path.as_deref()
+    }
+
+    fn init(mut conn: Connection, db_path: Option<PathBuf>) -> Result<Self, Error> {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -42,7 +50,7 @@ impl Store {
             .to_latest(&mut conn)
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        Ok(Self { conn })
+        Ok(Self { conn, db_path })
     }
 
     /// Insert or update a file metadata record.
@@ -70,20 +78,23 @@ impl Store {
     }
 
     /// Delete a file and cascade to its symbols and refs.
+    ///
+    /// Single transaction: delete refs (explicit), then file (FK cascades to symbols).
     pub fn delete_file_cascade(&self, path: &Path) -> Result<(), Error> {
         let path_str = path.to_str().unwrap_or("");
-        self.conn
-            .execute(
-                "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
-                params![path_str],
-            )
+        let tx = self
+            .conn
+            .unchecked_transaction()
             .map_err(|e| Error::Storage(e.to_string()))?;
-        self.conn
-            .execute("DELETE FROM symbols WHERE path = ?1", params![path_str])
+        tx.execute(
+            "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
+            params![path_str],
+        )
+        .map_err(|e| Error::Storage(e.to_string()))?;
+        // FK cascade from files -> symbols handles symbol cleanup
+        tx.execute("DELETE FROM files WHERE path = ?1", params![path_str])
             .map_err(|e| Error::Storage(e.to_string()))?;
-        self.conn
-            .execute("DELETE FROM files WHERE path = ?1", params![path_str])
-            .map_err(|e| Error::Storage(e.to_string()))?;
+        tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -168,7 +179,7 @@ impl Store {
         {
             let path_str = meta.path.to_str().unwrap_or("");
 
-            // Delete old data
+            // Delete old refs + symbols in one transaction
             tx.execute(
                 "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
                 params![path_str],
@@ -351,18 +362,22 @@ impl Store {
         Ok(())
     }
 
-    /// Delete all symbols for a given file path.
+    /// Delete all symbols (and cascaded refs) for a given file path.
     pub fn delete_symbols_for_path(&self, path: &Path) -> Result<(), Error> {
         let path_str = path.to_str().unwrap_or("");
-        self.conn
-            .execute(
-                "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
-                params![path_str],
-            )
+        let tx = self
+            .conn
+            .unchecked_transaction()
             .map_err(|e| Error::Storage(e.to_string()))?;
-        self.conn
-            .execute("DELETE FROM symbols WHERE path = ?1", params![path_str])
+        // Delete refs explicitly (no FK cascade), then symbols
+        tx.execute(
+            "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
+            params![path_str],
+        )
+        .map_err(|e| Error::Storage(e.to_string()))?;
+        tx.execute("DELETE FROM symbols WHERE path = ?1", params![path_str])
             .map_err(|e| Error::Storage(e.to_string()))?;
+        tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -477,7 +492,7 @@ impl Store {
         let rows = stmt
             .query_map(params![ident], |row| {
                 Ok(Ref {
-                    src_path: PathBuf::from(row.get::<_, String>(0)?),
+                    src_path: Arc::new(PathBuf::from(row.get::<_, String>(0)?)),
                     src_symbol_id: row.get(1)?,
                     ident: CompactString::new(row.get::<_, String>(2)?),
                     dst_symbol_id: row.get(3)?,
@@ -647,7 +662,7 @@ impl Store {
         let rows = stmt
             .query_map([], |row| {
                 Ok(Ref {
-                    src_path: PathBuf::from(row.get::<_, String>(0)?),
+                    src_path: Arc::new(PathBuf::from(row.get::<_, String>(0)?)),
                     src_symbol_id: row.get(1)?,
                     ident: CompactString::new(row.get::<_, String>(2)?),
                     dst_symbol_id: row.get(3)?,
@@ -705,9 +720,42 @@ impl Store {
         }
         Ok(results)
     }
+
+    /// Get file paths filtered by language — pushes filter into SQL.
+    pub fn file_paths_by_lang(&self, lang: &str) -> Result<Vec<PathBuf>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT path FROM files WHERE lang = ?1")
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![lang], |row| {
+                let p: String = row.get(0)?;
+                Ok(PathBuf::from(p))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut results = Vec::with_capacity(64);
+        for r in rows {
+            results.push(r.map_err(|e| Error::Storage(e.to_string()))?);
+        }
+        Ok(results)
+    }
+
+    /// Rebuild the FTS5 index from the content table.
+    ///
+    /// Call this after bulk inserts with triggers disabled, or to repair
+    /// a corrupted FTS index.
+    pub fn rebuild_fts(&self) -> Result<(), Error> {
+        self.conn
+            .execute_batch("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild');")
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
 }
 
-fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
+/// Convert a rusqlite row to a Symbol. Public so `read_fns` can reuse it.
+pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
     let kind_str: String = row.get(4).map_err(|e| Error::Storage(e.to_string()))?;
     let kind = match kind_str.as_str() {
         "fn" => SymbolKind::Function,
@@ -741,7 +789,7 @@ fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
 
     Ok(Symbol {
         id: row.get(0).map_err(|e| Error::Storage(e.to_string()))?,
-        path: PathBuf::from(&path_str),
+        path: Arc::new(PathBuf::from(&path_str)),
         name: CompactString::new(
             row.get::<_, String>(2)
                 .map_err(|e| Error::Storage(e.to_string()))?,
@@ -769,7 +817,7 @@ mod tests {
     fn make_symbol(name: &str, qname: &str, kind: SymbolKind) -> Symbol {
         Symbol {
             id: 0,
-            path: PathBuf::from("src/lib.rs"),
+            path: Arc::new(PathBuf::from("src/lib.rs")),
             name: CompactString::new(name),
             qualified_name: CompactString::new(qname),
             kind,
@@ -798,7 +846,7 @@ mod tests {
     fn open_memory_and_migrate() {
         let store = Store::open_memory().unwrap();
         let v = store.get_meta("schema_version").unwrap();
-        assert_eq!(v.as_deref(), Some("1"));
+        assert_eq!(v.as_deref(), Some("2"));
     }
 
     #[test]
@@ -884,7 +932,7 @@ mod tests {
             .unwrap();
 
         let refs = vec![Ref {
-            src_path: PathBuf::from("src/main.rs"),
+            src_path: Arc::new(PathBuf::from("src/main.rs")),
             src_symbol_id: id,
             ident: CompactString::new("foo"),
             dst_symbol_id: Some(id),
@@ -940,7 +988,7 @@ mod tests {
             make_symbol("bar", "mod::bar", SymbolKind::Function),
         ];
         let refs = vec![Ref {
-            src_path: PathBuf::from("src/lib.rs"),
+            src_path: Arc::new(PathBuf::from("src/lib.rs")),
             src_symbol_id: 1,
             ident: CompactString::new("bar"),
             dst_symbol_id: None,
@@ -950,5 +998,92 @@ mod tests {
         store.batch_index_file(&meta, &symbols, &refs).unwrap();
         assert_eq!(store.symbol_count().unwrap(), 2);
         assert_eq!(store.refs_for_ident("bar").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fk_cascade_deletes_refs_with_symbols() {
+        let store = Store::open_memory().unwrap();
+        let meta = make_file_meta("src/lib.rs");
+        let symbols = vec![make_symbol("foo", "mod::foo", SymbolKind::Function)];
+        let refs = vec![Ref {
+            src_path: Arc::new(PathBuf::from("src/lib.rs")),
+            src_symbol_id: 1,
+            ident: CompactString::new("bar"),
+            dst_symbol_id: None,
+            weight: 1.0,
+        }];
+
+        store.batch_index_file(&meta, &symbols, &refs).unwrap();
+        assert_eq!(store.refs_for_ident("bar").unwrap().len(), 1);
+
+        // Deleting symbols should cascade-delete refs via FK
+        store
+            .delete_symbols_for_path(std::path::Path::new("src/lib.rs"))
+            .unwrap();
+        assert_eq!(store.refs_for_ident("bar").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn file_cascade_delete_removes_everything() {
+        let store = Store::open_memory().unwrap();
+        let meta = make_file_meta("src/lib.rs");
+        let symbols = vec![make_symbol("foo", "mod::foo", SymbolKind::Function)];
+        let refs = vec![Ref {
+            src_path: Arc::new(PathBuf::from("src/lib.rs")),
+            src_symbol_id: 1,
+            ident: CompactString::new("baz"),
+            dst_symbol_id: None,
+            weight: 1.0,
+        }];
+
+        store.batch_index_file(&meta, &symbols, &refs).unwrap();
+        assert_eq!(store.symbol_count().unwrap(), 1);
+        assert_eq!(store.refs_for_ident("baz").unwrap().len(), 1);
+
+        // Deleting the file should cascade to symbols and refs
+        store
+            .delete_file_cascade(std::path::Path::new("src/lib.rs"))
+            .unwrap();
+        assert_eq!(store.symbol_count().unwrap(), 0);
+        assert_eq!(store.refs_for_ident("baz").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn rebuild_fts_works() {
+        let store = Store::open_memory().unwrap();
+        store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
+        let sym = make_symbol(
+            "validate_email",
+            "mod::validate_email",
+            SymbolKind::Function,
+        );
+        store.upsert_symbol(&sym).unwrap();
+
+        // FTS should find it via trigram
+        let results = store.search_symbols_fuzzy("valid", 10).unwrap();
+        assert!(!results.is_empty());
+
+        // Rebuild FTS and verify still works
+        store.rebuild_fts().unwrap();
+        let results2 = store.search_symbols_fuzzy("valid", 10).unwrap();
+        assert!(!results2.is_empty());
+    }
+
+    #[test]
+    fn file_paths_by_lang_works() {
+        let store = Store::open_memory().unwrap();
+        store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
+        let mut py_meta = make_file_meta("src/main.py");
+        py_meta.lang = Language::Python;
+        store.upsert_file(&py_meta).unwrap();
+
+        let rust_files = store.file_paths_by_lang("Rust").unwrap();
+        assert_eq!(rust_files.len(), 1);
+
+        let py_files = store.file_paths_by_lang("Python").unwrap();
+        assert_eq!(py_files.len(), 1);
+
+        let go_files = store.file_paths_by_lang("Go").unwrap();
+        assert!(go_files.is_empty());
     }
 }

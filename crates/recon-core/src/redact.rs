@@ -4,6 +4,7 @@
 //! Also blocks sensitive file paths by default.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 const REDACTED: &str = "***REDACTED***";
 
@@ -44,13 +45,34 @@ const PEM_MARKERS: &[&str] = &[
     "-----BEGIN OPENSSH PRIVATE KEY-----",
 ];
 
+/// Aho-Corasick automaton for fast pre-screening of all secret patterns + PEM markers.
+/// Built once, reused across all calls. If no pattern matches, we skip the full scan entirely.
+fn secret_scanner() -> &'static aho_corasick::AhoCorasick {
+    static AC: OnceLock<aho_corasick::AhoCorasick> = OnceLock::new();
+    AC.get_or_init(|| {
+        let mut patterns: Vec<&str> = Vec::with_capacity(PEM_MARKERS.len() + SECRET_PATTERNS.len());
+        patterns.extend(PEM_MARKERS.iter());
+        for &(_label, prefix, _min_len) in SECRET_PATTERNS {
+            patterns.push(prefix);
+        }
+        aho_corasick::AhoCorasick::new(patterns).expect("valid patterns")
+    })
+}
+
 /// Check if a path should be blocked from being served.
 pub fn is_blocked_path(path: &Path) -> bool {
     let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
-    // Check blocked filenames
+    // Check blocked filenames — no format!() allocation
     for blocked in BLOCKED_PATHS {
-        if filename == *blocked || filename.starts_with(&format!("{blocked}.")) {
+        if filename == *blocked {
+            return true;
+        }
+        // Check for "blocked.xxx" pattern without allocating
+        if filename.len() > blocked.len()
+            && filename.starts_with(blocked)
+            && filename.as_bytes()[blocked.len()] == b'.'
+        {
             return true;
         }
     }
@@ -67,21 +89,27 @@ pub fn is_blocked_path(path: &Path) -> bool {
 
 /// Redact secrets from a string, returning the redacted version.
 /// Returns None if no redaction was needed.
+///
+/// Uses Aho-Corasick for O(n) fast-path pre-screening: if no secret
+/// prefix is found, returns None immediately without cloning the string.
 pub fn redact_secrets(text: &str) -> Option<String> {
+    // Fast-path: single-pass pre-screen — if no pattern prefix found, skip entirely
+    if !secret_scanner().is_match(text) {
+        return None;
+    }
+
+    // Slow path: at least one pattern prefix matched, do full redaction
     let mut redacted = String::from(text);
     let mut changed = false;
 
     // Check for PEM private key blocks
     for marker in PEM_MARKERS {
-        if redacted.contains(marker) {
-            // Replace the entire PEM block
-            if let Some(start) = redacted.find(marker) {
-                let end_marker = marker.replace("BEGIN", "END");
-                if let Some(end) = redacted[start..].find(&end_marker) {
-                    let block_end = start + end + end_marker.len();
-                    redacted.replace_range(start..block_end, REDACTED);
-                    changed = true;
-                }
+        if let Some(start) = redacted.find(marker) {
+            let end_marker = marker.replace("BEGIN", "END");
+            if let Some(end) = redacted[start..].find(&end_marker) {
+                let block_end = start + end + end_marker.len();
+                redacted.replace_range(start..block_end, REDACTED);
+                changed = true;
             }
         }
     }
@@ -178,5 +206,19 @@ mod tests {
         let result = redact_secrets(text);
         assert!(result.is_some());
         assert!(result.unwrap().contains(REDACTED));
+    }
+
+    #[test]
+    fn fast_path_skips_clean_text() {
+        // Typical code with no secrets — should hit the Aho-Corasick fast path
+        let text = "fn process_data(input: &[u8]) -> Vec<u8> { input.to_vec() }";
+        assert!(redact_secrets(text).is_none());
+    }
+
+    #[test]
+    fn is_blocked_path_no_alloc() {
+        // Regression: ensure .env.xxx patterns work without format!()
+        assert!(is_blocked_path(Path::new(".env.staging")));
+        assert!(!is_blocked_path(Path::new(".envrc")));
     }
 }

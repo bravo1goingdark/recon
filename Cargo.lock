@@ -6382,6 +6382,7 @@ dependencies = [
 name = "recon-core"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "compact_str",
  "serde",
  "serde_json",
@@ -6416,6 +6417,7 @@ dependencies = [
 name = "recon-indexer"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "blake3",
  "crossbeam-queue",
  "gix",
@@ -6487,8 +6489,11 @@ name = "recon-server"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "anyhow",
  "compact_str",
+ "dashmap",
  "parking_lot",
+ "rayon",
  "recon-core",
  "recon-embed",
  "recon-indexer",
@@ -6499,6 +6504,8 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "tantivy 0.26.0",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -6510,6 +6517,7 @@ dependencies = [
  "blake3",
  "compact_str",
  "criterion",
+ "crossbeam-queue",
  "memmap2",
  "recon-core",
  "rusqlite",

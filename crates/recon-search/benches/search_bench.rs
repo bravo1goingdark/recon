@@ -7,11 +7,12 @@ use recon_search::text::search_files;
 use recon_search::tokens::count_tokens;
 use recon_search::{fuzzy, pagerank};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn make_symbol(i: usize, name: &str) -> Symbol {
     Symbol {
         id: i as u64,
-        path: PathBuf::from("src/lib.rs"),
+        path: Arc::new(PathBuf::from("src/lib.rs")),
         name: CompactString::new(name),
         qualified_name: CompactString::new(format!("crate::{name}")),
         kind: SymbolKind::Function,
@@ -74,7 +75,7 @@ fn bench_repo_map_render(c: &mut Criterion) {
         .collect();
     let refs: Vec<Ref> = (0..500)
         .map(|i| Ref {
-            src_path: PathBuf::from("src/lib.rs"),
+            src_path: Arc::new(PathBuf::from("src/lib.rs")),
             src_symbol_id: i as u64,
             ident: CompactString::new(format!("handler_{}", (i + 1) % 500)),
             dst_symbol_id: None,

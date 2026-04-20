@@ -74,12 +74,13 @@ mod tests {
     use recon_core::lang::Language;
     use recon_core::symbol::SymbolKind;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn format_symbol_works() {
         let sym = Symbol {
             id: 1,
-            path: PathBuf::from("src/lib.rs"),
+            path: Arc::new(PathBuf::from("src/lib.rs")),
             name: CompactString::new("validate"),
             qualified_name: CompactString::new("crate::validate"),
             kind: SymbolKind::Function,

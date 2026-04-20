@@ -42,11 +42,12 @@ mod tests {
     use recon_core::lang::Language;
     use recon_core::symbol::SymbolKind;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn make_sym(name: &str) -> Symbol {
         Symbol {
             id: 0,
-            path: PathBuf::from("test.rs"),
+            path: Arc::new(PathBuf::from("test.rs")),
             name: CompactString::new(name),
             qualified_name: CompactString::new(name),
             kind: SymbolKind::Function,

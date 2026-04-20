@@ -5,6 +5,7 @@ use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 use std::ops::{Range, RangeInclusive};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Classification of a code symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -73,8 +74,8 @@ impl std::fmt::Display for SymbolKind {
 pub struct Symbol {
     /// Database row ID.
     pub id: u64,
-    /// File containing this symbol.
-    pub path: PathBuf,
+    /// File containing this symbol (Arc-shared to avoid per-symbol clone cost).
+    pub path: Arc<PathBuf>,
     /// Simple name (e.g. `new`).
     pub name: CompactString,
     /// Fully qualified name (e.g. `my_crate::Foo::new`).
@@ -100,8 +101,8 @@ pub struct Symbol {
 /// A reference edge between symbols.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ref {
-    /// File containing the reference.
-    pub src_path: PathBuf,
+    /// File containing the reference (Arc-shared to avoid per-ref clone cost).
+    pub src_path: Arc<PathBuf>,
     /// Symbol making the reference.
     pub src_symbol_id: u64,
     /// Identifier being referenced.
@@ -144,7 +145,7 @@ mod tests {
     fn symbol_serde_roundtrip() {
         let sym = Symbol {
             id: 1,
-            path: PathBuf::from("src/main.rs"),
+            path: Arc::new(PathBuf::from("src/main.rs")),
             name: CompactString::new("main"),
             qualified_name: CompactString::new("crate::main"),
             kind: SymbolKind::Function,

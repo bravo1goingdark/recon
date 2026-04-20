@@ -355,11 +355,12 @@ mod tests {
     use recon_core::lang::Language;
     use recon_core::symbol::SymbolKind;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn sym(id: u64, name: &str, qname: &str) -> Symbol {
         Symbol {
             id,
-            path: PathBuf::from("src/lib.rs"),
+            path: Arc::new(PathBuf::from("src/lib.rs")),
             name: CompactString::new(name),
             qualified_name: CompactString::new(qname),
             kind: SymbolKind::Function,
@@ -375,7 +376,7 @@ mod tests {
 
     fn make_ref(ident: &str, src_id: u64) -> Ref {
         Ref {
-            src_path: PathBuf::from("src/lib.rs"),
+            src_path: Arc::new(PathBuf::from("src/lib.rs")),
             src_symbol_id: src_id,
             ident: CompactString::new(ident),
             dst_symbol_id: None,

@@ -4,11 +4,12 @@ use recon_core::lang::Language;
 use recon_core::symbol::{FileMeta, Symbol, SymbolKind};
 use recon_storage::store::Store;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn make_symbol(i: u64) -> Symbol {
     Symbol {
         id: i,
-        path: PathBuf::from("src/lib.rs"),
+        path: Arc::new(PathBuf::from("src/lib.rs")),
         name: CompactString::new(format!("sym_{i}")),
         qualified_name: CompactString::new(format!("crate::mod::sym_{i}")),
         kind: SymbolKind::Function,
