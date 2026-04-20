@@ -323,8 +323,10 @@
     <li><a href="#benchmarks">Benchmarks</a></li>
     <li><a href="#install">Connect</a></li>
     <li><a href="./Docs.html">Docs</a></li>
+    <li><a href="/pricing" style="font-weight:500">Pricing</a></li>
   </ul>
   <div style="display:flex;align-items:center;gap:16px">
+    <span id="nav-auth"><a href="/login" style="font-size:13px;color:var(--ink-2);text-decoration:none;border:1px solid var(--rule);padding:4px 14px;border-radius:6px">Sign in</a></span>
     <button id="theme-toggle" aria-label="Toggle theme" style="
       background:none;border:1px solid var(--rule);border-radius:50%;
       width:32px;height:32px;cursor:pointer;display:flex;align-items:center;
@@ -333,7 +335,6 @@
     ">
       <span id="theme-icon">◑</span>
     </button>
-    <div class="ship">v0.1.0 · <span>shipping</span></div>
   </div>
 </nav>
 
@@ -666,33 +667,28 @@
     <div class="install-grid">
       <div class="step">
         <div class="n">Step 01</div>
-        <h3>Grab an API key</h3>
-        <p>Sign up at <code>recon.dev</code> and generate a server key for your workspace. Takes about 15 seconds.</p>
-<pre><span class="c"># your key looks like this</span>
-<span class="h">RECON_KEY</span>=rk_live_9f2c…</pre>
+        <h3>Sign up with GitHub</h3>
+        <p>One click. We create your account and a free API key instantly. No credit card.</p>
+        <a href="/login" style="display:inline-block;padding:10px 20px;background:var(--ink);color:var(--paper);border-radius:8px;font-size:14px;text-decoration:none;font-weight:500;margin-top:8px">Sign in with GitHub →</a>
       </div>
 
       <div class="step">
         <div class="n">Step 02</div>
-        <h3>Point your agent at the server</h3>
-        <p>Drop this into your agent's MCP config. That's the whole setup — no local indexing, no watcher, no build step.</p>
-<pre>{
-  <span class="h">"mcpServers"</span>: {
-    <span class="h">"recon"</span>: {
-      "url": "https://mcp.recon.dev/v1",
-      "headers": {
-        "Authorization": "Bearer $RECON_KEY"
-      }
-    }
-  }
-}</pre>
+        <h3>Add your key to the CLI</h3>
+        <p>One command. Your code never leaves your machine — only the key is validated.</p>
+<pre><span class="c"># install recon</span>
+curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+
+<span class="c"># set up your repo</span>
+cd your-project
+<span class="h">RECON_KEY</span>=sk-recon-xxx recon init</pre>
       </div>
 
       <div class="step">
         <div class="n">Step 03</div>
-        <h3>Teach your agent</h3>
-        <p>One line in your agent's system prompt reorders its habits toward the <code>code_*</code> tools.</p>
-<pre><span class="c"># agent rules</span>
+        <h3>Claude Code uses it automatically</h3>
+        <p><code>recon init</code> writes <code>.mcp.json</code> — Claude Code picks up the 12 <code>code_*</code> tools on next start.</p>
+<pre><span class="c"># agent rules (auto-added to CLAUDE.md)</span>
 Use <span class="h">code_*</span> tools (outline, skeleton,
 find_symbol, search, repo_map) before
 Read/Grep/Glob when exploring code.</pre>
@@ -700,15 +696,9 @@ Read/Grep/Glob when exploring code.</pre>
 
       <div class="step">
         <div class="n">Step 04</div>
-        <h3>Query from anywhere</h3>
-        <p>Use <code>rr</code> — the open-source CLI client — to query your repos from the terminal. Or let your MCP agent handle it.</p>
-<pre><span class="c"># install the public CLI</span>
-cargo install rr
-
-<span class="c"># query your hosted repos</span>
-<span class="h">rr</span> find TyCtxt
-<span class="h">rr</span> map --budget 2000
-<span class="h">rr</span> outline src/main.rs</pre>
+        <h3>Hit a limit? Upgrade.</h3>
+        <p>Free tier: 1 repo, 2K files, 200K LOC. Need more? Upgrade in 30 seconds.</p>
+        <a href="/pricing" style="display:inline-block;padding:10px 20px;border:1px solid var(--rule);border-radius:8px;font-size:14px;text-decoration:none;color:var(--ink);font-weight:500;margin-top:8px">View pricing →</a>
       </div>
     </div>
   </div>
@@ -796,5 +786,6 @@ cargo install rr
   btn.addEventListener('mouseleave', function(){ btn.style.borderColor = 'var(--rule)'; btn.style.color = 'var(--ink-3)'; });
 })();
 </script>
+<script src="/js/auth.js"></script>
 </body>
 </html>
