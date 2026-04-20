@@ -7,27 +7,45 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 80 80'%3E%3Cstyle%3Ecircle,line%7Bstroke:%23333%7D.dot%7Bfill:%23333%7D@media(prefers-color-scheme:dark)%7Bcircle,line%7Bstroke:%23e5e5e5%7D.dot%7Bfill:%23e5e5e5%7D%7D%3C/style%3E%3Ccircle class='dot' cx='40' cy='40' r='4'/%3E%3Ccircle cx='40' cy='40' r='14' fill='none' stroke-width='1.5'/%3E%3Ccircle cx='40' cy='40' r='24' fill='none' stroke-width='1' opacity='.55'/%3E%3Ccircle cx='40' cy='40' r='34' fill='none' stroke-width='1' opacity='.25'/%3E%3Cline x1='40' y1='40' x2='68' y2='20' stroke='%23b07040' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='68' cy='20' r='3.5' fill='%23b07040'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/css/shared.css">
 <style>
-  .page-title{font-size:clamp(32px, 5vw, 48px);letter-spacing:-0.03em;margin:40px 0 32px}
-  .section-label{font-family:var(--mono);font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.14em;color:var(--ink-3);margin:36px 0 16px;display:flex;align-items:center;gap:10px}
+  .page-header{display:flex;align-items:center;justify-content:space-between;margin:40px 0 36px;flex-wrap:wrap;gap:12px}
+  .page-header h1{font-size:clamp(28px, 4vw, 40px);letter-spacing:-0.03em}
+
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:32px}
+  @media (max-width:640px){.grid-2{grid-template-columns:1fr}}
+
+  .stat-card{border:1px solid var(--rule);border-radius:4px;padding:20px 24px}
+  .stat-card .label{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.14em;color:var(--ink-3);margin-bottom:6px}
+  .stat-card .value{font-size:1.6rem;font-weight:600;letter-spacing:-0.02em}
+  .stat-card .value .unit{font-size:.8rem;font-weight:400;color:var(--ink-2)}
+
+  .section-label{font-family:var(--mono);font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.14em;color:var(--ink-3);margin:36px 0 16px;display:flex;align-items:center;gap:12px}
   .section-label::after{content:'';flex:1;height:1px;background:var(--rule)}
-  .profile-card{display:flex;align-items:center;gap:16px;padding:20px 0}
-  .avatar{border-radius:50%;border:2px solid var(--rule)}
-  .profile-info{display:flex;flex-direction:column;gap:2px}
-  .profile-info strong{font-size:1.1rem}
-  .key-row{display:flex;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid var(--rule-soft);font-size:13px;flex-wrap:wrap}
-  .key-row.revoked{opacity:.35}
-  .key-row code{font-family:var(--mono);font-size:12px;background:var(--paper-2);padding:3px 10px;border-radius:2px;letter-spacing:.02em}
-  .key-row .spacer{flex:1}
-  .billing-card{padding:20px 0;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
-  .billing-limits{display:flex;gap:20px;font-family:var(--mono);font-size:12px;color:var(--ink-2)}
-  .actions{margin:20px 0}
-  /* Key reveal modal */
+
+  .key-row{display:grid;grid-template-columns:auto 1fr auto auto auto;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--rule-soft);font-size:13px}
+  .key-row.revoked{opacity:.3}
+  .key-row code{font-family:var(--mono);font-size:11px;background:var(--paper-2);padding:4px 10px;border-radius:2px;letter-spacing:.03em}
+  @media (max-width:640px){.key-row{grid-template-columns:1fr;gap:6px}}
+
+  .billing-row{display:flex;align-items:center;gap:20px;padding:16px 0;flex-wrap:wrap}
+  .billing-limits{font-family:var(--mono);font-size:11px;color:var(--ink-2);display:flex;gap:16px;flex-wrap:wrap}
+
+  .quickstart{border:1px solid var(--rule);border-radius:4px;padding:24px;margin-bottom:32px;background:var(--paper-2)}
+  .quickstart h3{font-size:14px;font-weight:600;margin-bottom:8px}
+  .quickstart pre{font-family:var(--mono);font-size:11px;line-height:1.7;color:var(--ink-2);margin:0;white-space:pre-wrap}
+  .quickstart pre strong{color:var(--ink);font-weight:500}
+  .quickstart .note{font-size:11px;color:var(--ink-3);margin-top:10px}
+
+  .actions{margin:16px 0}
+  .empty{font-family:var(--mono);font-size:12px;color:var(--ink-3);padding:12px 0}
+
+  /* Key modal */
   .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
   .modal{background:var(--paper);border:1px solid var(--rule);border-radius:4px;padding:32px;max-width:520px;width:90%}
-  .modal h3{font-size:1.3rem;margin-bottom:8px}
-  .modal p{color:var(--ink-2);font-size:13px;margin-bottom:16px}
+  .modal h3{font-size:1.2rem;margin-bottom:6px}
+  .modal p{color:var(--ink-2);font-size:12px;margin-bottom:16px;line-height:1.5}
   .modal code{display:block;font-family:var(--mono);font-size:11px;background:var(--paper-2);padding:14px;border-radius:2px;word-break:break-all;margin-bottom:16px;letter-spacing:.02em;line-height:1.6;border:1px solid var(--rule)}
   .modal-actions{display:flex;gap:8px}
 </style>
@@ -47,27 +65,51 @@
 </nav>
 
 <div class="wrap narrow">
-  <h1 class="page-title">Dashboard</h1>
 
-  <div id="profile">
-    <p class="dim" style="font-family:var(--mono);font-size:12px">loading...</p>
+  <!-- Header: avatar + name + tier -->
+  <div class="page-header" id="profile">
+    <h1>Dashboard</h1>
   </div>
 
+  <!-- Stats row -->
+  <div class="grid-2" id="stats-row">
+    <div class="stat-card">
+      <div class="label">Plan</div>
+      <div class="value" id="stat-tier">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">API Keys</div>
+      <div class="value" id="stat-keys">—</div>
+    </div>
+  </div>
+
+  <!-- Quickstart (shown only if user has keys) -->
+  <div class="quickstart" id="quickstart" style="display:none">
+    <h3>Get started</h3>
+    <pre><strong>curl -fsSL https://mcprecon.pages.dev/install.sh | bash</strong>
+cd your-project
+<strong>RECON_KEY=<span id="qs-key">sk-recon-xxx</span> recon init</strong></pre>
+    <div class="note">Your code stays local. Only the key is validated.</div>
+  </div>
+
+  <!-- API Keys -->
   <div class="section-label">API Keys</div>
-  <div id="keys"><p class="dim" style="font-family:var(--mono);font-size:12px">loading...</p></div>
+  <div id="keys"><p class="empty">loading...</p></div>
   <div class="actions">
     <button onclick="generateKey()" class="btn primary sm">Generate new key →</button>
   </div>
 
+  <!-- Billing -->
   <div class="section-label">Billing</div>
-  <div id="billing"><p class="dim" style="font-family:var(--mono);font-size:12px">loading...</p></div>
+  <div id="billing"><p class="empty">loading...</p></div>
+
 </div>
 
 <!-- Key reveal modal -->
 <div class="modal-overlay" id="key-modal">
   <div class="modal">
     <h3>Your new API key</h3>
-    <p>Copy this key now — you won't see it again. Add it to your environment:</p>
+    <p>Copy this key now — you won't see it again.<br>Add it to your environment: <code style="display:inline;padding:2px 6px;margin:0">export RECON_KEY=&lt;key&gt;</code></p>
     <code id="new-key-value"></code>
     <div class="modal-actions">
       <button id="copy-btn" onclick="copyKey()" class="btn primary sm">Copy to clipboard</button>
