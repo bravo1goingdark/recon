@@ -112,13 +112,13 @@ authRoutes.get("/github/callback", async (c) => {
   // Create session
   const token = await createSession(db, userId);
 
-  // Redirect to dashboard with session cookie
-  const frontendUrl = c.env.FRONTEND_URL || "https://recon.dev";
+  // Redirect to dashboard with token in URL fragment (not query param — fragments
+  // are never sent to the server, so the token stays client-side only).
+  const frontendUrl = c.env.FRONTEND_URL || "https://mcprecon.pages.dev";
   return new Response(null, {
     status: 302,
     headers: {
-      Location: `${frontendUrl}/dashboard`,
-      "Set-Cookie": sessionCookie(token),
+      Location: `${frontendUrl}/dashboard#token=${token}`,
     },
   });
 });
@@ -129,18 +129,14 @@ authRoutes.get("/me", requireAuth, (c) => {
   return c.json(user);
 });
 
-/** POST /v1/auth/logout — clear session. */
-authRoutes.post("/logout", async (c) => {
-  const token = getCookie(c, "__Host-session");
-  if (token) {
+/** POST /v1/auth/logout — destroy session. */
+authRoutes.post("/logout", requireAuth, async (c) => {
+  // The token comes via Authorization header (from auth.js localStorage)
+  const authHeader = c.req.header("Authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.slice(7).trim();
     await destroySession(c.env.RECON_DB, token);
   }
 
-  return new Response(JSON.stringify({ ok: true }), {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      "Set-Cookie": clearSessionCookie(),
-    },
-  });
+  return c.json({ ok: true });
 });

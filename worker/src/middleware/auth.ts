@@ -3,12 +3,17 @@ import { getCookie } from "hono/cookie";
 import { sha256Hex } from "../lib/crypto";
 import type { AuthUser, Env } from "../types";
 
-/** Require authenticated session via __Host-session cookie. */
+/** Require authentication via Bearer token header or __Host-session cookie. */
 export async function requireAuth(
   c: Context<{ Bindings: Env; Variables: { user: AuthUser } }>,
   next: Next,
 ): Promise<Response | void> {
-  const token = getCookie(c, "__Host-session");
+  // Try Bearer token first (dashboard JS uses this), fall back to cookie
+  let token = getCookie(c, "__Host-session");
+  const authHeader = c.req.header("Authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.slice(7).trim();
+  }
   if (!token) {
     return c.json({ error: "Not authenticated" }, 401);
   }
