@@ -1,10 +1,17 @@
 //! Personalized PageRank over the symbol reference graph.
 //!
-//! Builds a directed graph from symbol references, applies Aider-style
-//! edge weights, runs power iteration, and returns ranked symbols.
+//! Builds a directed graph from symbol references with Aider-style edge weights.
+//! For unfocused queries, runs global power iteration (cached by the caller).
+//! For focused queries, runs push-based approximate PPR (Andersen et al. 2006)
+//! that only visits nodes reachable from seed symbols with significant probability.
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use recon_core::symbol::{Ref, Symbol};
+use std::collections::VecDeque;
+
+/// Residual threshold for the push-based PPR algorithm.
+/// Matches the L1 convergence threshold used by the global power iteration path.
+const PPR_EPSILON: f64 = 1e-6;
 
 /// A ranked symbol with its PageRank score.
 #[derive(Debug, Clone)]
@@ -15,82 +22,101 @@ pub struct RankedSymbol {
     pub score: f64,
 }
 
-/// Compute personalized PageRank over a symbol reference graph.
-///
-/// `focus_symbols` — indices into `symbols` that get boosted personalization.
-/// Returns symbols sorted by descending rank.
-pub fn pagerank(
-    symbols: &[Symbol],
-    refs: &[Ref],
+/// Precomputed directed graph for ranking algorithms.
+struct RankGraph {
+    n: usize,
+    out_edges: Vec<Vec<(usize, f64)>>,
+    in_degree: Vec<usize>,
+    total_weights: Vec<f64>,
+}
+
+impl RankGraph {
+    /// Build the graph from symbols and refs, applying Aider-style weight heuristics.
+    fn build(symbols: &[Symbol], refs: &[Ref], focus_symbols: &[usize]) -> Self {
+        let n = symbols.len();
+
+        // Build name → index map for target resolution
+        let mut name_to_idx: AHashMap<&str, Vec<usize>> = AHashMap::with_capacity(n);
+        // Build id → index map for source resolution
+        let mut id_to_idx: AHashMap<u64, usize> = AHashMap::with_capacity(n);
+        for (i, sym) in symbols.iter().enumerate() {
+            name_to_idx.entry(sym.name.as_str()).or_default().push(i);
+            id_to_idx.insert(sym.id, i);
+        }
+
+        let focus_set: AHashSet<usize> = focus_symbols.iter().copied().collect();
+
+        // Build adjacency list with weights
+        // Edge direction: source symbol (r.src_symbol_id) → targets named r.ident
+        let mut out_edges: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        let mut in_degree: Vec<usize> = vec![0; n];
+
+        for r in refs {
+            let src_idx = match id_to_idx.get(&r.src_symbol_id) {
+                Some(&idx) => idx,
+                None => continue,
+            };
+
+            let target_indices = match name_to_idx.get(r.ident.as_str()) {
+                Some(indices) => indices,
+                None => continue,
+            };
+
+            let mut weight = r.weight as f64;
+            let ident = r.ident.as_str();
+
+            // Aider-style weight heuristics on the referenced identifier
+            // Boost long mixed-case identifiers (more specific = more important)
+            if ident.len() > 8 && (ident.contains('_') || ident.chars().any(|c| c.is_uppercase())) {
+                weight *= 10.0;
+            }
+
+            // Demote private/internal names
+            if ident.starts_with('_') {
+                weight *= 0.1;
+            }
+
+            // Demote identifiers that appear in many files (common = less distinctive)
+            if target_indices.len() > 5 {
+                weight *= 0.1;
+            }
+
+            // Boost references from focus files
+            if focus_set.contains(&src_idx) {
+                weight *= 50.0;
+            }
+
+            for &target_idx in target_indices {
+                if target_idx != src_idx {
+                    out_edges[src_idx].push((target_idx, weight));
+                    in_degree[target_idx] += 1;
+                }
+            }
+        }
+
+        let total_weights: Vec<f64> = out_edges
+            .iter()
+            .map(|edges| edges.iter().map(|(_, w)| w).sum())
+            .collect();
+
+        Self {
+            n,
+            out_edges,
+            in_degree,
+            total_weights,
+        }
+    }
+}
+
+/// Global power iteration — used for unfocused queries (uniform personalization).
+fn global_pagerank(
+    graph: &RankGraph,
     focus_symbols: &[usize],
     damping: f64,
     iterations: usize,
-) -> Vec<RankedSymbol> {
-    let n = symbols.len();
-    if n == 0 {
-        return Vec::new();
-    }
-
-    // Build name → index map for target resolution
-    let mut name_to_idx: AHashMap<&str, Vec<usize>> = AHashMap::with_capacity(n);
-    // Build id → index map for source resolution
-    let mut id_to_idx: AHashMap<u64, usize> = AHashMap::with_capacity(n);
-    for (i, sym) in symbols.iter().enumerate() {
-        name_to_idx.entry(sym.name.as_str()).or_default().push(i);
-        id_to_idx.insert(sym.id, i);
-    }
-
-    let focus_set: std::collections::HashSet<usize> = focus_symbols.iter().copied().collect();
-
-    // Build adjacency list with weights
-    // Edge direction: source symbol (r.src_symbol_id) → targets named r.ident
-    let mut out_edges: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-    let mut in_degree: Vec<usize> = vec![0; n];
-
-    for r in refs {
-        // Resolve source by symbol ID
-        let src_idx = match id_to_idx.get(&r.src_symbol_id) {
-            Some(&idx) => idx,
-            None => continue,
-        };
-
-        // Resolve targets by identifier name
-        let target_indices = match name_to_idx.get(r.ident.as_str()) {
-            Some(indices) => indices,
-            None => continue,
-        };
-
-        let mut weight = r.weight as f64;
-        let ident = r.ident.as_str();
-
-        // Aider-style weight heuristics on the referenced identifier
-        // Boost long mixed-case identifiers (more specific = more important)
-        if ident.len() > 8 && (ident.contains('_') || ident.chars().any(|c| c.is_uppercase())) {
-            weight *= 10.0;
-        }
-
-        // Demote private/internal names
-        if ident.starts_with('_') {
-            weight *= 0.1;
-        }
-
-        // Demote identifiers that appear in many files (common = less distinctive)
-        if target_indices.len() > 5 {
-            weight *= 0.1;
-        }
-
-        // Boost references from focus files
-        if focus_set.contains(&src_idx) {
-            weight *= 50.0;
-        }
-
-        for &target_idx in target_indices {
-            if target_idx != src_idx {
-                out_edges[src_idx].push((target_idx, weight));
-                in_degree[target_idx] += 1;
-            }
-        }
-    }
+) -> Vec<f64> {
+    let n = graph.n;
+    let focus_set: AHashSet<usize> = focus_symbols.iter().copied().collect();
 
     // Personalization vector — uniform or biased toward focus symbols
     let mut personalization = vec![1.0 / n as f64; n];
@@ -106,13 +132,6 @@ pub fn pagerank(
         }
     }
 
-    // Precompute total outgoing weight per node to avoid recomputing each iteration
-    let total_weights: Vec<f64> = out_edges
-        .iter()
-        .map(|edges| edges.iter().map(|(_, w)| w).sum())
-        .collect();
-
-    // Power iteration
     let mut scores = vec![1.0 / n as f64; n];
     let mut new_scores = vec![0.0f64; n];
     let inv_n = 1.0 / n as f64;
@@ -122,11 +141,11 @@ pub fn pagerank(
 
         // Accumulate dangling node mass as a scalar, then distribute once
         let mut dangling_sum = 0.0f64;
-        for (i, edges) in out_edges.iter().enumerate() {
-            if edges.is_empty() || total_weights[i] == 0.0 {
+        for (i, edges) in graph.out_edges.iter().enumerate() {
+            if edges.is_empty() || graph.total_weights[i] == 0.0 {
                 dangling_sum += scores[i];
             } else {
-                let inv_weight = 1.0 / total_weights[i];
+                let inv_weight = 1.0 / graph.total_weights[i];
                 for &(target, weight) in edges {
                     new_scores[target] += scores[i] * weight * inv_weight;
                 }
@@ -144,25 +163,143 @@ pub fn pagerank(
 
         std::mem::swap(&mut scores, &mut new_scores);
 
-        // Early convergence: stop when L1 norm change is negligible
-        if diff < 1e-6 {
+        if diff < PPR_EPSILON {
             break;
         }
     }
 
-    // Boost top-level symbols (no parent) by sqrt(ref_count)
+    scores
+}
+
+/// Push-based approximate Personalized PageRank (Andersen et al. 2006).
+///
+/// Only visits nodes reachable from the focus/seed set with significant
+/// probability. For a focused query on 3 files in a 50K-symbol repo,
+/// typically touches ~200-500 nodes instead of all 50K.
+fn push_ppr(graph: &RankGraph, focus_symbols: &[usize], damping: f64) -> Vec<f64> {
+    let n = graph.n;
+    let teleport = 1.0 - damping;
+
+    // Sparse structures — only nodes near the seeds get entries
+    let mut estimate: AHashMap<usize, f64> = AHashMap::with_capacity(256);
+    let mut residual: AHashMap<usize, f64> = AHashMap::with_capacity(256);
+    let mut queue: VecDeque<usize> = VecDeque::with_capacity(256);
+    let mut in_queue: AHashSet<usize> = AHashSet::with_capacity(256);
+
+    // Initialize residual on seed nodes
+    let num_seeds = focus_symbols.len().max(1);
+    let init_residual = 1.0 / num_seeds as f64;
+    for &seed in focus_symbols {
+        if seed < n {
+            residual.insert(seed, init_residual);
+            queue.push_back(seed);
+            in_queue.insert(seed);
+        }
+    }
+
+    // Safety bound to prevent infinite loops in degenerate graphs
+    let max_steps = 10 * n;
+    let mut steps = 0usize;
+
+    while let Some(v) = queue.pop_front() {
+        in_queue.remove(&v);
+        steps += 1;
+        if steps > max_steps {
+            break;
+        }
+
+        let r_v = residual.remove(&v).unwrap_or(0.0);
+        if r_v <= 0.0 {
+            continue;
+        }
+
+        // Move teleport fraction into the estimate
+        *estimate.entry(v).or_insert(0.0) += teleport * r_v;
+
+        let edges = &graph.out_edges[v];
+        let tw = graph.total_weights[v];
+
+        if edges.is_empty() || tw == 0.0 {
+            // Dangling node: recirculate mass back to seed nodes
+            // This preserves PPR locality (vs distributing to all N nodes)
+            let seed_share = damping * r_v / num_seeds as f64;
+            for &seed in focus_symbols {
+                if seed >= n {
+                    continue;
+                }
+                let r = residual.entry(seed).or_insert(0.0);
+                *r += seed_share;
+                let threshold = PPR_EPSILON * graph.out_edges[seed].len().max(1) as f64;
+                if *r > threshold && !in_queue.contains(&seed) {
+                    queue.push_back(seed);
+                    in_queue.insert(seed);
+                }
+            }
+        } else {
+            // Push damping fraction along outgoing edges proportional to weight
+            let push_mass = damping * r_v;
+            let inv_tw = 1.0 / tw;
+            for &(target, weight) in edges {
+                let share = push_mass * weight * inv_tw;
+                let r = residual.entry(target).or_insert(0.0);
+                *r += share;
+                let threshold = PPR_EPSILON * graph.out_edges[target].len().max(1) as f64;
+                if *r > threshold && !in_queue.contains(&target) {
+                    queue.push_back(target);
+                    in_queue.insert(target);
+                }
+            }
+        }
+    }
+
+    // Densify: convert sparse estimate into a dense score vector
+    let mut scores = vec![0.0f64; n];
+    for (idx, score) in estimate {
+        scores[idx] = score;
+    }
+    scores
+}
+
+/// Compute personalized PageRank over a symbol reference graph.
+///
+/// `focus_symbols` — indices into `symbols` that get boosted personalization.
+/// When empty, uses global power iteration. When non-empty, uses push-based
+/// approximate PPR that only explores the local neighborhood of the focus set.
+/// Returns symbols sorted by descending rank.
+pub fn pagerank(
+    symbols: &[Symbol],
+    refs: &[Ref],
+    focus_symbols: &[usize],
+    damping: f64,
+    iterations: usize,
+) -> Vec<RankedSymbol> {
+    let n = symbols.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let graph = RankGraph::build(symbols, refs, focus_symbols);
+
+    // Dispatch: global power iteration for unfocused, push PPR for focused
+    let mut scores = if focus_symbols.is_empty() {
+        global_pagerank(&graph, focus_symbols, damping, iterations)
+    } else {
+        push_ppr(&graph, focus_symbols, damping)
+    };
+
+    // Post-processing: boost top-level symbols by sqrt(in_degree + 1)
     for (i, sym) in symbols.iter().enumerate() {
         if sym.parent_id.is_none() {
-            let ref_count = in_degree[i] as f64;
+            let ref_count = graph.in_degree[i] as f64;
             scores[i] *= (ref_count + 1.0).sqrt();
         }
     }
 
-    // Collect and sort
+    // Collect and sort: top-level only, descending score
     let mut ranked: Vec<RankedSymbol> = scores
         .iter()
         .enumerate()
-        .filter(|(i, _)| symbols[*i].parent_id.is_none()) // top-level only
+        .filter(|(i, _)| symbols[*i].parent_id.is_none())
         .map(|(i, &score)| RankedSymbol { index: i, score })
         .collect();
 
