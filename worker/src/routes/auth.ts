@@ -14,7 +14,10 @@ export const authRoutes = new Hono<{
 
 /** GET /v1/auth/github — redirect to GitHub OAuth. */
 authRoutes.get("/github", (c) => {
-  const redirectUri = new URL(c.req.url).origin + "/v1/auth/github/callback";
+  // Build callback URL matching the request prefix (/api/v1 or /v1)
+  const reqUrl = new URL(c.req.url);
+  const callbackPath = reqUrl.pathname.replace(/\/github$/, "/github/callback");
+  const redirectUri = reqUrl.origin + callbackPath;
   const state = generateSessionToken().slice(0, 32); // CSRF token
 
   const url = new URL("https://github.com/login/oauth/authorize");
@@ -33,7 +36,9 @@ authRoutes.get("/github/callback", async (c) => {
     return c.json({ error: "Missing code parameter" }, 400);
   }
 
-  const redirectUri = new URL(c.req.url).origin + "/v1/auth/github/callback";
+  // Must match exactly what was sent in the authorize request
+  const reqUrl = new URL(c.req.url);
+  const redirectUri = reqUrl.origin + reqUrl.pathname;
 
   // Exchange code for access token
   const accessToken = await exchangeCodeForToken(
