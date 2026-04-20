@@ -60,10 +60,10 @@ enum Command {
         /// Bind address for HTTP transport
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
-        /// License key for recon.dev (enables Pro/Team/Enterprise limits).
-        /// Also reads from RECON_KEY env var. Omit for Free tier.
+        /// API key from recon.dev (required). Also reads from RECON_KEY env var.
+        /// Get one free at https://mcprecon.pages.dev/login
         #[arg(long, env = "RECON_KEY")]
-        key: Option<String>,
+        key: String,
     },
     /// Index a repository without starting the server
     Index,
@@ -574,7 +574,8 @@ async fn main() -> Result<()> {
 
             // Validate license — the key determines the limits
             let cache_dir = repo.join(".recon");
-            let license = recon_server::license::validate_license(key.as_deref(), &cache_dir);
+            let license = recon_server::license::validate_license(Some(&key), &cache_dir)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             let limits = license.tier.limits();
             info!(
                 tier = license.tier.name(),

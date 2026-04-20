@@ -93,24 +93,19 @@ impl std::fmt::Display for LicenseSource {
 /// Validate a license key, with local caching and offline fallback.
 ///
 /// Flow:
-/// 1. If no key → Free tier (open source mode)
+/// 1. If no key → error (key is required)
 /// 2. Try remote validation → cache result on success
 /// 3. If remote fails → use cached license if < 24h old
-/// 4. If no valid cache → Free tier with warning
-pub fn validate_license(key: Option<&str>, cache_dir: &Path) -> ValidatedLicense {
-    // No key = Free tier, no questions asked
+/// 4. If no valid cache → error (cannot validate key)
+pub fn validate_license(key: Option<&str>, cache_dir: &Path) -> Result<ValidatedLicense, String> {
     let key = match key {
         Some(k) if !k.is_empty() => k,
         _ => {
-            info!("no license key — running in Free tier (open source)");
-            return ValidatedLicense {
-                tier: Tier::new("Free", TierLimits::FREE),
-                expires_at: 0,
-                source: LicenseSource::FreeTier,
-                message:
-                    "Open source mode — upgrade at recon.dev for more repos and larger codebases"
-                        .into(),
-            };
+            return Err(
+                "API key required. Get one free at https://mcprecon.pages.dev/login\n\
+                 Then run: RECON_KEY=sk-recon-xxx recon serve"
+                    .into(),
+            );
         }
     };
 
@@ -130,29 +125,24 @@ pub fn validate_license(key: Option<&str>, cache_dir: &Path) -> ValidatedLicense
                 "license {}",
                 license.message
             );
-            license
+            Ok(license)
         }
         Err(e) => {
             warn!("license validation failed: {e}");
 
-            // Try cache fallback
+            // Try cache fallback (offline grace period)
             match read_cache(&cache_path) {
                 Some(cached) => {
                     info!(
                         tier = cached.response.tier,
                         "using cached license (server unreachable)"
                     );
-                    response_to_license(cached.response, LicenseSource::Cache)
+                    Ok(response_to_license(cached.response, LicenseSource::Cache))
                 }
-                None => {
-                    warn!("no cached license — falling back to Free tier");
-                    ValidatedLicense {
-                        tier: Tier::new("Free", TierLimits::FREE),
-                        expires_at: 0,
-                        source: LicenseSource::FreeTier,
-                        message: "License server unreachable, no cache — running Free tier".into(),
-                    }
-                }
+                None => Err(format!(
+                    "Could not validate API key: {e}\n\
+                     Check your key at https://mcprecon.pages.dev/dashboard"
+                )),
             }
         }
     }
@@ -250,29 +240,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_key_returns_free() {
+    fn no_key_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let result = validate_license(None, dir.path());
-        assert_eq!(result.tier.name(), "Free");
-        assert_eq!(result.tier.max_repos(), 1);
-        assert_eq!(result.source, LicenseSource::FreeTier);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("API key required"));
     }
 
     #[test]
-    fn empty_key_returns_free() {
+    fn empty_key_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let result = validate_license(Some(""), dir.path());
-        assert_eq!(result.tier.name(), "Free");
-        assert_eq!(result.source, LicenseSource::FreeTier);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("API key required"));
     }
 
     #[test]
-    fn invalid_key_no_cache_returns_free() {
+    fn invalid_key_no_cache_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        // Server unreachable + no cache = Free
         let result = validate_license(Some("sk-invalid-key-12345"), dir.path());
-        assert_eq!(result.tier.name(), "Free");
-        assert_eq!(result.source, LicenseSource::FreeTier);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Could not validate"));
     }
 
     #[test]
