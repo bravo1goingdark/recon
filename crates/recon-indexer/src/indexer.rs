@@ -10,7 +10,7 @@ use recon_parser::pool::LanguagePools;
 use recon_search::tantivy_backend::TantivyBackend;
 use recon_storage::hash;
 use recon_storage::store::Store;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
@@ -223,108 +223,158 @@ pub fn index_repo(
     Ok(stats)
 }
 
-/// Index a repo with Merkle-based incremental optimization.
+/// Index a repo incrementally using gix tree diff + worktree status.
 ///
-/// 1. If HEAD matches the last indexed commit → skip entirely.
-/// 2. Otherwise, build a new Merkle snapshot and diff against the previous one.
-/// 3. Only reindex changed files; cascade-delete removed files.
-/// 4. If no previous snapshot exists, falls back to full `index_repo`.
-/// 5. Saves the new Merkle snapshot and HEAD SHA after indexing.
+/// 1. If HEAD matches the last indexed commit → only check worktree status.
+/// 2. If HEAD differs → gix tree diff (old..new) + worktree status.
+/// 3. Non-git repos or first index → fall back to full `index_repo`.
+/// 4. Only changed files are read, parsed, and stored.
 pub fn index_repo_incremental(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
     repo_root: &Path,
 ) -> Result<IndexStats, Error> {
-    let store_dir = repo_root.join(".recon");
-    let snap_path = store_dir.join("merkle_snapshot.json");
+    use std::collections::HashSet;
 
     let last_commit = store.get_meta("last_indexed_commit")?;
-    let current_head = match crate::git::head_sha(repo_root) {
-        Ok(sha) => Some(sha),
+
+    // Open the repo once — all git operations share this handle
+    let repo = match crate::git::open_repo(repo_root) {
+        Ok(r) => Some(r),
         Err(e) => {
-            debug!("gix head_sha unavailable, will do full index: {e}");
+            debug!("gix open unavailable, will do full index: {e}");
             None
         }
     };
 
-    // Fast path: HEAD unchanged since last index
-    if let (Some(ref last), Some(ref current)) = (&last_commit, &current_head) {
-        if last == current {
-            let total = store.symbol_count().unwrap_or(0);
-            info!(head = %current, symbols = total, "HEAD matches last index, skipping");
-            return Ok(IndexStats {
-                files_indexed: 0,
-                total_symbols: total,
-                errors: 0,
-            });
+    let current_head = match repo.as_ref().map(crate::git::head_sha_with_repo) {
+        Some(Ok(sha)) => Some(sha),
+        Some(Err(e)) => {
+            debug!("gix head_sha unavailable, will do full index: {e}");
+            None
         }
-    }
-
-    // Walk and hash all current files
-    let paths = walker::walk_repo(repo_root);
-    let file_hashes: Vec<(std::path::PathBuf, [u8; 32])> = paths
-        .iter()
-        .filter_map(|p| {
-            let content = std::fs::read(p).ok()?;
-            let rel = p.strip_prefix(repo_root).unwrap_or(p).to_path_buf();
-            Some((rel, hash::blake3_bytes(&content)))
-        })
-        .collect();
-
-    let new_snapshot = crate::merkle::MerkleSnapshot::build(file_hashes);
-
-    // Try incremental diff against previous snapshot
-    let prev_snapshot = crate::merkle::MerkleSnapshot::load(&snap_path).ok();
-    let stats = if let Some(ref prev) = prev_snapshot {
-        let diff = new_snapshot.diff(prev);
-        if diff.changed.is_empty() && diff.deleted.is_empty() {
-            let total = store.symbol_count().unwrap_or(0);
-            info!(symbols = total, "merkle diff: no changes");
-            IndexStats {
-                files_indexed: 0,
-                total_symbols: total,
-                errors: 0,
-            }
-        } else {
-            info!(
-                changed = diff.changed.len(),
-                deleted = diff.deleted.len(),
-                "merkle diff: incremental reindex"
-            );
-            index_diff(store, tantivy, repo_root, &diff)?
-        }
-    } else {
-        info!("no previous merkle snapshot, full index");
-        index_repo(store, tantivy, repo_root)?
+        None => None,
     };
 
-    // Save new snapshot and HEAD
-    let _ = std::fs::create_dir_all(&store_dir);
-    if let Err(e) = new_snapshot.save(&snap_path) {
-        warn!("failed to save merkle snapshot: {e}");
-    }
-    if let Some(sha) = &current_head {
-        if let Err(e) = store.set_meta("last_indexed_commit", sha) {
+    // Non-git directory or first index: fall back to full scan
+    let current_head = match current_head {
+        Some(sha) => sha,
+        None => {
+            info!("not a git repo, full index");
+            return index_repo(store, tantivy, repo_root);
+        }
+    };
+    let repo = repo.unwrap(); // safe: if we got a HEAD, we have a repo
+
+    if last_commit.is_none() {
+        info!("no previous index, full index");
+        let stats = index_repo(store, tantivy, repo_root)?;
+        if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
             warn!("failed to store last_indexed_commit: {e}");
         }
+        return Ok(stats);
+    }
+    let last_commit = last_commit.unwrap();
+
+    // Get committed changes (tree diff) if HEAD advanced
+    let mut all_modified: HashSet<PathBuf> = HashSet::new();
+    let mut all_deleted: HashSet<PathBuf> = HashSet::new();
+
+    if last_commit != current_head {
+        match crate::git::diff_commits_with_repo(&repo, repo_root, &last_commit, &current_head) {
+            Ok(diff) => {
+                for p in diff.modified {
+                    all_modified.insert(p);
+                }
+                for p in diff.deleted {
+                    all_deleted.insert(p);
+                }
+            }
+            Err(e) => {
+                warn!("gix tree diff failed, falling back to full index: {e}");
+                let stats = index_repo(store, tantivy, repo_root)?;
+                if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
+                    warn!("failed to store last_indexed_commit: {e}");
+                }
+                return Ok(stats);
+            }
+        }
+    }
+
+    // Also pick up uncommitted worktree changes
+    match crate::git::status_changed_paths_with_repo(&repo, repo_root) {
+        Ok(status) => {
+            for p in status.modified {
+                all_modified.insert(p);
+            }
+            for p in status.deleted {
+                all_deleted.insert(p);
+            }
+        }
+        Err(e) => {
+            debug!("gix status failed (non-fatal): {e}");
+        }
+    }
+
+    // A path modified then deleted = deleted only
+    all_modified.retain(|p| !all_deleted.contains(p));
+
+    // Filter to indexable source files before checking emptiness
+    let modified: Vec<PathBuf> = all_modified
+        .into_iter()
+        .filter(|p| {
+            Language::from_path(p) != Language::Unknown
+                && !walker::is_vendored(&p.to_string_lossy())
+        })
+        .collect();
+    let deleted: Vec<PathBuf> = all_deleted
+        .into_iter()
+        .filter(|p| Language::from_path(p) != Language::Unknown)
+        .collect();
+
+    if modified.is_empty() && deleted.is_empty() {
+        let total = store.symbol_count().unwrap_or(0);
+        info!(head = %current_head, symbols = total, "HEAD matches last index, skipping");
+        if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
+            warn!("failed to store last_indexed_commit: {e}");
+        }
+        return Ok(IndexStats {
+            files_indexed: 0,
+            total_symbols: total,
+            errors: 0,
+        });
+    }
+
+    info!(
+        changed = modified.len(),
+        deleted = deleted.len(),
+        "gix diff: incremental reindex"
+    );
+
+    let stats = index_diff(store, tantivy, repo_root, &modified, &deleted)?;
+
+    if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
+        warn!("failed to store last_indexed_commit: {e}");
     }
 
     Ok(stats)
 }
 
-/// Index only the files identified by a Merkle diff.
+/// Index only specific changed and deleted files.
 fn index_diff(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
     repo_root: &Path,
-    diff: &crate::merkle::MerkleDiff,
+    changed: &[PathBuf],
+    deleted: &[PathBuf],
 ) -> Result<IndexStats, Error> {
     let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
     let mut tantivy_writer = tantivy.and_then(|tb| tb.writer(15_000_000).ok());
     let mut stats = IndexStats::default();
 
-    // Delete removed files
-    for rel_path in &diff.deleted {
+    // Delete removed files — convert to relative paths for store
+    for abs_path in deleted {
+        let rel_path = abs_path.strip_prefix(repo_root).unwrap_or(abs_path);
         if let Err(e) = store.delete_file_cascade(rel_path) {
             warn!(?rel_path, "delete cascade error: {e}");
             stats.errors += 1;
@@ -332,9 +382,7 @@ fn index_diff(
     }
 
     // Parse and index changed files (parallel parse, sequential store)
-    let abs_changed: Vec<std::path::PathBuf> =
-        diff.changed.iter().map(|p| repo_root.join(p)).collect();
-    let parsed: Vec<_> = abs_changed
+    let parsed: Vec<_> = changed
         .par_iter()
         .filter_map(|path| {
             let content = match std::fs::read(path) {
@@ -377,7 +425,7 @@ fn index_diff(
     stats.total_symbols = store.symbol_count().unwrap_or(0);
     info!(
         files = stats.files_indexed,
-        deleted = diff.deleted.len(),
+        deleted = deleted.len(),
         symbols = stats.total_symbols,
         "incremental indexing complete"
     );
@@ -511,5 +559,101 @@ mod tests {
         // Search should work
         let hits = tantivy.search("hello", 10).unwrap();
         assert!(!hits.is_empty(), "should find hello in tantivy");
+    }
+
+    /// Helper: run a git command in a directory.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Helper: init a temp git repo with initial files and first commit.
+    fn init_test_repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init"]);
+        git(dir.path(), &["config", "user.email", "test@test.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        for (name, content) in files {
+            std::fs::write(dir.path().join(name), content).unwrap();
+        }
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn incremental_uses_git_diff() {
+        let dir = init_test_repo(&[
+            ("main.rs", "fn main() {}"),
+            ("lib.rs", "pub fn lib() {}"),
+            ("util.rs", "pub fn util() {}"),
+        ]);
+
+        // First index: full
+        let store = Store::open_memory().unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path()).unwrap();
+        assert!(stats.files_indexed >= 3, "first run should index all files");
+
+        // Modify only one file, commit
+        std::fs::write(dir.path().join("main.rs"), "fn main() { println!(); }").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-m", "update main"]);
+
+        let stats2 = index_repo_incremental(&store, None, dir.path()).unwrap();
+        assert_eq!(
+            stats2.files_indexed, 1,
+            "second run should only index the 1 changed file, got {}",
+            stats2.files_indexed
+        );
+    }
+
+    #[test]
+    fn incremental_picks_up_worktree_changes() {
+        let dir = init_test_repo(&[("main.rs", "fn main() {}")]);
+
+        let store = Store::open_memory().unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path()).unwrap();
+        assert!(stats.files_indexed >= 1);
+
+        // Modify file WITHOUT committing — worktree change only
+        std::fs::write(dir.path().join("main.rs"), "fn main() { todo!(); }").unwrap();
+
+        // HEAD is same, but worktree has changes → should still index
+        let stats2 = index_repo_incremental(&store, None, dir.path()).unwrap();
+        assert_eq!(
+            stats2.files_indexed, 1,
+            "uncommitted worktree change should be detected"
+        );
+    }
+
+    #[test]
+    fn incremental_handles_deleted_file() {
+        let dir = init_test_repo(&[
+            ("main.rs", "fn main() {}"),
+            ("extra.rs", "pub fn extra() {}"),
+        ]);
+
+        let store = Store::open_memory().unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path()).unwrap();
+        assert!(stats.files_indexed >= 2);
+        let count_before = store.symbol_count().unwrap();
+        assert!(count_before >= 2);
+
+        // Delete extra.rs and commit
+        std::fs::remove_file(dir.path().join("extra.rs")).unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-m", "delete extra"]);
+
+        let stats2 = index_repo_incremental(&store, None, dir.path()).unwrap();
+        let count_after = store.symbol_count().unwrap();
+        assert!(
+            count_after < count_before,
+            "symbols should decrease after deletion: before={count_before}, after={count_after}"
+        );
+        assert_eq!(stats2.errors, 0);
     }
 }
