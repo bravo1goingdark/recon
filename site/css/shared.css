@@ -1,0 +1,107 @@
+/* ─── recon shared design system ─── */
+/* Extracted from index.html. All sub-pages import this for consistency. */
+
+:root{
+  --paper:       oklch(98.5% 0.004 80);
+  --paper-2:     oklch(96.5% 0.006 80);
+  --rule:        oklch(88%   0.006 80);
+  --rule-soft:   oklch(93%   0.005 80);
+  --ink:         oklch(22%   0.01  60);
+  --ink-2:       oklch(40%   0.01  60);
+  --ink-3:       oklch(58%   0.01  60);
+  --clay:        oklch(58%   0.14  45);
+  --clay-soft:   oklch(94%   0.03  45);
+
+  --serif:  'Instrument Serif', 'Times New Roman', serif;
+  --sans:   'Geist', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  --mono:   'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+[data-theme="dark"]{
+  --paper:       oklch(12%   0.005 260);
+  --paper-2:     oklch(16%   0.006 260);
+  --rule:        oklch(24%   0.006 260);
+  --rule-soft:   oklch(20%   0.005 260);
+  --ink:         oklch(92%   0.008 80);
+  --ink-2:       oklch(72%   0.008 80);
+  --ink-3:       oklch(50%   0.008 80);
+  --clay:        oklch(65%   0.16  45);
+  --clay-soft:   oklch(20%   0.04  45);
+}
+
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:       oklch(12%   0.005 260);
+    --paper-2:     oklch(16%   0.006 260);
+    --rule:        oklch(24%   0.006 260);
+    --rule-soft:   oklch(20%   0.005 260);
+    --ink:         oklch(92%   0.008 80);
+    --ink-2:       oklch(72%   0.008 80);
+    --ink-3:       oklch(50%   0.008 80);
+    --clay:        oklch(65%   0.16  45);
+    --clay-soft:   oklch(20%   0.04  45);
+  }
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:var(--paper);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+body{font-size:15px;line-height:1.55;letter-spacing:-0.005em}
+a{color:inherit;text-decoration:none}
+::selection{background:var(--clay);color:var(--paper)}
+
+.wrap{max-width:1180px;margin:0 auto;padding:0 40px}
+@media (max-width:720px){ .wrap{padding:0 24px} }
+.wrap.narrow{max-width:720px}
+
+/* ─── NAV (matches index.html nav.top) ─── */
+nav.top{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:22px 40px;border-bottom:1px solid var(--rule-soft);
+  position:sticky;top:0;background:color-mix(in oklab, var(--paper) 85%, transparent);
+  backdrop-filter:saturate(1.2) blur(8px);z-index:10;
+}
+nav.top .mark{font-family:var(--serif);font-size:22px;letter-spacing:-0.01em;display:flex;align-items:baseline;gap:8px}
+nav.top .dot{width:5px;height:5px;border-radius:50%;background:var(--clay);display:inline-block;transform:translateY(-3px)}
+nav.top ul{display:flex;gap:28px;list-style:none;font-size:13px;color:var(--ink-2)}
+nav.top ul a:hover{color:var(--ink)}
+nav.top .right{display:flex;align-items:center;gap:16px}
+@media (max-width:720px){ nav.top ul{display:none} nav.top{padding:18px 24px} }
+
+/* ─── BUTTONS (matches index.html .btn) ─── */
+.btn{
+  font-family:var(--mono);font-size:12px;letter-spacing:0.02em;
+  padding:13px 18px;border-radius:2px;display:inline-flex;align-items:center;gap:10px;
+  transition:transform .15s ease, background .15s ease, color .15s ease, border-color .15s ease;
+  border:1px solid var(--rule);cursor:pointer;text-decoration:none;
+}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn.primary:hover{transform:translateY(-1px)}
+.btn.ghost{background:transparent;color:var(--ink)}
+.btn.ghost:hover{background:var(--paper-2)}
+.btn.sm{padding:8px 14px;font-size:11px}
+.btn.danger{color:#c44;border-color:#c44}
+.btn.danger:hover{background:#c4410a;color:white}
+.btn.disabled{opacity:.4;cursor:default;pointer-events:none}
+
+/* ─── THEME TOGGLE ─── */
+.theme-btn{
+  background:none;border:1px solid var(--rule);border-radius:50%;
+  width:32px;height:32px;cursor:pointer;display:flex;align-items:center;
+  justify-content:center;color:var(--ink-3);transition:border-color .15s,color .15s;
+  font-size:14px;
+}
+.theme-btn:hover{border-color:var(--ink-2);color:var(--ink)}
+
+/* ─── TYPOGRAPHY ─── */
+h1{font-family:var(--serif);font-weight:400}
+h2{font-family:var(--serif);font-weight:400}
+code{font-family:var(--mono);font-size:.85em;background:var(--paper-2);padding:1px 6px;border-radius:3px}
+
+/* ─── UTILITIES ─── */
+.dim{color:var(--ink-3)}
+.tier-badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:.75rem;font-weight:600;background:var(--clay-soft);color:var(--clay)}
+.tier-badge.sm{font-size:.7rem;padding:1px 8px}
+
+/* ─── FOOTER ─── */
+footer.site{border-top:1px solid var(--rule);padding:24px 40px;display:flex;justify-content:space-between;color:var(--ink-3);font-size:12px;margin-top:64px}
+@media (max-width:720px){ footer.site{flex-direction:column;gap:8px;padding:24px} }

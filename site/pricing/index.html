@@ -7,59 +7,47 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/shared.css">
 <style>
-:root{--paper:oklch(98.5% .004 80);--paper-2:oklch(96.5% .006 80);--ink:oklch(22% .01 60);--ink-2:oklch(40% .01 60);--ink-3:oklch(58% .01 60);--rule:oklch(88% .006 80);--clay:oklch(58% .14 45);--clay-soft:oklch(94% .03 45);--sans:'Geist',-apple-system,sans-serif;--serif:'Instrument Serif',serif;--mono:'JetBrains Mono',monospace}
-[data-theme="dark"]{--paper:oklch(12% .005 260);--paper-2:oklch(16% .006 260);--ink:oklch(92% .008 80);--ink-2:oklch(72% .008 80);--ink-3:oklch(50% .008 80);--rule:oklch(24% .006 260);--clay:oklch(65% .16 45);--clay-soft:oklch(20% .04 45)}
-@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--paper:oklch(12% .005 260);--paper-2:oklch(16% .006 260);--ink:oklch(92% .008 80);--ink-2:oklch(72% .008 80);--ink-3:oklch(50% .008 80);--rule:oklch(24% .006 260);--clay:oklch(65% .16 45);--clay-soft:oklch(20% .04 45)}}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:var(--sans);background:var(--paper);color:var(--ink);line-height:1.6}
-.wrap{max-width:960px;margin:0 auto;padding:0 24px}
-header{padding:20px 0;border-bottom:1px solid var(--rule)}
-header .wrap{display:flex;align-items:center;justify-content:space-between}
-header a{color:var(--ink);text-decoration:none;font-size:.9rem}
-.logo{font-family:var(--serif);font-size:1.3rem;font-weight:400}
-nav{display:flex;gap:24px;align-items:center}
-.hero{text-align:center;padding:64px 0 48px}
-.hero h1{font-family:var(--serif);font-size:2.5rem;font-weight:400;margin-bottom:12px}
-.hero p{color:var(--ink-2);font-size:1.05rem;max-width:520px;margin:0 auto}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:24px;padding:0 0 64px}
-.card{border:1px solid var(--rule);border-radius:12px;padding:32px 24px;display:flex;flex-direction:column;gap:16px}
-.card.featured{border-color:var(--clay);box-shadow:0 0 0 1px var(--clay)}
-.card h3{font-family:var(--serif);font-size:1.4rem;font-weight:400}
-.price{font-size:2rem;font-weight:600;letter-spacing:-.02em}
-.price span{font-size:.9rem;font-weight:400;color:var(--ink-2)}
-.limits{display:flex;flex-direction:column;gap:6px;color:var(--ink-2);font-size:.9rem}
-.limits strong{color:var(--ink)}
-.btn{display:inline-block;padding:10px 20px;border-radius:8px;font-family:var(--sans);font-size:.9rem;font-weight:500;text-align:center;cursor:pointer;text-decoration:none;border:1px solid var(--rule);color:var(--ink);background:transparent;transition:all .15s}
-.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
-.btn.primary:hover{opacity:.85}
-.btn.ghost:hover{background:var(--paper-2)}
-.btn.disabled{opacity:.4;cursor:default;pointer-events:none}
-.btn.sm{padding:6px 14px;font-size:.85rem}
-.enterprise{text-align:center;padding:32px 0 64px;border-top:1px solid var(--rule)}
-.enterprise h3{font-family:var(--serif);font-size:1.3rem;margin-bottom:8px}
-.enterprise p{color:var(--ink-2);font-size:.95rem;margin-bottom:16px}
-footer{border-top:1px solid var(--rule);padding:24px 0;text-align:center;color:var(--ink-3);font-size:.8rem}
-#nav-auth{margin-left:auto}
+  .hero{text-align:center;padding:64px 0 48px}
+  .hero h1{font-size:clamp(40px, 6vw, 64px);line-height:0.95;letter-spacing:-0.03em;margin-bottom:16px}
+  .hero h1 em{font-style:italic;color:var(--clay)}
+  .hero p{color:var(--ink-2);font-size:17px;max-width:480px;margin:0 auto;font-weight:300}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:24px;padding:0 0 64px;max-width:900px;margin:0 auto}
+  .card{border:1px solid var(--rule);border-radius:4px;padding:32px 28px;display:flex;flex-direction:column;gap:20px}
+  .card.featured{border-color:var(--clay);position:relative}
+  .card.featured::before{content:'Most popular';position:absolute;top:-11px;left:20px;background:var(--clay);color:var(--paper);font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:3px 10px;border-radius:2px}
+  .card h3{font-size:1.4rem}
+  .price{font-size:2.2rem;font-weight:600;letter-spacing:-.03em;font-family:var(--sans)}
+  .price span{font-size:.85rem;font-weight:400;color:var(--ink-2)}
+  .limits{display:flex;flex-direction:column;gap:8px;color:var(--ink-2);font-size:13px;font-family:var(--mono)}
+  .limits strong{color:var(--ink);font-weight:500}
+  .card .btn{width:100%;justify-content:center;margin-top:auto}
+
+  .enterprise{text-align:center;padding:40px 0 64px;border-top:1px solid var(--rule)}
+  .enterprise h3{font-size:1.3rem;margin-bottom:8px}
+  .enterprise p{color:var(--ink-2);font-size:14px;margin-bottom:20px;max-width:420px;margin-left:auto;margin-right:auto}
 </style>
 </head>
 <body>
 
-<header>
-  <div class="wrap">
-    <a href="/" class="logo">recon</a>
-    <nav>
-      <a href="/">Home</a>
-      <a href="/docs">Docs</a>
-      <a href="/pricing" style="font-weight:500">Pricing</a>
-      <span id="nav-auth"></span>
-    </nav>
+<nav class="top">
+  <a href="/" class="mark"><svg width="24" height="24" viewBox="0 0 80 80" fill="none"><circle cx="40" cy="40" r="4" fill="currentColor"/><circle cx="40" cy="40" r="14" stroke="currentColor" stroke-width="1.5"/><circle cx="40" cy="40" r="24" stroke="currentColor" stroke-width="1" opacity="0.55"/><circle cx="40" cy="40" r="34" stroke="currentColor" stroke-width="1" opacity="0.25"/><line x1="40" y1="40" x2="68" y2="20" stroke="var(--clay)" stroke-width="2" stroke-linecap="round"/><circle cx="68" cy="20" r="3.5" fill="var(--clay)"/></svg><span>recon<span class="dot"></span></span></a>
+  <ul>
+    <li><a href="/">Home</a></li>
+    <li><a href="/docs">Docs</a></li>
+    <li><a href="/pricing" style="font-weight:500;color:var(--ink)">Pricing</a></li>
+  </ul>
+  <div class="right">
+    <span id="nav-auth"><a href="/login" class="btn sm ghost">Sign in</a></span>
+    <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme"><span id="theme-icon">◑</span></button>
   </div>
-</header>
+</nav>
 
 <section class="hero">
   <div class="wrap">
-    <h1>Simple pricing</h1>
+    <h1>Simple, <em>honest</em> pricing</h1>
     <p>Free for small projects. Upgrade when your codebase outgrows the limits. Code never leaves your machine.</p>
   </div>
 </section>
@@ -76,7 +64,7 @@ footer{border-top:1px solid var(--rule);padding:24px 0;text-align:center;color:v
         <div><strong>200K</strong> lines of code</div>
         <div>Community support</div>
       </div>
-      <a href="/login" class="btn ghost" data-upgrade-tier="Free">Get started</a>
+      <a href="/login" class="btn ghost" data-upgrade-tier="Free">Get started free →</a>
     </div>
 
     <div class="card featured">
@@ -88,7 +76,7 @@ footer{border-top:1px solid var(--rule);padding:24px 0;text-align:center;color:v
         <div><strong>2M</strong> lines of code</div>
         <div>Priority support</div>
       </div>
-      <button class="btn primary" data-upgrade-tier="Pro" onclick="upgradeTier('Pro')">Upgrade to Pro</button>
+      <button class="btn primary" data-upgrade-tier="Pro" onclick="upgradeTier('Pro')">Upgrade to Pro →</button>
     </div>
 
     <div class="card">
@@ -100,7 +88,7 @@ footer{border-top:1px solid var(--rule);padding:24px 0;text-align:center;color:v
         <div><strong>5M</strong> lines of code</div>
         <div>Priority support</div>
       </div>
-      <button class="btn ghost" data-upgrade-tier="Team" onclick="upgradeTier('Team')">Upgrade to Team</button>
+      <button class="btn ghost" data-upgrade-tier="Team" onclick="upgradeTier('Team')">Upgrade to Team →</button>
     </div>
 
   </div>
@@ -110,15 +98,17 @@ footer{border-top:1px solid var(--rule);padding:24px 0;text-align:center;color:v
   <div class="wrap">
     <h3>Enterprise</h3>
     <p>1,000+ repos, unlimited files and LOC, SSO, audit logs, dedicated support.</p>
-    <a href="mailto:hello@recon.dev" class="btn ghost">Contact us</a>
+    <a href="mailto:hello@recon.dev" class="btn ghost sm">Contact us →</a>
   </div>
 </section>
 
-<footer>
-  <div class="wrap">&copy; 2026 recon. All prices in INR. Code never leaves your machine.</div>
+<footer class="site">
+  <div>© 2026 recon · all prices in INR</div>
+  <div>Code never leaves your machine</div>
 </footer>
 
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script src="/js/theme.js"></script>
 <script src="/js/auth.js"></script>
 <script src="/js/pricing.js"></script>
 </body>
