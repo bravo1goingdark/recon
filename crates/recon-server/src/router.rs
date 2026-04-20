@@ -123,44 +123,68 @@ impl std::fmt::Display for Tier {
 impl std::str::FromStr for Tier {
     type Err = String;
 
-    /// Parse tier from CLI: `free`, `free:N`, `pro`, or `pro:N` (N = max repos).
+    /// Parse tier from CLI.
+    ///
+    /// Format: `TIER[:REPOS[:FILES[:LOC]]]`
+    ///
+    /// Examples:
+    /// - `free`              → Free defaults (1 repo, 2K files, 200K LOC)
+    /// - `free:3`            → Free, 3 repos
+    /// - `free:3:5000`       → Free, 3 repos, 5K files
+    /// - `free:3:5000:500000` → Free, 3 repos, 5K files, 500K LOC
+    /// - `pro`               → Pro defaults (50 repos, 20K files, 2M LOC)
+    /// - `pro:100:50000:5000000` → Pro, 100 repos, 50K files, 5M LOC
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let lower = s.to_lowercase();
-        if lower == "free" {
-            return Ok(Tier::Free {
-                limits: TierLimits::FREE,
-            });
+        let parts: Vec<&str> = lower.splitn(2, ':').collect();
+        let tier_name = parts[0];
+        let defaults = match tier_name {
+            "free" => TierLimits::FREE,
+            "pro" => TierLimits::PRO,
+            _ => {
+                return Err(format!(
+                    "unknown tier '{tier_name}': expected 'free' or 'pro'"
+                ))
+            }
+        };
+
+        let limits = if parts.len() == 1 {
+            defaults
+        } else {
+            let nums: Vec<&str> = parts[1].split(':').collect();
+            let max_repos = if !nums.is_empty() && !nums[0].is_empty() {
+                nums[0]
+                    .parse::<usize>()
+                    .map_err(|e| format!("invalid max_repos: {e}"))?
+            } else {
+                defaults.max_repos
+            };
+            let max_files = if nums.len() > 1 && !nums[1].is_empty() {
+                nums[1]
+                    .parse::<usize>()
+                    .map_err(|e| format!("invalid max_files: {e}"))?
+            } else {
+                defaults.max_files
+            };
+            let max_loc = if nums.len() > 2 && !nums[2].is_empty() {
+                nums[2]
+                    .parse::<usize>()
+                    .map_err(|e| format!("invalid max_loc: {e}"))?
+            } else {
+                defaults.max_loc
+            };
+            TierLimits {
+                max_repos,
+                max_files,
+                max_loc,
+            }
+        };
+
+        match tier_name {
+            "free" => Ok(Tier::Free { limits }),
+            "pro" => Ok(Tier::Pro { limits }),
+            _ => unreachable!(),
         }
-        if lower == "pro" {
-            return Ok(Tier::Pro {
-                limits: TierLimits::PRO,
-            });
-        }
-        if let Some(n_str) = lower.strip_prefix("free:") {
-            let n = n_str
-                .parse::<usize>()
-                .map_err(|e| format!("invalid max_repos: {e}"))?;
-            return Ok(Tier::Free {
-                limits: TierLimits {
-                    max_repos: n,
-                    ..TierLimits::FREE
-                },
-            });
-        }
-        if let Some(n_str) = lower.strip_prefix("pro:") {
-            let n = n_str
-                .parse::<usize>()
-                .map_err(|e| format!("invalid max_repos: {e}"))?;
-            return Ok(Tier::Pro {
-                limits: TierLimits {
-                    max_repos: n,
-                    ..TierLimits::PRO
-                },
-            });
-        }
-        Err(format!(
-            "unknown tier '{s}': expected 'free', 'free:N', 'pro', or 'pro:N'"
-        ))
     }
 }
 
@@ -617,19 +641,37 @@ mod tests {
 
     #[test]
     fn tier_parse_roundtrip() {
+        // Bare tier names → defaults
         let free: Tier = "free".parse().unwrap();
         assert_eq!(free.max_repos(), 1);
-
-        let free3: Tier = "free:3".parse().unwrap();
-        assert_eq!(free3.max_repos(), 3);
+        assert_eq!(free.max_files(), 2_000);
+        assert_eq!(free.max_loc(), 200_000);
 
         let pro: Tier = "pro".parse().unwrap();
         assert_eq!(pro.max_repos(), 50);
+        assert_eq!(pro.max_files(), 20_000);
+        assert_eq!(pro.max_loc(), 2_000_000);
 
-        let pro100: Tier = "pro:100".parse().unwrap();
-        assert_eq!(pro100.max_repos(), 100);
+        // Repos only
+        let free3: Tier = "free:3".parse().unwrap();
+        assert_eq!(free3.max_repos(), 3);
+        assert_eq!(free3.max_files(), 2_000); // default preserved
 
+        // Repos + files
+        let pro_custom: Tier = "pro:100:50000".parse().unwrap();
+        assert_eq!(pro_custom.max_repos(), 100);
+        assert_eq!(pro_custom.max_files(), 50_000);
+        assert_eq!(pro_custom.max_loc(), 2_000_000); // default preserved
+
+        // All three
+        let full: Tier = "free:5:10000:1000000".parse().unwrap();
+        assert_eq!(full.max_repos(), 5);
+        assert_eq!(full.max_files(), 10_000);
+        assert_eq!(full.max_loc(), 1_000_000);
+
+        // Errors
         assert!("unknown".parse::<Tier>().is_err());
+        assert!("free:abc".parse::<Tier>().is_err());
     }
 
     #[test]

@@ -45,7 +45,7 @@ enum Command {
         /// Path to keys.toml config file
         #[arg(short, long)]
         keys: PathBuf,
-        /// Subscription tier: "free", "free:N", "pro", or "pro:N" (default repos: free=1, pro=50)
+        /// Subscription tier: TIER[:REPOS[:FILES[:LOC]]] e.g. "free", "pro:100", "free:3:5000:500000"
         #[arg(long, default_value = "pro")]
         tier: recon_server::router::Tier,
         /// Log level
