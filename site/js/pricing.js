@@ -2,7 +2,7 @@
  * Pricing page — Razorpay checkout integration.
  */
 
-const API = "https://api.recon.dev";
+const API = "/api";
 
 let currentUser = null;
 

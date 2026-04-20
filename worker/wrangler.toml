@@ -4,13 +4,13 @@ compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-ALLOWED_ORIGINS = "https://recon.dev,https://mcprecon.pages.dev,http://localhost:8788"
-FRONTEND_URL = "https://recon.dev"
+ALLOWED_ORIGINS = "https://mcprecon.pages.dev,http://localhost:8788"
+FRONTEND_URL = "https://mcprecon.pages.dev"
 
 [[d1_databases]]
 binding = "RECON_DB"
 database_name = "recon-production"
-database_id = "placeholder-fill-after-d1-create"
+database_id = "ac8c7180-57b5-4121-9941-e28a8a745f54"
 migrations_dir = "migrations"
 
 # Secrets (set via `wrangler secret put`):

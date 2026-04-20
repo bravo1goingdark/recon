@@ -3,11 +3,11 @@
  * Checks session via /v1/auth/me and updates the nav.
  */
 
-const API = "https://api.recon.dev";
+const API = "/api";
 
 async function checkAuth() {
   try {
-    const resp = await fetch(`${API}/v1/auth/me`, { credentials: "include" });
+    const resp = await fetch(`/api/v1/auth/me`, { credentials: "include" });
     if (resp.ok) return await resp.json();
   } catch {
     // Server unreachable — not authenticated
