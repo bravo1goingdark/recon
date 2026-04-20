@@ -45,6 +45,9 @@ enum Command {
         /// Path to keys.toml config file
         #[arg(short, long)]
         keys: PathBuf,
+        /// Subscription tier: "free", "free:N", "pro", or "pro:N" (default repos: free=1, pro=50)
+        #[arg(long, default_value = "pro")]
+        tier: recon_server::router::Tier,
         /// Log level
         #[arg(long, default_value = "info")]
         log: String,
@@ -259,7 +262,7 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
 /// to the correct ReconServer instance via DashMap lookup.
 async fn serve_hosted(
     key_config: hosted::KeyConfig,
-    router: std::sync::Arc<hosted::RepoRouter>,
+    router: std::sync::Arc<recon_server::router::RepoRouter>,
     host: &str,
     port: u16,
 ) -> Result<()> {
@@ -418,6 +421,7 @@ async fn main() -> Result<()> {
             port,
             host,
             keys,
+            tier,
             log,
         } => {
             tracing_subscriber::fmt()
@@ -425,8 +429,9 @@ async fn main() -> Result<()> {
                 .with_env_filter(EnvFilter::new(&log))
                 .init();
 
+            info!(%tier, "server tier configured");
             let key_config = hosted::KeyConfig::load(&keys)?;
-            let router = std::sync::Arc::new(hosted::RepoRouter::new());
+            let router = std::sync::Arc::new(recon_server::router::RepoRouter::new(tier));
 
             // Pre-load all configured repos
             for (api_key, repo_path) in &key_config.keys {
@@ -454,8 +459,10 @@ async fn main() -> Result<()> {
                 Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let stats = indexer::index_repo_incremental(&store, Some(&tantivy), &repo)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut writer = tantivy.writer(50_000_000).ok();
+            let stats =
+                indexer::index_repo_incremental(&store, Some(&tantivy), &repo, writer.as_mut())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             eprintln!(
                 "Indexed {} files, {} symbols ({} errors)",
                 stats.files_indexed, stats.total_symbols, stats.errors
@@ -588,8 +595,10 @@ async fn main() -> Result<()> {
                 Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let stats = indexer::index_repo_incremental(&store, Some(&tantivy), &repo)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut writer = tantivy.writer(50_000_000).ok();
+            let stats =
+                indexer::index_repo_incremental(&store, Some(&tantivy), &repo, writer.as_mut())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             eprintln!(
                 "Indexed {} files, {} symbols, {} tantivy docs ({} errors)",
                 stats.files_indexed,

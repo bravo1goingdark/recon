@@ -1,19 +1,16 @@
 //! Multi-repo hosted server with API key auth and lazy repo loading.
 
 use anyhow::Result;
-use dashmap::DashMap;
-use recon_indexer::indexer;
-use recon_search::tantivy_backend::TantivyBackend;
+use recon_server::router::{RepoRouter, Tier};
 use recon_server::server::ReconServer;
-use recon_storage::store::Store;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 /// API key → repo path mapping.
 #[derive(Debug, Clone)]
 pub struct KeyConfig {
+    /// Map from API key to repo path.
     pub keys: HashMap<String, PathBuf>,
 }
 
@@ -53,66 +50,25 @@ impl KeyConfig {
     }
 }
 
-/// Lazily-loaded repo state: SQLite + Tantivy + ReconServer.
-struct RepoState {
-    server: ReconServer,
+/// Create a `RepoRouter` configured for the hosted environment.
+///
+/// Uses Pro tier with a configurable max repo count.
+#[allow(dead_code)]
+pub fn hosted_router(max_repos: usize) -> RepoRouter {
+    RepoRouter::new(Tier::Pro { max_repos })
 }
 
-/// Multi-repo manager backed by DashMap for concurrent access.
-pub struct RepoRouter {
-    repos: DashMap<PathBuf, Arc<RepoState>>,
-}
-
-impl RepoRouter {
-    pub fn new() -> Self {
-        Self {
-            repos: DashMap::new(),
-        }
-    }
-
-    /// Get or lazily load a ReconServer for the given repo path.
-    pub fn get_or_load(&self, repo_path: &Path) -> Result<ReconServer> {
-        // Fast path: already loaded
-        if let Some(state) = self.repos.get(repo_path) {
-            return Ok(state.server.clone());
-        }
-
-        // Slow path: load and index
-        let repo_path = repo_path.canonicalize()?;
-        let store_dir = repo_path.join(".recon");
-        std::fs::create_dir_all(&store_dir)?;
-
-        let store = Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let tantivy =
-            TantivyBackend::open(&store_dir.join("tantivy")).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        // Incremental index on first load
-        match indexer::index_repo_incremental(&store, Some(&tantivy), &repo_path) {
-            Ok(stats) => {
-                info!(
-                    repo = %repo_path.display(),
-                    files = stats.files_indexed,
-                    symbols = stats.total_symbols,
-                    "indexed repo"
-                );
-            }
-            Err(e) => {
-                warn!(repo = %repo_path.display(), "index error: {e}");
-            }
-        }
-
-        let server = ReconServer::new(repo_path.clone(), store, tantivy);
-        let state = Arc::new(RepoState {
-            server: server.clone(),
-        });
-        self.repos.insert(repo_path, state);
-        Ok(server)
-    }
-
-    /// Number of loaded repos.
-    pub fn repo_count(&self) -> usize {
-        self.repos.len()
-    }
+/// Resolve an API key to a `ReconServer`, loading the repo if needed.
+#[allow(dead_code)]
+pub fn server_for_key(
+    router: &RepoRouter,
+    config: &KeyConfig,
+    api_key: &str,
+) -> Result<ReconServer> {
+    let repo_path = config
+        .repo_for_key(api_key)
+        .ok_or_else(|| anyhow::anyhow!("unknown API key"))?;
+    router.get_or_load(repo_path)
 }
 
 /// Extract Bearer token from Authorization header value.
