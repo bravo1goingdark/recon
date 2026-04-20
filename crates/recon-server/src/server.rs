@@ -118,6 +118,40 @@ impl ReconServer {
             symbols = stats.total_symbols,
             "initial indexing complete"
         );
+        drop(tw);
+
+        // Pre-warm the repo_map cache so the first user call is instant.
+        // Runs PageRank in the background — doesn't block server startup.
+        if stats.total_symbols > 0 {
+            let all_symbols = self.read_pool.all_symbols().unwrap_or_default();
+            let all_refs = self.read_pool.all_refs().unwrap_or_default();
+            let last_idx = self.read_pool.max_indexed_at().unwrap_or(0);
+            let budget = 2000;
+            let cache_key = format!("map_cache:{last_idx}:{budget}");
+
+            let ranked = pagerank::pagerank(
+                &all_symbols,
+                &all_refs,
+                &[],
+                0.85,
+                pagerank::DEFAULT_MAX_ITERATIONS,
+            );
+            let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
+            let token_est = recon_search::tokens::estimate_tokens(&content);
+            let view = ToolOutput::Skeleton(SkeletonView {
+                path: None,
+                content,
+                token_estimate: token_est,
+            });
+            let result = redact_response(
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            );
+
+            let _ = store.delete_meta_prefix("map_cache:");
+            let _ = store.set_meta(&cache_key, &result);
+            info!("repo_map cache pre-warmed");
+        }
+
         Ok(())
     }
 
@@ -853,7 +887,13 @@ impl ReconServer {
             vec![]
         };
 
-        let ranked = pagerank::pagerank(&all_symbols, &all_refs, &focus_indices, 0.85, 30);
+        let ranked = pagerank::pagerank(
+            &all_symbols,
+            &all_refs,
+            &focus_indices,
+            0.85,
+            pagerank::DEFAULT_MAX_ITERATIONS,
+        );
         let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
 
         let token_est = recon_search::tokens::estimate_tokens(&content);
