@@ -23,4 +23,9 @@ Thumbs.db
 # Mutation testing
 **/mutants.out*/
 
+# Worker dependencies
+node_modules/
+worker/dist/
+.wrangler/
+
 CLAUDE.md

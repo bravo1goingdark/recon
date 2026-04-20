@@ -1,0 +1,74 @@
+/**
+ * Tier definitions — must exactly mirror the Rust constants in
+ * crates/recon-server/src/router.rs TierLimits (lines 33-68).
+ */
+
+export interface TierLimits {
+  max_repos: number;
+  max_files: number;
+  max_loc: number;
+}
+
+export interface TierConfig {
+  name: string;
+  limits: TierLimits;
+  /** Monthly price in paise (INR). 0 = free, -1 = contact sales. */
+  price_paise: number;
+  /** Display price string. */
+  price_display: string;
+}
+
+/** Must match TierLimits::FREE in router.rs */
+const FREE: TierConfig = {
+  name: "Free",
+  limits: { max_repos: 1, max_files: 2_000, max_loc: 200_000 },
+  price_paise: 0,
+  price_display: "Free",
+};
+
+/** Must match TierLimits::PRO in router.rs */
+const PRO: TierConfig = {
+  name: "Pro",
+  limits: { max_repos: 50, max_files: 20_000, max_loc: 2_000_000 },
+  price_paise: 49_900, // 499 INR
+  price_display: "\u20B9499/mo",
+};
+
+/** Must match TierLimits::TEAM in router.rs */
+const TEAM: TierConfig = {
+  name: "Team",
+  limits: { max_repos: 200, max_files: 50_000, max_loc: 5_000_000 },
+  price_paise: 149_900, // 1499 INR
+  price_display: "\u20B91,499/mo",
+};
+
+/** Must match TierLimits::ENTERPRISE in router.rs */
+const ENTERPRISE: TierConfig = {
+  name: "Enterprise",
+  limits: {
+    max_repos: 1_000,
+    max_files: Number.MAX_SAFE_INTEGER,
+    max_loc: Number.MAX_SAFE_INTEGER,
+  },
+  price_paise: -1,
+  price_display: "Contact us",
+};
+
+export const TIERS: Record<string, TierConfig> = {
+  Free: FREE,
+  Pro: PRO,
+  Team: TEAM,
+  Enterprise: ENTERPRISE,
+};
+
+/** Get tier config by name (case-insensitive), defaults to Free. */
+export function getTierConfig(name: string): TierConfig {
+  const normalized =
+    name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+  return TIERS[normalized] ?? FREE;
+}
+
+/** All purchasable tiers (excludes Free and Enterprise/contact-sales). */
+export function purchasableTiers(): TierConfig[] {
+  return Object.values(TIERS).filter((t) => t.price_paise > 0);
+}

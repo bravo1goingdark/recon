@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Dashboard — recon</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--paper:oklch(98.5% .004 80);--paper-2:oklch(96.5% .006 80);--ink:oklch(22% .01 60);--ink-2:oklch(40% .01 60);--ink-3:oklch(58% .01 60);--rule:oklch(88% .006 80);--clay:oklch(58% .14 45);--clay-soft:oklch(94% .03 45);--sans:'Geist',-apple-system,sans-serif;--serif:'Instrument Serif',serif;--mono:'JetBrains Mono',monospace}
+[data-theme="dark"]{--paper:oklch(12% .005 260);--paper-2:oklch(16% .006 260);--ink:oklch(92% .008 80);--ink-2:oklch(72% .008 80);--ink-3:oklch(50% .008 80);--rule:oklch(24% .006 260);--clay:oklch(65% .16 45);--clay-soft:oklch(20% .04 45)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--paper:oklch(12% .005 260);--paper-2:oklch(16% .006 260);--ink:oklch(92% .008 80);--ink-2:oklch(72% .008 80);--ink-3:oklch(50% .008 80);--rule:oklch(24% .006 260);--clay:oklch(65% .16 45);--clay-soft:oklch(20% .04 45)}}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--sans);background:var(--paper);color:var(--ink);line-height:1.6}
+.wrap{max-width:720px;margin:0 auto;padding:0 24px}
+header{padding:20px 0;border-bottom:1px solid var(--rule)}
+header .wrap{display:flex;align-items:center;justify-content:space-between;max-width:720px}
+header a{color:var(--ink);text-decoration:none;font-size:.9rem}
+.logo{font-family:var(--serif);font-size:1.3rem;font-weight:400}
+nav{display:flex;gap:24px;align-items:center}
+h1{font-family:var(--serif);font-size:1.8rem;font-weight:400;margin:32px 0 24px}
+h2{font-size:1rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);margin:32px 0 12px}
+.section{padding:0 0 24px;border-bottom:1px solid var(--rule)}
+.profile-card{display:flex;align-items:center;gap:16px}
+.avatar{border-radius:50%}
+.tier-badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:.75rem;font-weight:600;background:var(--clay-soft);color:var(--clay)}
+.tier-badge.sm{font-size:.7rem;padding:1px 8px}
+.key-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--rule);font-size:.9rem;flex-wrap:wrap}
+.key-row.revoked{opacity:.4}
+.key-row code{font-family:var(--mono);font-size:.85rem;background:var(--paper-2);padding:2px 8px;border-radius:4px}
+.dim{color:var(--ink-3)}
+.billing-card{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.limits{display:flex;gap:16px;color:var(--ink-2);font-size:.85rem}
+.btn{display:inline-block;padding:8px 16px;border-radius:8px;font-family:var(--sans);font-size:.85rem;font-weight:500;cursor:pointer;text-decoration:none;border:1px solid var(--rule);color:var(--ink);background:transparent;transition:all .15s}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn.primary:hover{opacity:.85}
+.btn.ghost{border-color:var(--rule)}
+.btn.ghost:hover{background:var(--paper-2)}
+.btn.sm{padding:4px 12px;font-size:.8rem}
+.btn.danger{color:#c44;border-color:#c44}
+.btn.danger:hover{background:#c4410a;color:white}
+.actions{margin:16px 0}
+/* Key reveal modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);align-items:center;justify-content:center;z-index:100}
+.modal{background:var(--paper);border:1px solid var(--rule);border-radius:12px;padding:32px;max-width:520px;width:90%}
+.modal h3{font-family:var(--serif);font-size:1.3rem;margin-bottom:12px}
+.modal p{color:var(--ink-2);font-size:.9rem;margin-bottom:16px}
+.modal code{display:block;font-family:var(--mono);font-size:.8rem;background:var(--paper-2);padding:12px;border-radius:6px;word-break:break-all;margin-bottom:16px}
+.modal-actions{display:flex;gap:8px}
+footer{border-top:1px solid var(--rule);padding:24px 0;text-align:center;color:var(--ink-3);font-size:.8rem;margin-top:48px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <a href="/" class="logo">recon</a>
+    <nav>
+      <a href="/docs">Docs</a>
+      <a href="/pricing">Pricing</a>
+      <a href="#" onclick="logout()" style="color:var(--ink-3)">Sign out</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <h1>Dashboard</h1>
+
+  <div class="section" id="profile">
+    <p class="dim">Loading...</p>
+  </div>
+
+  <h2>API Keys</h2>
+  <div class="section">
+    <div id="keys"><p class="dim">Loading...</p></div>
+    <div class="actions">
+      <button onclick="generateKey()" class="btn primary sm">Generate new key</button>
+    </div>
+  </div>
+
+  <h2>Billing</h2>
+  <div class="section" id="billing">
+    <p class="dim">Loading...</p>
+  </div>
+</div>
+
+<!-- Key reveal modal -->
+<div class="modal-overlay" id="key-modal">
+  <div class="modal">
+    <h3>Your new API key</h3>
+    <p>Copy this key now. You won't be able to see it again.</p>
+    <code id="new-key-value"></code>
+    <div class="modal-actions">
+      <button id="copy-btn" onclick="copyKey()" class="btn primary sm">Copy</button>
+      <button onclick="closeKeyModal()" class="btn ghost sm">Done</button>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div class="wrap">&copy; 2026 recon</div>
+</footer>
+
+<script src="/js/dashboard.js"></script>
+</body>
+</html>

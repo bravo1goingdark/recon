@@ -1,0 +1,105 @@
+import { Hono } from "hono";
+import { sha256Hex, generateApiKey } from "../lib/crypto";
+import { getTierConfig } from "../lib/tiers";
+import { requireAuth } from "../middleware/auth";
+import type { AuthUser, Env } from "../types";
+
+export const dashboardRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { user: AuthUser };
+}>();
+
+// All dashboard routes require auth
+dashboardRoutes.use("*", requireAuth);
+
+/** GET /v1/dashboard/keys — list user's API keys. */
+dashboardRoutes.get("/keys", async (c) => {
+  const user = c.get("user");
+  const db = c.env.RECON_DB;
+
+  const { results } = await db
+    .prepare(
+      `SELECT id, key_prefix, name, tier, limits_json, expires_at, created_at, revoked_at
+       FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
+    )
+    .bind(user.id)
+    .all();
+
+  const keys = (results ?? []).map((row) => ({
+    id: row.id,
+    key_prefix: row.key_prefix,
+    name: row.name,
+    tier: row.tier,
+    limits: JSON.parse(row.limits_json as string),
+    expires_at: row.expires_at,
+    created_at: row.created_at,
+    revoked: !!row.revoked_at,
+  }));
+
+  return c.json({ keys });
+});
+
+/** POST /v1/dashboard/keys — generate a new API key. */
+dashboardRoutes.post("/keys", async (c) => {
+  const user = c.get("user");
+  const db = c.env.RECON_DB;
+
+  let name = "Default";
+  try {
+    const body = await c.req.json<{ name?: string }>();
+    if (body.name) name = body.name.slice(0, 64);
+  } catch {
+    // Body optional
+  }
+
+  const key = generateApiKey();
+  const keyHash = await sha256Hex(key);
+  const keyPrefix = key.slice(0, 14);
+  const tierConfig = getTierConfig(user.tier);
+
+  await db
+    .prepare(
+      `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, tier, limits_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      user.id,
+      keyHash,
+      keyPrefix,
+      name,
+      tierConfig.name,
+      JSON.stringify(tierConfig.limits),
+    )
+    .run();
+
+  // Return the full key ONCE — never shown again
+  return c.json({
+    key,
+    key_prefix: keyPrefix,
+    name,
+    tier: tierConfig.name,
+    limits: tierConfig.limits,
+    created_at: new Date().toISOString(),
+  });
+});
+
+/** DELETE /v1/dashboard/keys/:id — revoke a key. */
+dashboardRoutes.delete("/keys/:id", async (c) => {
+  const user = c.get("user");
+  const db = c.env.RECON_DB;
+  const keyId = c.req.param("id");
+
+  const result = await db
+    .prepare(
+      `UPDATE api_keys SET revoked_at = datetime('now')
+       WHERE id = ? AND user_id = ? AND revoked_at IS NULL`,
+    )
+    .bind(keyId, user.id)
+    .run();
+
+  if (!result.meta.changes || result.meta.changes === 0) {
+    return c.json({ error: "Key not found or already revoked" }, 404);
+  }
+
+  return c.json({ ok: true });
+});

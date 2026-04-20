@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Sign in — recon</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--paper:oklch(98.5% .004 80);--ink:oklch(22% .01 60);--ink-2:oklch(40% .01 60);--rule:oklch(88% .006 80);--clay:oklch(58% .14 45);--sans:'Geist',-apple-system,sans-serif;--serif:'Instrument Serif',serif;--mono:'JetBrains Mono',monospace}
+[data-theme="dark"]{--paper:oklch(12% .005 260);--ink:oklch(92% .008 80);--ink-2:oklch(72% .008 80);--rule:oklch(24% .006 260);--clay:oklch(65% .16 45)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--paper:oklch(12% .005 260);--ink:oklch(92% .008 80);--ink-2:oklch(72% .008 80);--rule:oklch(24% .006 260);--clay:oklch(65% .16 45)}}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--sans);background:var(--paper);color:var(--ink);min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.login-card{text-align:center;max-width:400px;padding:48px 32px}
+h1{font-family:var(--serif);font-size:2rem;font-weight:400;margin-bottom:8px}
+p{color:var(--ink-2);font-size:.95rem;margin-bottom:32px;line-height:1.5}
+.gh-btn{display:inline-flex;align-items:center;gap:10px;padding:12px 28px;background:var(--ink);color:var(--paper);border:none;border-radius:8px;font-family:var(--sans);font-size:.95rem;font-weight:500;cursor:pointer;text-decoration:none;transition:opacity .15s}
+.gh-btn:hover{opacity:.85}
+.gh-btn svg{width:20px;height:20px;fill:currentColor}
+.back{display:block;margin-top:24px;color:var(--ink-2);font-size:.85rem;text-decoration:none}
+.back:hover{color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="login-card">
+  <h1>Sign in to recon</h1>
+  <p>Connect your GitHub account to generate API keys and manage your subscription.</p>
+  <a href="https://api.recon.dev/v1/auth/github" class="gh-btn">
+    <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+    Sign in with GitHub
+  </a>
+  <a href="/" class="back">&larr; Back to recon.dev</a>
+</div>
+</body>
+</html>

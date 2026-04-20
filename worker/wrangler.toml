@@ -1,0 +1,22 @@
+name = "recon-api"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ALLOWED_ORIGINS = "https://recon.dev,https://mcprecon.pages.dev,http://localhost:8788"
+FRONTEND_URL = "https://recon.dev"
+
+[[d1_databases]]
+binding = "RECON_DB"
+database_name = "recon-production"
+database_id = "placeholder-fill-after-d1-create"
+migrations_dir = "migrations"
+
+# Secrets (set via `wrangler secret put`):
+# GITHUB_CLIENT_ID
+# GITHUB_CLIENT_SECRET
+# RAZORPAY_KEY_ID
+# RAZORPAY_KEY_SECRET
+# RAZORPAY_WEBHOOK_SECRET
+# SESSION_SIGNING_KEY
