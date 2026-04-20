@@ -29,23 +29,37 @@ pub struct TierLimits {
     pub max_loc: usize,
 }
 
-/// Default limits per tier.
+/// Built-in tier presets. Add new tiers here — no match arms to update.
 impl TierLimits {
-    /// Free tier defaults: 1 repo, 2K files, 200K LOC.
+    /// Free: 1 repo, 2K files, 200K LOC.
     pub const FREE: Self = Self {
         max_repos: 1,
         max_files: 2_000,
         max_loc: 200_000,
     };
 
-    /// Pro tier defaults: 50 repos, 20K files, 2M LOC.
+    /// Pro: 50 repos, 20K files, 2M LOC.
     pub const PRO: Self = Self {
         max_repos: 50,
         max_files: 20_000,
         max_loc: 2_000_000,
     };
 
-    /// Uncapped (self-hosted / enterprise).
+    /// Team: 200 repos, 50K files, 5M LOC.
+    pub const TEAM: Self = Self {
+        max_repos: 200,
+        max_files: 50_000,
+        max_loc: 5_000_000,
+    };
+
+    /// Enterprise: 1000 repos, unlimited files/LOC.
+    pub const ENTERPRISE: Self = Self {
+        max_repos: 1_000,
+        max_files: usize::MAX,
+        max_loc: usize::MAX,
+    };
+
+    /// Uncapped (self-hosted, no limits).
     pub const UNCAPPED: Self = Self {
         max_repos: usize::MAX,
         max_files: usize::MAX,
@@ -53,70 +67,68 @@ impl TierLimits {
     };
 }
 
-/// Subscription tier controlling repo and indexing limits.
+/// Subscription tier — a name + resource limits.
 ///
-/// Both tiers carry configurable limits. The key difference:
-/// - **Free**: no expiry, repos live forever, rejects at limit.
-/// - **Pro**: has an optional expiry. Repos live until expiry, then
-///   `sweep_expired()` cleans them up to reclaim memory. Rejects at limit
-///   (no LRU eviction — paying users keep their repos).
+/// Not an enum: adding a new tier is just a new `TierLimits` constant and
+/// a name in the `FromStr` parser. No match arms to update anywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tier {
-    /// Free tier.
-    Free {
-        /// Resource limits.
-        limits: TierLimits,
-    },
-    /// Pro tier.
-    Pro {
-        /// Resource limits.
-        limits: TierLimits,
-    },
+pub struct Tier {
+    /// Tier name for error messages and logging.
+    name: &'static str,
+    /// Resource limits.
+    limits: TierLimits,
 }
 
 impl Tier {
-    /// Get the resource limits for this tier.
+    /// Create a tier with a name and limits.
+    pub const fn new(name: &'static str, limits: TierLimits) -> Self {
+        Self { name, limits }
+    }
+
+    /// Get the resource limits.
     pub fn limits(self) -> TierLimits {
-        match self {
-            Tier::Free { limits } | Tier::Pro { limits } => limits,
-        }
+        self.limits
     }
 
     /// Maximum number of repos allowed.
     pub fn max_repos(self) -> usize {
-        self.limits().max_repos
+        self.limits.max_repos
     }
 
     /// Maximum source files per repo.
     pub fn max_files(self) -> usize {
-        self.limits().max_files
+        self.limits.max_files
     }
 
     /// Maximum lines of code per repo.
     pub fn max_loc(self) -> usize {
-        self.limits().max_loc
+        self.limits.max_loc
     }
 
     /// Human-readable tier name for error messages.
     pub fn name(self) -> &'static str {
-        match self {
-            Tier::Free { .. } => "Free",
-            Tier::Pro { .. } => "Pro",
-        }
+        self.name
     }
 }
 
 impl std::fmt::Display for Tier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let l = self.limits();
-        write!(
-            f,
-            "{} (max {} repos, {} files, {}K LOC)",
-            self.name(),
-            l.max_repos,
-            l.max_files,
-            l.max_loc / 1000,
-        )
+        if self.limits.max_files == usize::MAX {
+            write!(
+                f,
+                "{} (max {} repos, unlimited)",
+                self.name, self.limits.max_repos
+            )
+        } else {
+            write!(
+                f,
+                "{} (max {} repos, {} files, {}K LOC)",
+                self.name,
+                self.limits.max_repos,
+                self.limits.max_files,
+                self.limits.max_loc / 1000,
+            )
+        }
     }
 }
 
@@ -127,23 +139,29 @@ impl std::str::FromStr for Tier {
     ///
     /// Format: `TIER[:REPOS[:FILES[:LOC]]]`
     ///
+    /// Supported tiers: `free`, `pro`, `team`, `enterprise`, `uncapped`.
+    /// Omitted numeric fields use the tier's built-in defaults.
+    ///
     /// Examples:
-    /// - `free`              → Free defaults (1 repo, 2K files, 200K LOC)
-    /// - `free:3`            → Free, 3 repos
-    /// - `free:3:5000`       → Free, 3 repos, 5K files
-    /// - `free:3:5000:500000` → Free, 3 repos, 5K files, 500K LOC
-    /// - `pro`               → Pro defaults (50 repos, 20K files, 2M LOC)
-    /// - `pro:100:50000:5000000` → Pro, 100 repos, 50K files, 5M LOC
+    /// - `free`                     → 1 repo, 2K files, 200K LOC
+    /// - `pro:100`                  → 100 repos, 20K files, 2M LOC
+    /// - `team`                     → 200 repos, 50K files, 5M LOC
+    /// - `enterprise`               → 1000 repos, unlimited
+    /// - `free:3:5000:500000`       → 3 repos, 5K files, 500K LOC
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let lower = s.to_lowercase();
         let parts: Vec<&str> = lower.splitn(2, ':').collect();
         let tier_name = parts[0];
-        let defaults = match tier_name {
-            "free" => TierLimits::FREE,
-            "pro" => TierLimits::PRO,
+
+        let (name, defaults): (&'static str, TierLimits) = match tier_name {
+            "free" => ("Free", TierLimits::FREE),
+            "pro" => ("Pro", TierLimits::PRO),
+            "team" => ("Team", TierLimits::TEAM),
+            "enterprise" => ("Enterprise", TierLimits::ENTERPRISE),
+            "uncapped" => ("Uncapped", TierLimits::UNCAPPED),
             _ => {
                 return Err(format!(
-                    "unknown tier '{tier_name}': expected 'free' or 'pro'"
+                    "unknown tier '{tier_name}': expected one of: free, pro, team, enterprise, uncapped"
                 ))
             }
         };
@@ -180,11 +198,7 @@ impl std::str::FromStr for Tier {
             }
         };
 
-        match tier_name {
-            "free" => Ok(Tier::Free { limits }),
-            "pro" => Ok(Tier::Pro { limits }),
-            _ => unreachable!(),
-        }
+        Ok(Tier::new(name, limits))
     }
 }
 
@@ -469,9 +483,7 @@ mod tests {
         make_test_repo(&repo1);
         make_test_repo(&repo2);
 
-        let router = RepoRouter::new(Tier::Free {
-            limits: TierLimits::FREE,
-        });
+        let router = RepoRouter::new(Tier::new("Free", TierLimits::FREE));
         assert!(router.get_or_load(&repo1).is_ok());
         assert_eq!(router.repo_count(), 1);
 
@@ -496,12 +508,13 @@ mod tests {
         make_test_repo(&repo3);
 
         // Free tier with 2 repos allowed
-        let router = RepoRouter::new(Tier::Free {
-            limits: TierLimits {
+        let router = RepoRouter::new(Tier::new(
+            "Free",
+            TierLimits {
                 max_repos: 2,
                 ..TierLimits::FREE
             },
-        });
+        ));
         assert!(router.get_or_load(&repo1).is_ok());
         assert!(router.get_or_load(&repo2).is_ok());
         assert_eq!(router.repo_count(), 2);
@@ -518,12 +531,13 @@ mod tests {
         make_test_repo(&repo1);
         make_test_repo(&repo2);
 
-        let router = RepoRouter::new(Tier::Pro {
-            limits: TierLimits {
+        let router = RepoRouter::new(Tier::new(
+            "Pro",
+            TierLimits {
                 max_repos: 10,
                 ..TierLimits::PRO
             },
-        });
+        ));
         assert!(router.get_or_load(&repo1).is_ok());
         assert!(router.get_or_load(&repo2).is_ok());
         assert_eq!(router.repo_count(), 2);
@@ -540,12 +554,13 @@ mod tests {
         make_test_repo(&repo3);
 
         // Pro with limit of 2 — should reject 3rd, not evict
-        let router = RepoRouter::new(Tier::Pro {
-            limits: TierLimits {
+        let router = RepoRouter::new(Tier::new(
+            "Pro",
+            TierLimits {
                 max_repos: 2,
                 ..TierLimits::PRO
             },
-        });
+        ));
         assert!(router.get_or_load(&repo1).is_ok());
         assert!(router.get_or_load(&repo2).is_ok());
 
@@ -561,12 +576,13 @@ mod tests {
         let repo = dir.path().join("repo");
         make_test_repo(&repo);
 
-        let router = RepoRouter::new(Tier::Pro {
-            limits: TierLimits {
+        let router = RepoRouter::new(Tier::new(
+            "Pro",
+            TierLimits {
                 max_repos: 10,
                 ..TierLimits::PRO
             },
-        });
+        ));
         // Set expiry to the past
         router.set_expires_at(1);
 
@@ -582,12 +598,13 @@ mod tests {
         let repo = dir.path().join("repo");
         make_test_repo(&repo);
 
-        let router = RepoRouter::new(Tier::Pro {
-            limits: TierLimits {
+        let router = RepoRouter::new(Tier::new(
+            "Pro",
+            TierLimits {
                 max_repos: 10,
                 ..TierLimits::PRO
             },
-        });
+        ));
         router.get_or_load(&repo).unwrap();
         assert_eq!(router.repo_count(), 1);
 
@@ -604,9 +621,7 @@ mod tests {
 
     #[test]
     fn free_tier_no_expiry() {
-        let router = RepoRouter::new(Tier::Free {
-            limits: TierLimits::FREE,
-        });
+        let router = RepoRouter::new(Tier::new("Free", TierLimits::FREE));
         // Free tier: expires_at stays 0 (no expiry)
         assert!(!router.is_expired());
         assert_eq!(router.sweep_expired(), 0);
@@ -618,12 +633,13 @@ mod tests {
         let repo = dir.path().join("repo");
         make_test_repo(&repo);
 
-        let router = Arc::new(RepoRouter::new(Tier::Pro {
-            limits: TierLimits {
+        let router = Arc::new(RepoRouter::new(Tier::new(
+            "Pro",
+            TierLimits {
                 max_repos: 10,
                 ..TierLimits::PRO
             },
-        }));
+        )));
 
         let handles: Vec<_> = (0..4)
             .map(|_| {
@@ -706,13 +722,14 @@ mod tests {
             .ok();
 
         // Tier with max 5 files — should reject
-        let tiny_tier = Tier::Free {
-            limits: TierLimits {
+        let tiny_tier = Tier::new(
+            "Free",
+            TierLimits {
                 max_repos: 1,
                 max_files: 5,
                 max_loc: 1_000_000,
             },
-        };
+        );
         let router = RepoRouter::new(tiny_tier);
         let result = router.get_or_load(&repo);
         assert!(result.is_err());
@@ -751,13 +768,14 @@ mod tests {
             .ok();
 
         // Tier with max 100 LOC — should reject (~300 LOC repo)
-        let tiny_tier = Tier::Free {
-            limits: TierLimits {
+        let tiny_tier = Tier::new(
+            "Free",
+            TierLimits {
                 max_repos: 1,
                 max_files: 10_000,
                 max_loc: 100,
             },
-        };
+        );
         let router = RepoRouter::new(tiny_tier);
         let result = router.get_or_load(&repo);
         assert!(result.is_err());

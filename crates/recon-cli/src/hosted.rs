@@ -55,12 +55,13 @@ impl KeyConfig {
 /// Uses Pro tier with a configurable max repo count.
 #[allow(dead_code)]
 pub fn hosted_router(max_repos: usize) -> RepoRouter {
-    RepoRouter::new(Tier::Pro {
-        limits: TierLimits {
+    RepoRouter::new(Tier::new(
+        "Pro",
+        TierLimits {
             max_repos,
             ..TierLimits::PRO
         },
-    })
+    ))
 }
 
 /// Resolve an API key to a `ReconServer`, loading the repo if needed.
