@@ -384,7 +384,7 @@
 <section class="strip" style="padding:0;border-bottom:1px solid var(--rule-soft)">
   <div class="cell">
     <div class="k">Query p50</div>
-    <div class="v">10<sub>ms</sub></div>
+    <div class="v">14<sub>ms</sub></div>
     <div class="foot">Rust compiler · 320K symbols</div>
   </div>
   <div class="cell">
@@ -395,7 +395,7 @@
   <div class="cell">
     <div class="k">Index freshness</div>
     <div class="v">&lt;1<sub>s</sub></div>
-    <div class="foot">file save → queryable</div>
+    <div class="foot">563 ms warm re-index</div>
   </div>
   <div class="cell">
     <div class="k">Languages</div>
@@ -610,16 +610,15 @@
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-family:var(--mono);font-size:12px;color:var(--ink-2)">
           <div><span style="color:var(--ink-3)">LOC</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">1.3M</span></div>
           <div><span style="color:var(--ink-3)">SYMBOLS</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">80K</span></div>
-          <div><span style="color:var(--ink-3)">COLD INDEX</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">19<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">s</sub></span></div>
-          <div><span style="color:var(--ink-3)">QUERY P50</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--clay);letter-spacing:-0.02em">8<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">ms</sub></span></div>
+          <div><span style="color:var(--ink-3)">COLD INDEX</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">28<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">s</sub></span></div>
+          <div><span style="color:var(--ink-3)">QUERY P50</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--clay);letter-spacing:-0.02em">13<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">ms</sub></span></div>
         </div>
         <div style="margin-top:20px;padding-top:16px;border-top:1px dashed var(--rule);font-family:var(--mono);font-size:11px;color:var(--ink-3);display:flex;flex-wrap:wrap;gap:12px">
-          <span>find <span style="color:var(--ink)">8ms</span></span>
-          <span>outline <span style="color:var(--ink)">14ms</span></span>
-          <span>skeleton <span style="color:var(--ink)">11ms</span></span>
-          <span>search <span style="color:var(--ink)">11ms</span></span>
-          <span>refs <span style="color:var(--ink)">8ms</span></span>
-          <span>map <span style="color:var(--ink)">8ms</span></span>
+          <span>find <span style="color:var(--ink)">13ms</span></span>
+          <span>skeleton <span style="color:var(--ink)">19ms</span></span>
+          <span>search <span style="color:var(--ink)">15ms</span></span>
+          <span>refs <span style="color:var(--ink)">13ms</span></span>
+          <span>map <span style="color:var(--ink)">13ms</span></span>
         </div>
       </div>
 
@@ -635,23 +634,22 @@
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-family:var(--mono);font-size:12px;color:var(--ink-2)">
           <div><span style="color:var(--ink-3)">LOC</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">3.8M</span></div>
           <div><span style="color:var(--ink-3)">SYMBOLS</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">320K</span></div>
-          <div><span style="color:var(--ink-3)">COLD INDEX</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">53<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">s</sub></span></div>
-          <div><span style="color:var(--ink-3)">QUERY P50</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--clay);letter-spacing:-0.02em">10<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">ms</sub></span></div>
+          <div><span style="color:var(--ink-3)">COLD INDEX</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--ink);letter-spacing:-0.02em">55<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">s</sub></span></div>
+          <div><span style="color:var(--ink-3)">QUERY P50</span><br/><span style="font-family:var(--serif);font-size:28px;color:var(--clay);letter-spacing:-0.02em">14<sub style="font-family:var(--mono);font-size:12px;color:var(--ink-3)">ms</sub></span></div>
         </div>
         <div style="margin-top:20px;padding-top:16px;border-top:1px dashed var(--rule);font-family:var(--mono);font-size:11px;color:var(--ink-3);display:flex;flex-wrap:wrap;gap:12px">
-          <span>find <span style="color:var(--ink)">8ms</span></span>
-          <span>outline <span style="color:var(--ink)">13ms</span></span>
-          <span>skeleton <span style="color:var(--ink)">11ms</span></span>
-          <span>search <span style="color:var(--ink)">33ms</span></span>
-          <span>refs <span style="color:var(--ink)">12ms</span></span>
-          <span>map <span style="color:var(--ink)">19ms</span></span>
+          <span>find <span style="color:var(--ink)">14ms</span></span>
+          <span>skeleton <span style="color:var(--ink)">17ms</span></span>
+          <span>search <span style="color:var(--ink)">36ms</span></span>
+          <span>refs <span style="color:var(--ink)">15ms</span></span>
+          <span>map <span style="color:var(--ink)">24ms</span></span>
         </div>
       </div>
 
     </div>
 
     <div style="margin-top:24px;font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:0.04em;text-align:center">
-      All numbers: release build · warm cache · mimalloc · fat LTO · parking_lot::Mutex · ahash · 24 MB binary
+      All numbers: release build · warm cache · mimalloc · fat LTO · lock-free ReadPool · CSR PageRank · 25 MB binary
     </div>
   </div>
 </section>
@@ -754,7 +752,7 @@ Read/Grep/Glob when exploring code.</pre>
     </div>
     <div class="bottom wrap" style="padding-left:0;padding-right:0">
       <div>© 2026 recon · crafted in Rust</div>
-      <div>p99 &lt; 33 ms · 107 tests · 24 MB binary</div>
+      <div>p99 &lt; 36 ms · 147 tests · 25 MB binary</div>
     </div>
   </div>
 </footer>

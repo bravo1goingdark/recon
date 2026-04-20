@@ -41,6 +41,19 @@
   .actions{margin:16px 0}
   .empty{font-family:var(--mono);font-size:12px;color:var(--ink-3);padding:12px 0}
 
+  @media (max-width:640px){
+    .page-header{margin:28px 0 24px}
+    .grid-2{grid-template-columns:1fr;gap:12px}
+    .stat-card{padding:16px 20px}
+    .stat-card .value{font-size:1.3rem}
+    .quickstart{padding:20px}
+    .quickstart pre{font-size:10px}
+    .billing-row{flex-direction:column;align-items:flex-start;gap:12px}
+    .billing-limits{flex-direction:column;gap:4px}
+    .modal{padding:24px;width:95%}
+    .modal code{font-size:10px;padding:12px}
+  }
+
   /* Key modal */
   .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
   .modal{background:var(--paper);border:1px solid var(--rule);border-radius:4px;padding:32px;max-width:520px;width:90%}

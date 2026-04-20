@@ -104,4 +104,20 @@ code{font-family:var(--mono);font-size:.85em;background:var(--paper-2);padding:1
 
 /* ─── FOOTER ─── */
 footer.site{border-top:1px solid var(--rule);padding:24px 40px;display:flex;justify-content:space-between;color:var(--ink-3);font-size:12px;margin-top:64px}
-@media (max-width:720px){ footer.site{flex-direction:column;gap:8px;padding:24px} }
+
+/* ─── RESPONSIVE ─── */
+@media (max-width:720px){
+  footer.site{flex-direction:column;gap:8px;padding:24px}
+  nav.top{padding:16px 20px}
+  nav.top ul{display:none}
+  nav.top .right{gap:10px}
+  .wrap{padding:0 20px}
+  .wrap.narrow{padding:0 20px}
+  .btn{padding:11px 16px;font-size:11px}
+  .btn.sm{padding:7px 12px;font-size:10px}
+}
+
+@media (max-width:480px){
+  nav.top .mark span{font-size:18px}
+  .btn{padding:10px 14px}
+}
