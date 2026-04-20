@@ -31,25 +31,25 @@ pub struct TierLimits {
 
 /// Built-in tier presets. Add new tiers here — no match arms to update.
 impl TierLimits {
-    /// Free: 1 repo, 2K files, 200K LOC.
+    /// Starter (free): 1 repo, 500 files, 10K LOC.
     pub const FREE: Self = Self {
         max_repos: 1,
-        max_files: 2_000,
+        max_files: 500,
+        max_loc: 10_000,
+    };
+
+    /// Pro: 10 repos, 5K files, 200K LOC.
+    pub const PRO: Self = Self {
+        max_repos: 10,
+        max_files: 5_000,
         max_loc: 200_000,
     };
 
-    /// Pro: 50 repos, 20K files, 2M LOC.
-    pub const PRO: Self = Self {
-        max_repos: 50,
-        max_files: 20_000,
-        max_loc: 2_000_000,
-    };
-
-    /// Team: 200 repos, 50K files, 5M LOC.
+    /// Team: 25 repos, 50K files, 4M LOC.
     pub const TEAM: Self = Self {
-        max_repos: 200,
+        max_repos: 25,
         max_files: 50_000,
-        max_loc: 5_000_000,
+        max_loc: 4_000_000,
     };
 
     /// Enterprise: 1000 repos, unlimited files/LOC.
@@ -660,24 +660,24 @@ mod tests {
         // Bare tier names → defaults
         let free: Tier = "free".parse().unwrap();
         assert_eq!(free.max_repos(), 1);
-        assert_eq!(free.max_files(), 2_000);
-        assert_eq!(free.max_loc(), 200_000);
+        assert_eq!(free.max_files(), 500);
+        assert_eq!(free.max_loc(), 10_000);
 
         let pro: Tier = "pro".parse().unwrap();
-        assert_eq!(pro.max_repos(), 50);
-        assert_eq!(pro.max_files(), 20_000);
-        assert_eq!(pro.max_loc(), 2_000_000);
+        assert_eq!(pro.max_repos(), 10);
+        assert_eq!(pro.max_files(), 5_000);
+        assert_eq!(pro.max_loc(), 200_000);
 
         // Repos only
         let free3: Tier = "free:3".parse().unwrap();
         assert_eq!(free3.max_repos(), 3);
-        assert_eq!(free3.max_files(), 2_000); // default preserved
+        assert_eq!(free3.max_files(), 500); // default preserved
 
         // Repos + files
         let pro_custom: Tier = "pro:100:50000".parse().unwrap();
         assert_eq!(pro_custom.max_repos(), 100);
         assert_eq!(pro_custom.max_files(), 50_000);
-        assert_eq!(pro_custom.max_loc(), 2_000_000); // default preserved
+        assert_eq!(pro_custom.max_loc(), 200_000); // default preserved
 
         // All three
         let full: Tier = "free:5:10000:1000000".parse().unwrap();

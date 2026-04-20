@@ -21,7 +21,7 @@ export interface TierConfig {
 /** Must match TierLimits::FREE in router.rs */
 const FREE: TierConfig = {
   name: "Free",
-  limits: { max_repos: 1, max_files: 2_000, max_loc: 200_000 },
+  limits: { max_repos: 1, max_files: 500, max_loc: 10_000 },
   price_paise: 0,
   price_display: "Free",
 };
@@ -29,7 +29,7 @@ const FREE: TierConfig = {
 /** Must match TierLimits::PRO in router.rs */
 const PRO: TierConfig = {
   name: "Pro",
-  limits: { max_repos: 50, max_files: 20_000, max_loc: 2_000_000 },
+  limits: { max_repos: 10, max_files: 5_000, max_loc: 200_000 },
   price_paise: 49_900, // 499 INR
   price_display: "\u20B9499/mo",
 };
@@ -37,7 +37,7 @@ const PRO: TierConfig = {
 /** Must match TierLimits::TEAM in router.rs */
 const TEAM: TierConfig = {
   name: "Team",
-  limits: { max_repos: 200, max_files: 50_000, max_loc: 5_000_000 },
+  limits: { max_repos: 25, max_files: 50_000, max_loc: 4_000_000 },
   price_paise: 149_900, // 1499 INR
   price_display: "\u20B91,499/mo",
 };
