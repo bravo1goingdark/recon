@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 const CACHE_TTL_SECS: u64 = 86_400;
 
 /// Default API endpoint. Override with `RECON_API_URL` env var.
-const DEFAULT_API_URL: &str = "https://mcprecon.pages.dev/api";
+const DEFAULT_API_URL: &str = "https://recon-api.kumarashutosh34169.workers.dev";
 
 /// Response from the license server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
