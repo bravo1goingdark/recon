@@ -277,7 +277,12 @@ pub fn index_repo_incremental(
             return index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut());
         }
     };
-    let repo = repo.unwrap(); // safe: if we got a HEAD, we have a repo
+    // `repo` is Some because we got a valid current_head from it above.
+    // Fall back to full index rather than panic if this invariant is somehow violated.
+    let Some(repo) = repo else {
+        warn!("git repo handle unexpectedly missing after HEAD was resolved; doing full index");
+        return index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut());
+    };
 
     if last_commit.is_none() {
         info!("no previous index, full index");
@@ -287,7 +292,11 @@ pub fn index_repo_incremental(
         }
         return Ok(stats);
     }
-    let last_commit = last_commit.unwrap();
+    // `last_commit` is Some because the is_none() branch returned above.
+    let Some(last_commit) = last_commit else {
+        warn!("last_commit unexpectedly None after non-None check; doing full index");
+        return index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut());
+    };
 
     // Get committed changes (tree diff) if HEAD advanced
     let mut all_modified: HashSet<PathBuf> = HashSet::new();
@@ -657,6 +666,21 @@ mod tests {
             stats2.files_indexed, 1,
             "uncommitted worktree change should be detected"
         );
+    }
+
+    #[test]
+    fn incremental_on_non_git_dir_falls_back_to_full_index() {
+        // A plain directory (not a git repo) must fall back to full index without panicking.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn foo() {}").unwrap();
+
+        let store = Store::open_memory().unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
+        assert!(
+            stats.files_indexed >= 1,
+            "full fallback should index the file"
+        );
+        assert_eq!(stats.errors, 0);
     }
 
     #[test]

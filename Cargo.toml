@@ -91,13 +91,14 @@ parking_lot = "0.12.5"
 
 # Hot-path performance
 aho-corasick = "1.1.4"
-smallvec = "1.15.1"
+smallvec = { version = "1.15.1", features = ["serde"] }
 compact_str = { version = "0.9.0", features = ["serde"] }
 ahash = "0.8.12"
 arc-swap = "1.9.1"
 rayon = "1.12.0"
 crossbeam-queue = "0.3.12"
 crossbeam-channel = "0.5.15"
+globset = "0.4.18"
 memmap2 = "0.9.10"
 
 # Config

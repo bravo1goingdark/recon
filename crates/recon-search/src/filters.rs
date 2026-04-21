@@ -3,6 +3,7 @@
 //! Parses constraint strings like `"*.rs"`, `"status:modified"`, `"!test"`
 //! and applies them to narrow file scope before text search.
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use recon_core::error::Error;
 use std::path::{Path, PathBuf};
 
@@ -67,14 +68,33 @@ pub fn parse_filter(filter: &str) -> Result<ParsedFilter, Error> {
 ///
 /// Returns only paths that match all constraints.
 pub fn apply_filter(paths: &[PathBuf], filter: &ParsedFilter) -> Vec<PathBuf> {
+    // Compile glob patterns once for the whole batch to avoid per-path re-compilation.
+    let glob_set = build_glob_set(&filter.globs);
     paths
         .iter()
-        .filter(|p| matches_filter(p, filter))
+        .filter(|p| matches_filter(p, filter, glob_set.as_ref()))
         .cloned()
         .collect()
 }
 
-fn matches_filter(path: &Path, filter: &ParsedFilter) -> bool {
+/// Compile a list of glob patterns into a `GlobSet`.
+///
+/// Patterns that fail to parse are silently skipped (already validated by
+/// `fff-query-parser`). Returns `None` when the pattern list is empty.
+fn build_glob_set(patterns: &[String]) -> Option<GlobSet> {
+    if patterns.is_empty() {
+        return None;
+    }
+    let mut builder = GlobSetBuilder::new();
+    for p in patterns {
+        if let Ok(g) = Glob::new(p) {
+            builder.add(g);
+        }
+    }
+    builder.build().ok()
+}
+
+fn matches_filter(path: &Path, filter: &ParsedFilter, glob_set: Option<&GlobSet>) -> bool {
     let path_str = path.to_string_lossy();
 
     // Extension filter
@@ -114,10 +134,9 @@ fn matches_filter(path: &Path, filter: &ParsedFilter) -> bool {
         return false;
     }
 
-    // Glob filter
-    if !filter.globs.is_empty() {
-        let matches_glob = filter.globs.iter().any(|g| glob_match(g, &path_str));
-        if !matches_glob {
+    // Glob filter — matched against the full path string.
+    if let Some(gs) = glob_set {
+        if !gs.is_match(path) {
             return false;
         }
     }
@@ -130,23 +149,6 @@ fn matches_filter(path: &Path, filter: &ParsedFilter) -> bool {
     }
 
     true
-}
-
-/// Simple glob matching (supports `*` and `**`).
-fn glob_match(pattern: &str, path: &str) -> bool {
-    // Convert glob to a simple check — full glob crate not needed for basic patterns
-    if pattern.contains("**") {
-        // **/*.ext → match any path ending with .ext
-        if let Some(suffix) = pattern.strip_prefix("**/") {
-            return path.ends_with(suffix)
-                || path.contains(&format!("/{suffix}"))
-                || path.contains(&format!("\\{suffix}"));
-        }
-    }
-    if let Some(ext) = pattern.strip_prefix("*.") {
-        return path.ends_with(&format!(".{ext}"));
-    }
-    path.contains(pattern)
 }
 
 #[cfg(test)]
@@ -236,5 +238,70 @@ mod tests {
         let f = ParsedFilter::default();
         let result = apply_filter(&paths, &f);
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn apply_glob_double_star() {
+        let paths = vec![
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("src/deep/mod.rs"),
+            PathBuf::from("build.py"),
+        ];
+        let f = ParsedFilter {
+            globs: vec!["**/*.rs".into()],
+            ..Default::default()
+        };
+        let result = apply_filter(&paths, &f);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|p| p.extension().unwrap() == "rs"));
+    }
+
+    #[test]
+    fn apply_glob_single_star() {
+        let paths = vec![
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("src/lib.py"),
+            PathBuf::from("tests/test_main.rs"),
+        ];
+        // src/*.rs should match only files directly in src/
+        let f = ParsedFilter {
+            globs: vec!["src/*.rs".into()],
+            ..Default::default()
+        };
+        let result = apply_filter(&paths, &f);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], PathBuf::from("src/main.rs"));
+    }
+
+    #[test]
+    fn apply_glob_question_mark() {
+        let paths = vec![
+            PathBuf::from("a.rs"),
+            PathBuf::from("ab.rs"),
+            PathBuf::from("abc.rs"),
+        ];
+        // ?.rs matches exactly one character before the dot
+        let f = ParsedFilter {
+            globs: vec!["?.rs".into()],
+            ..Default::default()
+        };
+        let result = apply_filter(&paths, &f);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], PathBuf::from("a.rs"));
+    }
+
+    #[test]
+    fn build_glob_set_empty_returns_none() {
+        assert!(build_glob_set(&[]).is_none());
+    }
+
+    #[test]
+    fn build_glob_set_invalid_pattern_skipped() {
+        // An invalid glob should not cause a panic
+        let gs = build_glob_set(&["[invalid".into()]);
+        // Either None (if build fails) or a GlobSet that matches nothing — either is safe
+        if let Some(gs) = gs {
+            assert!(!gs.is_match(std::path::Path::new("anything.rs")));
+        }
     }
 }

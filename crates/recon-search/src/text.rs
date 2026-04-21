@@ -1,6 +1,7 @@
 //! Text search using ripgrep's grep-* crates, behind the [`TextSearcher`] trait.
 
 use crate::search_trait::{TextHit, TextQuery, TextSearcher};
+use crate::utils::regex_escape;
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
@@ -110,17 +111,6 @@ pub fn search_files(
 /// Search for a pattern in a single file.
 pub fn search_file(pattern: &str, path: &Path, is_regex: bool) -> Result<Vec<TextHit>, Error> {
     search_files(pattern, &[path.to_path_buf()], is_regex, 1000)
-}
-
-fn regex_escape(pattern: &str) -> String {
-    let mut escaped = String::with_capacity(pattern.len());
-    for c in pattern.chars() {
-        if "\\.*+?()[]{}|^$".contains(c) {
-            escaped.push('\\');
-        }
-        escaped.push(c);
-    }
-    escaped
 }
 
 #[cfg(test)]

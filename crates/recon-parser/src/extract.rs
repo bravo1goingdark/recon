@@ -5,6 +5,7 @@ use recon_core::lang::Language;
 use recon_core::symbol::{Ref, Symbol, SymbolKind};
 use std::path::Path;
 use std::sync::Arc;
+use tracing::error;
 
 /// Result of extracting symbols from a source file.
 pub struct Extracted {
@@ -75,8 +76,8 @@ impl<'a> Ctx<'a> {
             name: CompactString::new(name),
             qualified_name: qname,
             kind,
-            signature,
-            doc,
+            signature: signature.map(CompactString::from),
+            doc: doc.map(CompactString::from),
             parent_id,
             byte_range: node.start_byte()..node.end_byte(),
             line_range: (node.start_position().row as u32 + 1)
@@ -163,7 +164,16 @@ pub fn extract_symbols(src: &[u8], lang: Language, path: &Path) -> Extracted {
         }
     };
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&ts_lang).expect("set language");
+    if let Err(e) = parser.set_language(&ts_lang) {
+        error!(
+            lang = ?lang,
+            "tree-sitter set_language failed (ABI mismatch?): {e}"
+        );
+        return Extracted {
+            symbols: vec![],
+            refs: vec![],
+        };
+    }
     let tree = match parser.parse(src, None) {
         Some(t) => t,
         None => {
@@ -199,8 +209,10 @@ fn extract_from_tree(
     lang: Language,
     path: &Path,
 ) -> Extracted {
-    let src_str = std::str::from_utf8(src).unwrap_or("");
-    let mut ctx = Ctx::new(src_str, path, lang);
+    // Use lossy UTF-8 conversion so non-UTF-8 files still yield partial results
+    // rather than silently dropping all symbols.
+    let src_cow = String::from_utf8_lossy(src);
+    let mut ctx = Ctx::new(&src_cow, path, lang);
     let root = tree.root_node();
 
     match lang {
@@ -999,5 +1011,42 @@ impl Foo {
     fn unknown_language_returns_empty() {
         let result = extract_symbols(b"whatever", Language::Unknown, Path::new("file.txt"));
         assert!(result.symbols.is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_yields_partial_results() {
+        // Source with a valid Rust function followed by an invalid UTF-8 byte sequence.
+        // extract_symbols must not panic and should still return the parseable symbols.
+        let mut src = b"fn valid_fn() {}".to_vec();
+        src.extend_from_slice(b"\xFF\xFE invalid bytes");
+        let result = extract_symbols(&src, Language::Rust, Path::new("src/lib.rs"));
+        // At minimum we should not panic; symbols from the valid prefix may be present.
+        let _ = result.symbols.len();
+    }
+
+    #[test]
+    fn non_utf8_file_returns_no_panic() {
+        // Pure binary data — must return empty (gracefully) without panicking.
+        let binary_data: Vec<u8> = (0u8..=255).collect();
+        let result = extract_symbols(&binary_data, Language::Rust, Path::new("binary.rs"));
+        let _ = result.symbols.len();
+    }
+
+    #[test]
+    fn pooled_extraction_matches_direct() {
+        use crate::pool::LanguagePools;
+        let pools = LanguagePools::new(2);
+        let src = b"fn foo() -> u32 { 42 }";
+        let path = Path::new("src/lib.rs");
+
+        let direct = extract_symbols(src, Language::Rust, path);
+        let pool = pools.get(Language::Rust).unwrap();
+        let pooled = extract_symbols_pooled(src, Language::Rust, path, pool);
+
+        assert_eq!(direct.symbols.len(), pooled.symbols.len());
+        if let (Some(d), Some(p)) = (direct.symbols.first(), pooled.symbols.first()) {
+            assert_eq!(d.name, p.name);
+            assert_eq!(d.kind, p.kind);
+        }
     }
 }

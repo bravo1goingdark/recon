@@ -5,6 +5,7 @@
 //! a thin `FffMatcher` newtype that wraps `grep_regex::RegexMatcher`.
 
 use crate::search_trait::{TextHit, TextQuery, TextSearcher};
+use crate::utils::regex_escape;
 use grep_regex::RegexMatcher;
 use recon_core::error::Error;
 use std::path::PathBuf;
@@ -87,10 +88,9 @@ impl<'a> fff_grep::Sink for CollectSink<'a> {
         if self.hits.len() >= self.max {
             return Ok(false);
         }
-        let line_text = std::str::from_utf8(mat.bytes())
-            .unwrap_or("")
-            .trim_end()
-            .to_string();
+        // Use lossy decoding so non-UTF-8 files still produce visible hit lines
+        // rather than silently empty strings.
+        let line_text = String::from_utf8_lossy(mat.bytes()).trim_end().to_string();
         self.hits.push(TextHit {
             path: self.path.to_path_buf(),
             line: mat.line_number().unwrap_or(0) as u32,
@@ -138,17 +138,6 @@ fn build_matcher(pattern: &str, is_regex: bool) -> Result<FffMatcher, Error> {
     RegexMatcher::new(&pat)
         .map(FffMatcher)
         .map_err(|e| Error::Search(format!("invalid pattern: {e}")))
-}
-
-fn regex_escape(pattern: &str) -> String {
-    let mut escaped = String::with_capacity(pattern.len());
-    for c in pattern.chars() {
-        if "\\.*+?()[]{}|^$".contains(c) {
-            escaped.push('\\');
-        }
-        escaped.push(c);
-    }
-    escaped
 }
 
 // ── TextSearcher impl ──────────────────────────────────────────────────────────

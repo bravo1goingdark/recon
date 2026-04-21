@@ -46,17 +46,25 @@ const PEM_MARKERS: &[&str] = &[
 ];
 
 /// Aho-Corasick automaton for fast pre-screening of all secret patterns + PEM markers.
-/// Built once, reused across all calls. If no pattern matches, we skip the full scan entirely.
-fn secret_scanner() -> &'static aho_corasick::AhoCorasick {
-    static AC: OnceLock<aho_corasick::AhoCorasick> = OnceLock::new();
+/// Built once, reused across all calls. Returns `None` if construction fails (logged as error).
+/// If no pattern matches, we skip the full scan entirely.
+fn secret_scanner() -> Option<&'static aho_corasick::AhoCorasick> {
+    static AC: OnceLock<Option<aho_corasick::AhoCorasick>> = OnceLock::new();
     AC.get_or_init(|| {
         let mut patterns: Vec<&str> = Vec::with_capacity(PEM_MARKERS.len() + SECRET_PATTERNS.len());
         patterns.extend(PEM_MARKERS.iter());
         for &(_label, prefix, _min_len) in SECRET_PATTERNS {
             patterns.push(prefix);
         }
-        aho_corasick::AhoCorasick::new(patterns).expect("valid patterns")
+        match aho_corasick::AhoCorasick::new(patterns) {
+            Ok(ac) => Some(ac),
+            Err(e) => {
+                tracing::error!("failed to build secret scanner automaton: {e}");
+                None
+            }
+        }
     })
+    .as_ref()
 }
 
 /// Check if a path should be blocked from being served.
@@ -92,13 +100,17 @@ pub fn is_blocked_path(path: &Path) -> bool {
 ///
 /// Uses Aho-Corasick for O(n) fast-path pre-screening: if no secret
 /// prefix is found, returns None immediately without cloning the string.
+/// Falls back to direct pattern scanning if the automaton is unavailable.
 pub fn redact_secrets(text: &str) -> Option<String> {
-    // Fast-path: single-pass pre-screen — if no pattern prefix found, skip entirely
-    if !secret_scanner().is_match(text) {
-        return None;
+    // Fast-path: single-pass pre-screen — if no pattern prefix found, skip entirely.
+    // If the scanner failed to build, skip the fast path and always run the slow scan.
+    if let Some(ac) = secret_scanner() {
+        if !ac.is_match(text) {
+            return None;
+        }
     }
 
-    // Slow path: AC found a prefix — verify with full pattern matching.
+    // Slow path: AC found a prefix (or scanner unavailable) — verify with full pattern matching.
     // String is cloned here; if no real match is found, we return None (no cost to caller).
     let mut redacted = String::from(text);
     let mut changed = false;
@@ -221,5 +233,48 @@ mod tests {
         // Regression: ensure .env.xxx patterns work without format!()
         assert!(is_blocked_path(Path::new(".env.staging")));
         assert!(!is_blocked_path(Path::new(".envrc")));
+    }
+
+    #[test]
+    fn scanner_is_available() {
+        // Ensure the AhoCorasick automaton builds successfully at runtime.
+        assert!(
+            secret_scanner().is_some(),
+            "secret scanner must build from static patterns"
+        );
+    }
+
+    #[test]
+    fn redacts_anthropic_key() {
+        let text = "key = sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let result = redact_secrets(text);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains(REDACTED));
+    }
+
+    #[test]
+    fn redacts_slack_token() {
+        let text = "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxx";
+        let result = redact_secrets(text);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains(REDACTED));
+    }
+
+    #[test]
+    fn no_false_positive_on_sk_prefix() {
+        // "sk-" shorter than min_len=40 should not be redacted
+        let text = "color: sk-blue";
+        let result = redact_secrets(text);
+        assert!(result.is_none(), "short sk- token must not be redacted");
+    }
+
+    #[test]
+    fn multiple_secrets_in_one_string() {
+        let text = "AKIAIOSFODNN7EXAMPLE and ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx1234";
+        let result = redact_secrets(text);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(!r.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!r.contains("ghp_xxxx"));
     }
 }

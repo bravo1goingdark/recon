@@ -35,7 +35,10 @@ impl EmbedService {
     ///
     /// The worker exits when all `EmbedService` handles are dropped (the
     /// channel closes automatically).
-    pub fn spawn(mut embedder: Embedder) -> Self {
+    ///
+    /// # Errors
+    /// Returns `Err` if the OS refuses to spawn the thread (e.g., resource limits).
+    pub fn spawn(mut embedder: Embedder) -> std::io::Result<Self> {
         let (tx, rx): (Sender<Request>, Receiver<Request>) = unbounded();
         std::thread::Builder::new()
             .name("recon-embed-worker".into())
@@ -44,9 +47,8 @@ impl EmbedService {
                     let result = embedder.embed_batch(&req.texts);
                     let _ = req.reply.send(result);
                 }
-            })
-            .expect("failed to spawn embed worker thread");
-        Self { tx }
+            })?;
+        Ok(Self { tx })
     }
 
     /// Embed a batch of texts. Blocks the calling thread until the worker

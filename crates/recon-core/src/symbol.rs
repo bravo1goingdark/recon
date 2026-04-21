@@ -83,9 +83,9 @@ pub struct Symbol {
     /// Kind of symbol.
     pub kind: SymbolKind,
     /// Signature line (e.g. `pub fn new(x: i32) -> Self`).
-    pub signature: Option<String>,
+    pub signature: Option<CompactString>,
     /// Leading doc comment.
-    pub doc: Option<String>,
+    pub doc: Option<CompactString>,
     /// Parent symbol ID (e.g. the struct for a method).
     pub parent_id: Option<u64>,
     /// Byte range in the source file.
@@ -149,7 +149,7 @@ mod tests {
             name: CompactString::new("main"),
             qualified_name: CompactString::new("crate::main"),
             kind: SymbolKind::Function,
-            signature: Some("fn main()".into()),
+            signature: Some(CompactString::new("fn main()")),
             doc: None,
             parent_id: None,
             byte_range: 0..50,
@@ -161,5 +161,49 @@ mod tests {
         let back: Symbol = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name.as_str(), "main");
         assert_eq!(back.kind, SymbolKind::Function);
+        assert_eq!(back.signature.as_deref(), Some("fn main()"));
+    }
+
+    #[test]
+    fn symbol_optional_fields_none() {
+        let sym = Symbol {
+            id: 2,
+            path: Arc::new(PathBuf::from("src/lib.rs")),
+            name: CompactString::new("helper"),
+            qualified_name: CompactString::new("crate::helper"),
+            kind: SymbolKind::Function,
+            signature: None,
+            doc: None,
+            parent_id: None,
+            byte_range: 0..10,
+            line_range: 1..=1,
+            body_hash: [0u8; 32],
+            lang: Language::Rust,
+        };
+        let json = serde_json::to_string(&sym).unwrap();
+        let back: Symbol = serde_json::from_str(&json).unwrap();
+        assert!(back.signature.is_none());
+        assert!(back.doc.is_none());
+    }
+
+    #[test]
+    fn symbol_doc_roundtrip() {
+        let sym = Symbol {
+            id: 3,
+            path: Arc::new(PathBuf::from("src/lib.rs")),
+            name: CompactString::new("documented"),
+            qualified_name: CompactString::new("crate::documented"),
+            kind: SymbolKind::Function,
+            signature: Some(CompactString::new("fn documented() -> u32")),
+            doc: Some(CompactString::new("Returns a number.")),
+            parent_id: None,
+            byte_range: 0..30,
+            line_range: 1..=3,
+            body_hash: [0u8; 32],
+            lang: Language::Rust,
+        };
+        let json = serde_json::to_string(&sym).unwrap();
+        let back: Symbol = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.doc.as_deref(), Some("Returns a number."));
     }
 }

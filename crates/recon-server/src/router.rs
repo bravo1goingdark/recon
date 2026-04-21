@@ -440,7 +440,7 @@ impl RepoRouter {
             }
         }
 
-        Ok(ReconServer::new(repo_path.to_path_buf(), store, tantivy))
+        Ok(ReconServer::new(repo_path.to_path_buf(), store, tantivy)?)
     }
 }
 

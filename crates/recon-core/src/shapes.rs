@@ -1,7 +1,9 @@
 //! The five canonical output shapes for MCP tool responses.
 
 use crate::symbol::SymbolKind;
+use compact_str::CompactString;
 use serde::Serialize;
+use smallvec::SmallVec;
 use std::path::PathBuf;
 
 /// Every tool returns exactly one of these shapes.
@@ -26,7 +28,7 @@ pub struct OutlineView {
     /// File path.
     pub path: PathBuf,
     /// Top-level symbol entries.
-    pub entries: Vec<OutlineEntry>,
+    pub entries: SmallVec<[OutlineEntry; 4]>,
 }
 
 /// A single entry in an outline.
@@ -35,7 +37,7 @@ pub struct OutlineEntry {
     /// Symbol kind.
     pub kind: SymbolKind,
     /// Symbol name.
-    pub name: String,
+    pub name: CompactString,
     /// Line number (1-indexed).
     pub line: u32,
     /// Nested child entries.
@@ -88,16 +90,16 @@ pub struct RefEntry {
     /// Column number (0-indexed), if known.
     pub col: Option<u32>,
     /// Source line snippet.
-    pub snippet: String,
+    pub snippet: CompactString,
     /// Name of the enclosing symbol, if resolved.
-    pub enclosing_symbol: Option<String>,
+    pub enclosing_symbol: Option<CompactString>,
 }
 
 /// Reference digest — count + top-k sites.
 #[derive(Debug, Clone, Serialize)]
 pub struct RefDigestView {
     /// Symbol name being queried.
-    pub symbol: String,
+    pub symbol: CompactString,
     /// Total number of references found.
     pub total: usize,
     /// Top-k reference entries by weight.
@@ -141,12 +143,13 @@ pub enum DiagSeverity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
 
     #[test]
     fn outline_serde() {
         let view = ToolOutput::Outline(OutlineView {
             path: PathBuf::from("src/lib.rs"),
-            entries: vec![OutlineEntry {
+            entries: smallvec![OutlineEntry {
                 kind: SymbolKind::Function,
                 name: "main".into(),
                 line: 1,
@@ -156,6 +159,36 @@ mod tests {
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"shape\":\"Outline\""));
         assert!(json.contains("\"main\""));
+    }
+
+    #[test]
+    fn outline_empty_entries_serde() {
+        let view = ToolOutput::Outline(OutlineView {
+            path: PathBuf::from("src/empty.rs"),
+            entries: SmallVec::new(),
+        });
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"entries\":[]"));
+    }
+
+    #[test]
+    fn outline_nested_children() {
+        let child = OutlineEntry {
+            kind: SymbolKind::Method,
+            name: "new".into(),
+            line: 5,
+            children: vec![],
+        };
+        let parent = OutlineEntry {
+            kind: SymbolKind::Struct,
+            name: "Foo".into(),
+            line: 1,
+            children: vec![child],
+        };
+        let json = serde_json::to_string(&parent).unwrap();
+        assert!(json.contains("\"Foo\""));
+        assert!(json.contains("\"new\""));
+        assert!(json.contains("\"method\""));
     }
 
     #[test]
@@ -184,5 +217,30 @@ mod tests {
         });
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"total\":42"));
+    }
+
+    #[test]
+    fn ref_entry_no_enclosing_symbol() {
+        let entry = RefEntry {
+            path: PathBuf::from("src/lib.rs"),
+            line: 3,
+            col: None,
+            snippet: "foo()".into(),
+            enclosing_symbol: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"enclosing_symbol\":null"));
+    }
+
+    #[test]
+    fn compact_string_inline_storage() {
+        // Names up to 23 bytes are stored inline without heap allocation.
+        let entry = OutlineEntry {
+            kind: SymbolKind::Function,
+            name: "short_name".into(),
+            line: 1,
+            children: vec![],
+        };
+        assert_eq!(entry.name.as_str(), "short_name");
     }
 }

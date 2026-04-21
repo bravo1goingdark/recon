@@ -403,7 +403,7 @@ mod tests {
             name: CompactString::new(name),
             qualified_name: CompactString::new(qname),
             kind: SymbolKind::Function,
-            signature: Some(format!("fn {name}()")),
+            signature: Some(format!("fn {name}()").into()),
             doc: None,
             parent_id: None,
             byte_range: 0..100,

@@ -577,7 +577,9 @@ impl Store {
     ///
     /// Returns `(path, symbol_count, top_symbols)` tuples. Much faster than
     /// calling `symbols_for_path` per file.
-    pub fn file_symbol_summaries(&self) -> Result<Vec<(PathBuf, usize, Vec<String>)>, Error> {
+    pub fn file_symbol_summaries(
+        &self,
+    ) -> Result<Vec<(PathBuf, usize, Vec<CompactString>)>, Error> {
         let mut stmt = self
             .conn
             .prepare_cached(
@@ -601,12 +603,12 @@ impl Store {
                 let path: String = row.get(0)?;
                 let count: usize = row.get::<_, i64>(1)? as usize;
                 let top_raw: Option<String> = row.get(2)?;
-                let top: Vec<String> = top_raw
+                let top: Vec<CompactString> = top_raw
                     .unwrap_or_default()
                     .split('|')
                     .filter(|s| !s.is_empty())
                     .take(3)
-                    .map(String::from)
+                    .map(CompactString::from)
                     .collect();
                 Ok((PathBuf::from(path), count, top))
             })
@@ -808,8 +810,14 @@ pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
                 .map_err(|e| Error::Storage(e.to_string()))?,
         ),
         kind,
-        signature: row.get(5).map_err(|e| Error::Storage(e.to_string()))?,
-        doc: row.get(6).map_err(|e| Error::Storage(e.to_string()))?,
+        signature: row
+            .get::<_, Option<String>>(5)
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .map(CompactString::from),
+        doc: row
+            .get::<_, Option<String>>(6)
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .map(CompactString::from),
         parent_id: row
             .get::<_, Option<i64>>(7)
             .map_err(|e| Error::Storage(e.to_string()))?
@@ -833,8 +841,8 @@ mod tests {
             name: CompactString::new(name),
             qualified_name: CompactString::new(qname),
             kind,
-            signature: Some(format!("fn {name}()")),
-            doc: Some(format!("Docs for {name}")),
+            signature: Some(format!("fn {name}()").into()),
+            doc: Some(format!("Docs for {name}").into()),
             parent_id: None,
             byte_range: 0..100,
             line_range: 1..=10,
@@ -1097,5 +1105,55 @@ mod tests {
 
         let go_files = store.file_paths_by_lang("Go").unwrap();
         assert!(go_files.is_empty());
+    }
+
+    #[test]
+    fn file_symbol_summaries_compact_string() {
+        let store = Store::open_memory().unwrap();
+        store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
+
+        let foo = make_symbol("foo", "foo", SymbolKind::Function);
+        let bar = make_symbol("Bar", "Bar", SymbolKind::Struct);
+        store.upsert_symbol(&foo).unwrap();
+        store.upsert_symbol(&bar).unwrap();
+
+        let summaries = store.file_symbol_summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        let (path, count, top_syms) = &summaries[0];
+        assert_eq!(path.to_string_lossy(), "src/lib.rs");
+        assert_eq!(*count, 2);
+        // top_syms must be CompactString (compile-time check) and contain kind + name
+        assert!(top_syms
+            .iter()
+            .any(|s| s.contains("foo") || s.contains("Bar")));
+    }
+
+    #[test]
+    fn file_symbol_summaries_empty_file() {
+        let store = Store::open_memory().unwrap();
+        store.upsert_file(&make_file_meta("src/empty.rs")).unwrap();
+        let summaries = store.file_symbol_summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        let (_, count, top_syms) = &summaries[0];
+        assert_eq!(*count, 0);
+        assert!(top_syms.is_empty());
+    }
+
+    #[test]
+    fn row_to_symbol_compact_string_fields() {
+        let store = Store::open_memory().unwrap();
+        store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
+
+        let sym = make_symbol("check", "mod::check", SymbolKind::Function);
+        store.upsert_symbol(&sym).unwrap();
+
+        let found = store.find_symbols_exact("check", 1).unwrap();
+        assert_eq!(found.len(), 1);
+        // Verify signature and doc round-trip as CompactString
+        assert!(found[0]
+            .signature
+            .as_deref()
+            .is_some_and(|s| s.contains("check")));
+        assert!(found[0].doc.as_deref().is_some_and(|d| !d.is_empty()));
     }
 }

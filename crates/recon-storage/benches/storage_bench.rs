@@ -13,7 +13,7 @@ fn make_symbol(i: u64) -> Symbol {
         name: CompactString::new(format!("sym_{i}")),
         qualified_name: CompactString::new(format!("crate::mod::sym_{i}")),
         kind: SymbolKind::Function,
-        signature: Some(format!("fn sym_{i}()")),
+        signature: Some(format!("fn sym_{i}()").into()),
         doc: None,
         parent_id: None,
         byte_range: 0..100,

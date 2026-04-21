@@ -3,6 +3,7 @@
 use crossbeam_queue::ArrayQueue;
 use recon_core::lang::Language;
 use std::collections::HashMap;
+use tracing::error;
 use tree_sitter::{Language as TsLanguage, Parser};
 
 /// A pool of tree-sitter parsers for one language.
@@ -21,11 +22,16 @@ impl ParserPool {
     }
 
     /// Borrow a parser, run the closure, return the parser.
+    ///
+    /// If a fresh parser cannot have its language set (ABI mismatch), an error
+    /// is logged and the closure still runs — `parser.parse()` will return `None`,
+    /// which callers already handle as "no tree available".
     pub fn with<R>(&self, f: impl FnOnce(&mut Parser) -> R) -> R {
         let mut parser = self.pool.pop().unwrap_or_else(|| {
             let mut p = Parser::new();
-            p.set_language(&self.lang)
-                .expect("failed to set language on parser");
+            if let Err(e) = p.set_language(&self.lang) {
+                error!("failed to set language on pooled parser (ABI mismatch?): {e}");
+            }
             p
         });
         let result = f(&mut parser);

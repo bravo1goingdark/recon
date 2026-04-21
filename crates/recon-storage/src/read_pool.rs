@@ -7,6 +7,7 @@
 //! while the write connection is committing.
 
 use crate::read_fns;
+use compact_str::CompactString;
 use crossbeam_queue::ArrayQueue;
 use recon_core::error::Error;
 use recon_core::symbol::{Ref, Symbol};
@@ -125,7 +126,9 @@ impl ReadPool {
     }
 
     /// Get symbol counts and top-3 names per file.
-    pub fn file_symbol_summaries(&self) -> Result<Vec<(PathBuf, usize, Vec<String>)>, Error> {
+    pub fn file_symbol_summaries(
+        &self,
+    ) -> Result<Vec<(PathBuf, usize, Vec<CompactString>)>, Error> {
         self.with(read_fns::file_symbol_summaries)
     }
 

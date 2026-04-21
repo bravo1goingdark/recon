@@ -325,7 +325,10 @@ fn init_server(repo: PathBuf) -> Result<(ReconServer, PathBuf)> {
     let tantivy =
         TantivyBackend::open(&store_dir.join("tantivy")).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    Ok((ReconServer::new(repo.clone(), store, tantivy), repo))
+    Ok((
+        ReconServer::new(repo.clone(), store, tantivy).map_err(|e| anyhow::anyhow!("{e}"))?,
+        repo,
+    ))
 }
 
 /// Open an existing index for read-only CLI queries (no re-index on startup).
@@ -598,7 +601,10 @@ async fn main() -> Result<()> {
                 .init();
 
             // Try to migrate a per-repo license before validating.
-            let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.clone());
+            let canon_repo = repo.canonicalize().unwrap_or_else(|e| {
+                tracing::debug!("canonicalize failed for {}: {e}", repo.display());
+                repo.clone()
+            });
             maybe_migrate_license(&canon_repo);
 
             // Validate license — limits determine what we'll allow to index.

@@ -9,3 +9,4 @@ pub mod search_trait;
 pub mod tantivy_backend;
 pub mod text;
 pub mod tokens;
+pub(crate) mod utils;

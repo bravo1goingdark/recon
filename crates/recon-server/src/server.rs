@@ -19,6 +19,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,28 +61,35 @@ impl ReconServer {
     /// Creates a single Tantivy `IndexWriter` that is shared between initial
     /// indexing, the file watcher, and the `code_reindex` tool. This prevents
     /// the `LockBusy` error from competing writers.
-    pub fn new(repo_root: PathBuf, store: Store, tantivy: TantivyBackend) -> Self {
+    ///
+    /// # Errors
+    /// Returns `Err` if the in-memory read pool cannot be created (should not
+    /// happen in practice for in-memory stores, but propagated rather than panicking).
+    pub fn new(
+        repo_root: PathBuf,
+        store: Store,
+        tantivy: TantivyBackend,
+    ) -> Result<Self, recon_core::error::Error> {
         let writer = tantivy.writer(50_000_000).ok();
         if writer.is_none() {
             warn!("tantivy writer creation failed at startup");
         }
         // Create a lock-free read pool from the same DB file (4 connections).
-        // Falls back to None for in-memory stores (tests).
-        let read_pool = store
-            .db_path()
-            .and_then(|p| ReadPool::new(p, 4).ok())
-            .map(Arc::new);
-        Self {
+        // Falls back to an in-memory pool for in-memory stores (tests).
+        let read_pool = match store.db_path().and_then(|p| ReadPool::new(p, 4).ok()) {
+            Some(pool) => Arc::new(pool),
+            None => {
+                warn!("no on-disk DB path; creating in-memory read pool (tests only)");
+                Arc::new(
+                    ReadPool::new(std::path::Path::new(":memory:"), 1)
+                        .map_err(|e| recon_core::error::Error::Storage(e.to_string()))?,
+                )
+            }
+        };
+        Ok(Self {
             tool_router: Self::tool_router(),
             write_store: Arc::new(Mutex::new(store)),
-            read_pool: read_pool.unwrap_or_else(|| {
-                // In-memory fallback: no ReadPool, tools will use write_store
-                // This only happens in tests; production always has a file path.
-                warn!("no ReadPool (in-memory store); reads will use write lock");
-                Arc::new(
-                    ReadPool::new(std::path::Path::new(":memory:"), 1).expect("memory read pool"),
-                )
-            }),
+            read_pool,
             tantivy: Arc::new(tantivy),
             tantivy_writer: Arc::new(Mutex::new(writer)),
             text_searcher: Arc::new(FffBackend::new()),
@@ -92,7 +100,7 @@ impl ReconServer {
             vec_read_pool: Arc::new(Mutex::new(None)),
             #[cfg(feature = "embed")]
             vec_writer: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     /// Initialize the embedding engine (model download on first run).
@@ -107,7 +115,10 @@ impl ReconServer {
         let vec_dir = self.repo_root.join(".recon").join("vectors");
         let embedder = recon_embed::Embedder::new()
             .map_err(|e| recon_core::error::Error::Search(format!("embed init: {e}")))?;
-        let svc = Arc::new(recon_embed::EmbedService::spawn(embedder));
+        let svc =
+            Arc::new(recon_embed::EmbedService::spawn(embedder).map_err(|e| {
+                recon_core::error::Error::Search(format!("embed thread spawn: {e}"))
+            })?);
         let vs = recon_embed::VectorStore::open(&vec_dir)
             .map_err(|e| recon_core::error::Error::Search(format!("vector store open: {e}")))?;
         let pool = Arc::new(
@@ -303,8 +314,13 @@ impl ReconServer {
                             }
                             let mut done = 0usize;
                             for (rel_path, syms) in &by_file {
-                                let file_bytes =
-                                    std::fs::read(repo_root.join(rel_path)).unwrap_or_default();
+                                let file_bytes = match std::fs::read(repo_root.join(rel_path)) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        warn!(?rel_path, "embed catch-up: cannot read file: {e}");
+                                        continue;
+                                    }
+                                };
                                 for chunk in syms.chunks(EMBED_BATCH) {
                                     let texts: Vec<String> = chunk
                                         .iter()
@@ -590,7 +606,7 @@ impl ReconServer {
             }
         }
 
-        let mut entries = Vec::new();
+        let mut entries = SmallVec::new();
         for sym in &symbols {
             if sym.parent_id.is_none() {
                 let children = children_map
@@ -599,7 +615,7 @@ impl ReconServer {
                         kids.iter()
                             .map(|c| OutlineEntry {
                                 kind: c.kind,
-                                name: c.name.to_string(),
+                                name: c.name.clone(),
                                 line: *c.line_range.start(),
                                 children: vec![],
                             })
@@ -608,7 +624,7 @@ impl ReconServer {
                     .unwrap_or_default();
                 entries.push(OutlineEntry {
                     kind: sym.kind,
-                    name: sym.name.to_string(),
+                    name: sym.name.clone(),
                     line: *sym.line_range.start(),
                     children,
                 });
@@ -726,7 +742,7 @@ impl ReconServer {
                 path: (*r.src_path).clone(),
                 line: 0,
                 col: None,
-                snippet: r.ident.to_string(),
+                snippet: r.ident.clone(),
                 enclosing_symbol: None,
             })
             .collect();
@@ -735,8 +751,8 @@ impl ReconServer {
             path: rel_path,
             qualified_name: sym.qualified_name.to_string(),
             kind: sym.kind,
-            signature: sym.signature.clone(),
-            doc: sym.doc.clone(),
+            signature: sym.signature.as_deref().map(str::to_owned),
+            doc: sym.doc.as_deref().map(str::to_owned),
             body,
             line_range: (*sym.line_range.start(), *sym.line_range.end()),
             parent_chain: vec![],
@@ -830,13 +846,13 @@ impl ReconServer {
                 path: (*r.src_path).clone(),
                 line: 0,
                 col: None,
-                snippet: r.ident.to_string(),
+                snippet: r.ident.clone(),
                 enclosing_symbol: None,
             })
             .collect();
 
         let view = ToolOutput::ReferenceDigest(RefDigestView {
-            symbol: params.0.symbol.clone(),
+            symbol: params.0.symbol.as_str().into(),
             total: refs.len(),
             top_k,
         });
@@ -859,9 +875,15 @@ impl ReconServer {
             let pool = self.vec_read_pool.lock().clone();
             match (svc, pool) {
                 (Some(svc), Some(pool)) => {
-                    let query_vec = match svc.embed_one(&params.0.query) {
-                        Ok(v) => v,
-                        Err(e) => return format!("embed error: {e}"),
+                    // embed_one blocks the caller waiting on the ONNX worker thread;
+                    // use spawn_blocking so we don't stall the tokio executor.
+                    let query = params.0.query.clone();
+                    let query_vec = match tokio::task::spawn_blocking(move || svc.embed_one(&query))
+                        .await
+                    {
+                        Ok(Ok(v)) => v,
+                        Ok(Err(e)) => return format!("embed error: {e}"),
+                        Err(e) => return format!("embed task join error: {e}"),
                     };
                     let results = match pool.search(query_vec, None, 20) {
                         Ok(r) => r,
@@ -1328,5 +1350,63 @@ impl ServerHandler for ReconServer {
              (prefer code_read_symbol for that)."
                 .to_string(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use recon_search::tantivy_backend::TantivyBackend;
+    use recon_storage::store::Store;
+
+    fn make_test_server() -> ReconServer {
+        let store = Store::open_memory().unwrap();
+        let tantivy = TantivyBackend::open_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        ReconServer::new(tmp.path().to_path_buf(), store, tantivy).unwrap()
+    }
+
+    #[test]
+    fn server_new_does_not_panic() {
+        // Regression: Server::new must never panic; errors should propagate.
+        let _server = make_test_server();
+    }
+
+    #[test]
+    fn server_new_returns_result() {
+        // Verify the Result-returning API: Ok on a valid in-memory setup.
+        let store = Store::open_memory().unwrap();
+        let tantivy = TantivyBackend::open_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let result = ReconServer::new(tmp.path().to_path_buf(), store, tantivy);
+        assert!(
+            result.is_ok(),
+            "Server::new should succeed for a valid setup"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_outline_empty_repo() {
+        let server = make_test_server();
+        // File not indexed — must return an error message, not panic.
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::OutlineParams {
+            path: "nonexistent.rs".into(),
+        });
+        let result = server.code_outline(params).await;
+        assert!(!result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn code_repo_map_empty_returns_string() {
+        let server = make_test_server();
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::RepoMapParams {
+            focus_files: None,
+            token_budget: 500,
+        });
+        let result = server.code_repo_map(params).await;
+        // Empty repo map is valid; must not panic.
+        assert!(!result.is_empty());
     }
 }

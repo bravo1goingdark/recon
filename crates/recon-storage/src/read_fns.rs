@@ -186,7 +186,7 @@ pub fn max_indexed_at(conn: &Connection) -> Result<i64, Error> {
 /// Get symbol counts and top-3 names per file in a single query.
 pub fn file_symbol_summaries(
     conn: &Connection,
-) -> Result<Vec<(PathBuf, usize, Vec<String>)>, Error> {
+) -> Result<Vec<(PathBuf, usize, Vec<CompactString>)>, Error> {
     let mut stmt = conn
         .prepare_cached(
             "SELECT f.path,
@@ -209,12 +209,12 @@ pub fn file_symbol_summaries(
             let path: String = row.get(0)?;
             let count: usize = row.get::<_, i64>(1)? as usize;
             let top_raw: Option<String> = row.get(2)?;
-            let top: Vec<String> = top_raw
+            let top: Vec<CompactString> = top_raw
                 .unwrap_or_default()
                 .split('|')
                 .filter(|s| !s.is_empty())
                 .take(3)
-                .map(String::from)
+                .map(CompactString::from)
                 .collect();
             Ok((PathBuf::from(path), count, top))
         })

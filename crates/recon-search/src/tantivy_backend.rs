@@ -3,6 +3,7 @@
 //! Indexes symbols only (not file bodies). Uses a custom tokenizer that splits
 //! camelCase and snake_case identifiers into sub-tokens for better recall.
 
+use compact_str::CompactString;
 use recon_core::error::Error;
 use recon_core::symbol::Symbol;
 use std::path::Path;
@@ -19,15 +20,15 @@ pub struct StructuredHit {
     /// Symbol ID from the index.
     pub symbol_id: u64,
     /// File path.
-    pub path: String,
+    pub path: CompactString,
     /// Symbol name.
-    pub name: String,
+    pub name: CompactString,
     /// Fully qualified symbol name.
-    pub qualified_name: String,
+    pub qualified_name: CompactString,
     /// Symbol kind (fn, struct, etc).
-    pub kind: String,
+    pub kind: CompactString,
     /// Symbol signature, if available.
-    pub signature: Option<String>,
+    pub signature: Option<CompactString>,
     /// BM25 relevance score.
     pub score: f32,
 }
@@ -278,26 +279,26 @@ impl TantivyBackend {
                 .get_first(self.fields.path)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
-                .to_string();
+                .into();
             let name = doc
                 .get_first(self.fields.name)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
-                .to_string();
+                .into();
             let qualified_name = doc
                 .get_first(self.fields.qualified_name)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
-                .to_string();
+                .into();
             let kind = doc
                 .get_first(self.fields.kind)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
-                .to_string();
+                .into();
             let signature = doc
                 .get_first(self.fields.signature)
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(CompactString::from);
 
             hits.push(StructuredHit {
                 symbol_id,
@@ -479,8 +480,8 @@ mod tests {
             name: CompactString::new(name),
             qualified_name: CompactString::new(qname),
             kind,
-            signature: Some(format!("fn {name}()")),
-            doc: Some(format!("Documentation for {name}")),
+            signature: Some(format!("fn {name}()").into()),
+            doc: Some(format!("Documentation for {name}").into()),
             parent_id: None,
             byte_range: 0..100,
             line_range: 1..=10,

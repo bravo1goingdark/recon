@@ -29,6 +29,7 @@ sha2 = { workspace = true }
 dirs = { workspace = true }
 ahash = { workspace = true }
 compact_str = { workspace = true }
+smallvec = { workspace = true }
 recon-embed = { workspace = true, optional = true }
 
 [dev-dependencies]
