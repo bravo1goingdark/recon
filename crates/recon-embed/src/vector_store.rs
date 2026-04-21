@@ -1,20 +1,17 @@
-//! LanceDB-backed vector store with scalar filtering.
+//! Write-only sqlite-vec vector store.
 //!
-//! Stores symbol embeddings keyed by `body_hash` for content-addressable
-//! caching. Supports vector similarity search with optional language filter.
+//! [`VectorStore`] owns the single write connection to `embed.db` and is
+//! moved into the file-watcher thread after initialisation — no locks needed.
+//! Read operations (search, hash lookup) live in [`crate::VecReadPool`].
+
+use std::path::Path;
+
+use rusqlite::{params, Connection};
 
 use crate::error::EmbedError;
-use arrow_array::{
-    ArrayRef, FixedSizeListArray, Float32Array, LargeBinaryArray, RecordBatch, StringArray,
-    UInt64Array,
-};
-use arrow_schema::{DataType, Field};
-use lancedb::query::{ExecutableQuery, QueryBase};
-use std::path::Path;
-use std::sync::Arc;
 
-const TABLE_NAME: &str = "symbol_embeddings";
-const VECTOR_DIM: i32 = 768;
+/// Dimension of the jina-v2-base-code embedding model.
+pub(crate) const VECTOR_DIM: usize = 768;
 
 /// An entry to upsert into the vector store.
 pub struct EmbedEntry {
@@ -30,190 +27,190 @@ pub struct EmbedEntry {
     pub lang: String,
 }
 
-/// LanceDB-backed vector store.
+/// Write-only sqlite-vec vector store — owns the single writer connection.
+///
+/// Moved into the watcher thread after [`crate::init_embed`]; never shared,
+/// so no locking is required.
 pub struct VectorStore {
-    db: lancedb::Connection,
-}
-
-fn build_batch(entries: &[EmbedEntry]) -> Result<RecordBatch, EmbedError> {
-    let ids: Vec<u64> = entries.iter().map(|e| e.id).collect();
-    let names: Vec<&str> = entries.iter().map(|e| e.qualified_name.as_str()).collect();
-    let langs: Vec<&str> = entries.iter().map(|e| e.lang.as_str()).collect();
-
-    // Build FixedSizeList(Float32, 768) for the vector column
-    let flat: Vec<f32> = entries
-        .iter()
-        .flat_map(|e| e.vector.iter().copied())
-        .collect();
-    let values = Arc::new(Float32Array::from(flat)) as ArrayRef;
-    let list_field = Arc::new(Field::new("item", DataType::Float32, true));
-    let vectors = FixedSizeListArray::try_new(list_field, VECTOR_DIM, values, None)
-        .map_err(|e| EmbedError::Store(format!("arrow vector: {e}")))?;
-
-    let hashes = LargeBinaryArray::from_iter_values(entries.iter().map(|e| e.body_hash.as_slice()));
-
-    RecordBatch::try_from_iter(vec![
-        ("id", Arc::new(UInt64Array::from(ids)) as ArrayRef),
-        (
-            "qualified_name",
-            Arc::new(StringArray::from(names)) as ArrayRef,
-        ),
-        ("vector", Arc::new(vectors) as ArrayRef),
-        ("body_hash", Arc::new(hashes) as ArrayRef),
-        ("lang", Arc::new(StringArray::from(langs)) as ArrayRef),
-    ])
-    .map_err(|e| EmbedError::Store(format!("record batch: {e}")))
+    conn: Connection,
 }
 
 impl VectorStore {
     /// Open or create a vector store at the given directory.
-    pub async fn open(path: &Path) -> Result<Self, EmbedError> {
-        let db = lancedb::connect(path.to_string_lossy().as_ref())
-            .execute()
-            .await
-            .map_err(|e| EmbedError::Store(format!("open: {e}")))?;
-        Ok(Self { db })
+    ///
+    /// Registers sqlite-vec globally (idempotent), creates the schema, and
+    /// applies WAL pragmas for concurrent reader access.
+    pub fn open(path: &Path) -> Result<Self, EmbedError> {
+        register_sqlite_vec();
+        let db_path = path.join("embed.db");
+        let conn =
+            Connection::open(&db_path).map_err(|e| EmbedError::Store(format!("open: {e}")))?;
+        conn.execute_batch(&format!(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-32000;
+             PRAGMA mmap_size=268435456;
+             PRAGMA temp_store=MEMORY;
+             CREATE VIRTUAL TABLE IF NOT EXISTS symbol_embeddings
+                 USING vec0(embedding float[{VECTOR_DIM}]);
+             CREATE TABLE IF NOT EXISTS embed_meta (
+                 id             INTEGER PRIMARY KEY,
+                 qualified_name TEXT    NOT NULL,
+                 body_hash      BLOB    NOT NULL,
+                 lang           TEXT    NOT NULL
+             );"
+        ))
+        .map_err(|e| EmbedError::Store(format!("migrate: {e}")))?;
+        Ok(Self { conn })
     }
 
-    /// Upsert embedding entries. Creates the table on first call.
-    pub async fn upsert_embeddings(&self, entries: &[EmbedEntry]) -> Result<(), EmbedError> {
+    /// Upsert embedding entries in a single transaction.
+    ///
+    /// `INSERT OR REPLACE` gives true upsert semantics: re-indexing a symbol
+    /// replaces its previous vector and metadata.
+    pub fn upsert_embeddings(&self, entries: &[EmbedEntry]) -> Result<(), EmbedError> {
         if entries.is_empty() {
             return Ok(());
         }
-
-        let batch = build_batch(entries)?;
-
-        let tables = self
-            .db
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| EmbedError::Store(format!("list tables: {e}")))?;
-
-        if tables.iter().any(|t| t == TABLE_NAME) {
-            let table = self
-                .db
-                .open_table(TABLE_NAME)
-                .execute()
-                .await
-                .map_err(|e| EmbedError::Store(format!("open table: {e}")))?;
-            table
-                .add(batch)
-                .execute()
-                .await
-                .map_err(|e| EmbedError::Store(format!("add: {e}")))?;
-        } else {
-            self.db
-                .create_table(TABLE_NAME, batch)
-                .execute()
-                .await
-                .map_err(|e| EmbedError::Store(format!("create table: {e}")))?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| EmbedError::Store(format!("begin tx: {e}")))?;
+        for entry in entries {
+            let vec_bytes = f32_to_le_bytes(&entry.vector);
+            tx.execute(
+                "INSERT OR REPLACE INTO symbol_embeddings(rowid, embedding) VALUES (?1, ?2)",
+                params![entry.id as i64, vec_bytes],
+            )
+            .map_err(|e| EmbedError::Store(format!("insert vec: {e}")))?;
+            tx.execute(
+                "INSERT OR REPLACE INTO embed_meta(id, qualified_name, body_hash, lang) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    entry.id as i64,
+                    &entry.qualified_name,
+                    &entry.body_hash,
+                    &entry.lang
+                ],
+            )
+            .map_err(|e| EmbedError::Store(format!("insert meta: {e}")))?;
         }
-
+        tx.commit()
+            .map_err(|e| EmbedError::Store(format!("commit: {e}")))?;
         Ok(())
     }
+}
 
-    /// Vector similarity search with optional language filter.
-    ///
-    /// Returns `(symbol_id, distance)` pairs sorted by relevance (lower distance = closer).
-    pub async fn search(
-        &self,
-        query_vector: Vec<f32>,
-        lang_filter: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(u64, f32)>, EmbedError> {
-        let tables = self
-            .db
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| EmbedError::Store(format!("list tables: {e}")))?;
-
-        if !tables.iter().any(|t| t == TABLE_NAME) {
-            return Ok(Vec::new());
-        }
-
-        let table = self
-            .db
-            .open_table(TABLE_NAME)
-            .execute()
-            .await
-            .map_err(|e| EmbedError::Store(format!("open table: {e}")))?;
-
-        let mut query = table
-            .vector_search(query_vector)
-            .map_err(|e| EmbedError::Store(format!("vector search: {e}")))?
-            .limit(limit);
-
-        if let Some(lang) = lang_filter {
-            query = query.only_if(format!("lang = '{lang}'"));
-        }
-
-        use futures::TryStreamExt;
-        let batches: Vec<RecordBatch> = query
-            .execute()
-            .await
-            .map_err(|e| EmbedError::Store(format!("execute: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| EmbedError::Store(format!("collect: {e}")))?;
-
-        let mut hits = Vec::new();
-        for batch in &batches {
-            let ids = batch
-                .column_by_name("id")
-                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
-            let scores = batch
-                .column_by_name("_distance")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
-
-            if let (Some(ids), Some(scores)) = (ids, scores) {
-                for i in 0..ids.len() {
-                    hits.push((ids.value(i), scores.value(i)));
-                }
-            }
-        }
-        Ok(hits)
+/// Register sqlite-vec as a global SQLite auto-extension.
+///
+/// Idempotent — SQLite deduplicates registrations of the same entry point.
+/// Called by both [`VectorStore::open`] and [`crate::VecReadPool::new`].
+pub(crate) fn register_sqlite_vec() {
+    // SAFETY: sqlite3_vec_init is a valid SQLite extension entry point.
+    unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
     }
+}
+
+/// Serialize a `&[f32]` to little-endian IEEE 754 bytes for sqlite-vec.
+pub(crate) fn f32_to_le_bytes(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::VecReadPool;
 
-    #[tokio::test]
-    async fn open_and_upsert() {
+    #[test]
+    fn open_and_upsert() {
         let dir = tempfile::tempdir().unwrap();
-        let store = VectorStore::open(dir.path()).await.unwrap();
+        let store = VectorStore::open(dir.path()).unwrap();
+        let pool = VecReadPool::new(dir.path(), 2).unwrap();
 
         let entries = vec![
             EmbedEntry {
                 id: 1,
                 qualified_name: "crate::foo".into(),
-                vector: vec![0.1; 768],
+                vector: vec![0.1_f32; VECTOR_DIM],
                 body_hash: vec![0u8; 32],
                 lang: "rust".into(),
             },
             EmbedEntry {
                 id: 2,
                 qualified_name: "crate::bar".into(),
-                vector: vec![0.2; 768],
+                vector: vec![0.9_f32; VECTOR_DIM],
                 body_hash: vec![1u8; 32],
                 lang: "rust".into(),
             },
         ];
+        store.upsert_embeddings(&entries).unwrap();
 
-        store.upsert_embeddings(&entries).await.unwrap();
-
-        let results = store.search(vec![0.1; 768], None, 10).await.unwrap();
+        let results = pool.search(vec![0.1_f32; VECTOR_DIM], None, 10).unwrap();
         assert!(!results.is_empty(), "should find entries");
+        assert_eq!(results[0].0, 1, "closest to [0.1; 768] should be id=1");
     }
 
-    #[tokio::test]
-    async fn search_empty_store() {
+    #[test]
+    fn search_empty_store() {
         let dir = tempfile::tempdir().unwrap();
-        let store = VectorStore::open(dir.path()).await.unwrap();
-        let results = store.search(vec![0.1; 768], None, 10).await.unwrap();
+        let _store = VectorStore::open(dir.path()).unwrap();
+        let pool = VecReadPool::new(dir.path(), 2).unwrap();
+        let results = pool.search(vec![0.1_f32; VECTOR_DIM], None, 10).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn lang_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VectorStore::open(dir.path()).unwrap();
+        let pool = VecReadPool::new(dir.path(), 2).unwrap();
+
+        let entries = vec![
+            EmbedEntry {
+                id: 1,
+                qualified_name: "rust_fn".into(),
+                vector: vec![0.1_f32; VECTOR_DIM],
+                body_hash: vec![0u8; 32],
+                lang: "rust".into(),
+            },
+            EmbedEntry {
+                id: 2,
+                qualified_name: "py_fn".into(),
+                vector: vec![0.1_f32; VECTOR_DIM],
+                body_hash: vec![1u8; 32],
+                lang: "python".into(),
+            },
+        ];
+        store.upsert_embeddings(&entries).unwrap();
+
+        let rust_only = pool
+            .search(vec![0.1_f32; VECTOR_DIM], Some("rust"), 10)
+            .unwrap();
+        assert_eq!(rust_only.len(), 1);
+        assert_eq!(rust_only[0].0, 1);
+    }
+
+    #[test]
+    fn existing_hashes_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VectorStore::open(dir.path()).unwrap();
+        let pool = VecReadPool::new(dir.path(), 2).unwrap();
+
+        let entries = vec![EmbedEntry {
+            id: 42,
+            qualified_name: "foo".into(),
+            vector: vec![0.1_f32; VECTOR_DIM],
+            body_hash: vec![0xABu8; 32],
+            lang: "rust".into(),
+        }];
+        store.upsert_embeddings(&entries).unwrap();
+
+        let hashes = pool.existing_hashes(&[42, 99]).unwrap();
+        assert!(hashes.contains_key(&42));
+        assert!(!hashes.contains_key(&99));
+        assert_eq!(hashes[&42], [0xABu8; 32]);
     }
 }

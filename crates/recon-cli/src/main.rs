@@ -627,6 +627,12 @@ async fn main() -> Result<()> {
                 .index_repo()
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            #[cfg(feature = "embed")]
+            if let Err(e) = server.init_embed().await {
+                warn!("embed init failed, semantic search disabled: {e}");
+            }
+
             server.start_watcher();
 
             if let Some(port) = port {

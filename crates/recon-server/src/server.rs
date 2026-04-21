@@ -39,10 +39,15 @@ pub struct ReconServer {
     tantivy_writer: Arc<Mutex<Option<tantivy::IndexWriter>>>,
     text_searcher: Arc<dyn TextSearcher>,
     repo_root: PathBuf,
+    /// Lock-free embedding service — shared via Arc, no mutex on hot path.
     #[cfg(feature = "embed")]
-    embedder: Arc<Mutex<Option<recon_embed::Embedder>>>,
+    embed_service: Arc<Mutex<Option<Arc<recon_embed::EmbedService>>>>,
+    /// Lock-free read pool for vector similarity search.
     #[cfg(feature = "embed")]
-    vector_store: Arc<Mutex<Option<recon_embed::VectorStore>>>,
+    vec_read_pool: Arc<Mutex<Option<Arc<recon_embed::VecReadPool>>>>,
+    /// Write handle — taken by `start_watcher`, None afterwards.
+    #[cfg(feature = "embed")]
+    vec_writer: Arc<Mutex<Option<recon_embed::VectorStore>>>,
 }
 
 fn redact_response(response: String) -> String {
@@ -82,23 +87,36 @@ impl ReconServer {
             text_searcher: Arc::new(FffBackend::new()),
             repo_root,
             #[cfg(feature = "embed")]
-            embedder: Arc::new(Mutex::new(None)),
+            embed_service: Arc::new(Mutex::new(None)),
             #[cfg(feature = "embed")]
-            vector_store: Arc::new(Mutex::new(None)),
+            vec_read_pool: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "embed")]
+            vec_writer: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Initialize the embedding engine (model download on first run).
+    ///
+    /// Spawns the embed worker thread and opens the vector store. After this
+    /// returns, [`start_watcher`] must be called to hand the write handle to
+    /// the watcher — `vec_writer` is intentionally `None` until then.
+    ///
+    /// [`start_watcher`]: ReconServer::start_watcher
     #[cfg(feature = "embed")]
     pub async fn init_embed(&self) -> Result<(), recon_core::error::Error> {
-        let store_dir = self.repo_root.join(".recon");
+        let vec_dir = self.repo_root.join(".recon").join("vectors");
         let embedder = recon_embed::Embedder::new()
             .map_err(|e| recon_core::error::Error::Search(format!("embed init: {e}")))?;
-        let vs = recon_embed::VectorStore::open(&store_dir.join("vectors"))
-            .await
-            .map_err(|e| recon_core::error::Error::Search(format!("vector store: {e}")))?;
-        *self.embedder.lock() = Some(embedder);
-        *self.vector_store.lock() = Some(vs);
+        let svc = Arc::new(recon_embed::EmbedService::spawn(embedder));
+        let vs = recon_embed::VectorStore::open(&vec_dir)
+            .map_err(|e| recon_core::error::Error::Search(format!("vector store open: {e}")))?;
+        let pool = Arc::new(
+            recon_embed::VecReadPool::new(&vec_dir, 4)
+                .map_err(|e| recon_core::error::Error::Search(format!("vec read pool: {e}")))?,
+        );
+        *self.embed_service.lock() = Some(svc);
+        *self.vec_read_pool.lock() = Some(pool);
+        *self.vec_writer.lock() = Some(vs);
         info!("embedding engine initialized");
         Ok(())
     }
@@ -223,6 +241,14 @@ impl ReconServer {
         let tantivy = self.tantivy.clone();
         let tantivy_writer = self.tantivy_writer.clone();
         let repo_root = self.repo_root.clone();
+        // Clone the Arc handles once; the hot path inside the loop needs no locks.
+        #[cfg(feature = "embed")]
+        let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.lock().clone();
+        #[cfg(feature = "embed")]
+        let vec_pool: Option<Arc<recon_embed::VecReadPool>> = self.vec_read_pool.lock().clone();
+        // Take the write handle — watcher owns it exclusively from here.
+        #[cfg(feature = "embed")]
+        let vec_writer: Option<recon_embed::VectorStore> = self.vec_writer.lock().take();
 
         tokio::task::spawn_blocking(move || {
             let watcher = match Watcher::new(&repo_root) {
@@ -235,6 +261,90 @@ impl ReconServer {
             info!("file watcher started");
 
             let pools = LanguagePools::new(1);
+
+            // ── One-time catch-up: embed any symbols not yet in the vector store ──
+            // Runs before the event loop so the watcher thread owns vec_writer exclusively.
+            #[cfg(feature = "embed")]
+            if let (Some(ref svc), Some(ref pool), Some(ref writer)) =
+                (&embed_svc, &vec_pool, &vec_writer)
+            {
+                const EMBED_BATCH: usize = 64;
+                match read_pool.all_symbols() {
+                    Err(e) => warn!("embed catch-up: all_symbols: {e}"),
+                    Ok(all_syms) if all_syms.is_empty() => {}
+                    Ok(all_syms) => {
+                        let all_ids: Vec<u64> = all_syms.iter().map(|s| s.id).collect();
+                        let existing = pool.existing_hashes(&all_ids).unwrap_or_else(|e| {
+                            warn!("embed catch-up: existing_hashes: {e}");
+                            std::collections::HashMap::new()
+                        });
+                        let to_embed: Vec<&recon_core::symbol::Symbol> = all_syms
+                            .iter()
+                            .filter(|s| existing.get(&s.id).map_or(true, |h| *h != s.body_hash))
+                            .collect();
+                        if to_embed.is_empty() {
+                            info!(
+                                total = all_syms.len(),
+                                "embed catch-up: all symbols already embedded"
+                            );
+                        } else {
+                            info!(
+                                total = all_syms.len(),
+                                missing = to_embed.len(),
+                                "embed catch-up: starting"
+                            );
+                            // Group by file so each source file is read exactly once.
+                            let mut by_file: std::collections::HashMap<
+                                &std::path::Path,
+                                Vec<&recon_core::symbol::Symbol>,
+                            > = std::collections::HashMap::new();
+                            for s in &to_embed {
+                                by_file.entry(s.path.as_path()).or_default().push(s);
+                            }
+                            let mut done = 0usize;
+                            for (rel_path, syms) in &by_file {
+                                let file_bytes =
+                                    std::fs::read(repo_root.join(rel_path)).unwrap_or_default();
+                                for chunk in syms.chunks(EMBED_BATCH) {
+                                    let texts: Vec<String> = chunk
+                                        .iter()
+                                        .map(|s| {
+                                            let body = file_bytes
+                                                .get(s.byte_range.clone())
+                                                .and_then(|b| std::str::from_utf8(b).ok())
+                                                .unwrap_or("");
+                                            recon_embed::Embedder::format_symbol(s, body)
+                                        })
+                                        .collect();
+                                    let vecs = match svc.embed_batch(texts) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            warn!("embed catch-up: embed_batch: {e}");
+                                            continue;
+                                        }
+                                    };
+                                    let entries: Vec<recon_embed::EmbedEntry> = chunk
+                                        .iter()
+                                        .zip(vecs)
+                                        .map(|(s, vec)| recon_embed::EmbedEntry {
+                                            id: s.id,
+                                            qualified_name: s.qualified_name.to_string(),
+                                            vector: vec,
+                                            body_hash: s.body_hash.to_vec(),
+                                            lang: s.lang.name().to_string(),
+                                        })
+                                        .collect();
+                                    if let Err(e) = writer.upsert_embeddings(&entries) {
+                                        warn!("embed catch-up: upsert: {e}");
+                                    }
+                                    done += chunk.len();
+                                }
+                            }
+                            info!(done, "embed catch-up: complete");
+                        }
+                    }
+                }
+            }
 
             while let Some(changed_paths) = watcher.recv() {
                 // catch_unwind: a panic in one batch must not kill the watcher
@@ -310,6 +420,104 @@ impl ReconServer {
                             }
                             if let Err(e) = tantivy.commit(writer) {
                                 warn!("watcher tantivy commit error: {e}");
+                            }
+                        }
+                    }
+
+                    // Phase 5: Update vector embeddings — fully lock-free.
+                    // embed_svc, vec_pool are Arcs cloned before the loop.
+                    // vec_writer is owned exclusively by this thread.
+                    #[cfg(feature = "embed")]
+                    if let (Some(ref svc), Some(ref pool), Some(ref writer)) =
+                        (&embed_svc, &vec_pool, &vec_writer)
+                    {
+                        use std::collections::HashMap;
+                        const EMBED_BATCH: usize = 64;
+
+                        // relative-path → raw file bytes for symbol body extraction
+                        let content_map: HashMap<std::path::PathBuf, &[u8]> = to_parse
+                            .iter()
+                            .map(|(abs, content)| {
+                                let rel = abs.strip_prefix(&repo_root).unwrap_or(abs.as_path());
+                                (rel.to_owned(), content.as_slice())
+                            })
+                            .collect();
+
+                        // Fetch symbols with real DB IDs (assigned in phase 3)
+                        let mut all_syms = Vec::new();
+                        for pf in &parsed {
+                            match read_pool.symbols_for_path(&pf.meta.path) {
+                                Ok(syms) => all_syms.extend(syms),
+                                Err(e) => warn!("embed: symbols_for_path {:?}: {e}", pf.meta.path),
+                            }
+                        }
+
+                        if !all_syms.is_empty() {
+                            let all_ids: Vec<u64> = all_syms.iter().map(|s| s.id).collect();
+
+                            // Lock-free hash check via VecReadPool
+                            let existing: HashMap<u64, [u8; 32]> =
+                                pool.existing_hashes(&all_ids).unwrap_or_else(|e| {
+                                    warn!("embed: existing_hashes: {e}");
+                                    HashMap::new()
+                                });
+
+                            let to_embed: Vec<&recon_core::symbol::Symbol> = all_syms
+                                .iter()
+                                .filter(|s| existing.get(&s.id).map_or(true, |h| *h != s.body_hash))
+                                .collect();
+
+                            if to_embed.is_empty() {
+                                debug!(
+                                    total = all_syms.len(),
+                                    "embed: all symbols unchanged, skipping"
+                                );
+                            } else {
+                                debug!(
+                                    changed = to_embed.len(),
+                                    total = all_syms.len(),
+                                    "embed: processing changed symbols"
+                                );
+
+                                for chunk in to_embed.chunks(EMBED_BATCH) {
+                                    let texts: Vec<String> = chunk
+                                        .iter()
+                                        .map(|s| {
+                                            let body = content_map
+                                                .get(s.path.as_path())
+                                                .and_then(|b| b.get(s.byte_range.clone()))
+                                                .and_then(|b| std::str::from_utf8(b).ok())
+                                                .unwrap_or("");
+                                            recon_embed::Embedder::format_symbol(s, body)
+                                        })
+                                        .collect();
+
+                                    // Channel send — no lock, blocks only for ONNX inference
+                                    let vecs = match svc.embed_batch(texts) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            warn!("embed: embed_batch: {e}");
+                                            continue;
+                                        }
+                                    };
+
+                                    let entries: Vec<recon_embed::EmbedEntry> = chunk
+                                        .iter()
+                                        .zip(vecs)
+                                        .map(|(s, vec)| recon_embed::EmbedEntry {
+                                            id: s.id,
+                                            qualified_name: s.qualified_name.to_string(),
+                                            vector: vec,
+                                            body_hash: s.body_hash.to_vec(),
+                                            lang: s.lang.name().to_string(),
+                                        })
+                                        .collect();
+
+                                    // Owned writer — zero locking
+                                    if let Err(e) = writer.upsert_embeddings(&entries) {
+                                        warn!("embed: upsert: {e}");
+                                    }
+                                }
                             }
                         }
                     }
@@ -644,37 +852,33 @@ impl ReconServer {
 
         let abs_paths = self.resolve_search_scope(&paths, params.0.filter.as_deref());
 
-        // Semantic mode via embed feature
+        // Semantic mode — fully lock-free via EmbedService channel + VecReadPool.
         #[cfg(feature = "embed")]
         if params.0.mode == "semantic" {
-            // Embed the query under lock, then drop locks before async search
-            let embed_result = {
-                let mut eg = self.embedder.lock();
-                let vg = self.vector_store.lock();
-                match (eg.as_mut(), vg.as_ref()) {
-                    (Some(embedder), Some(vs)) => match embedder.embed_one(&params.0.query) {
-                        Ok(v) => Some((v, vs.clone())),
+            let svc = self.embed_service.lock().clone();
+            let pool = self.vec_read_pool.lock().clone();
+            match (svc, pool) {
+                (Some(svc), Some(pool)) => {
+                    let query_vec = match svc.embed_one(&params.0.query) {
+                        Ok(v) => v,
                         Err(e) => return format!("embed error: {e}"),
-                    },
-                    _ => None,
+                    };
+                    let results = match pool.search(query_vec, None, 20) {
+                        Ok(r) => r,
+                        Err(e) => return format!("vector search error: {e}"),
+                    };
+                    let entries: Vec<serde_json::Value> = results
+                        .iter()
+                        .map(|(id, dist)| serde_json::json!({"symbol_id": id, "distance": dist}))
+                        .collect();
+                    return redact_response(
+                        serde_json::to_string(&entries)
+                            .unwrap_or_else(|e| format!("Error: {e}")),
+                    );
                 }
-            };
-            // Locks dropped — safe to await
-            if let Some((query_vec, vs)) = embed_result {
-                let results = match vs.search(query_vec, None, 20).await {
-                    Ok(r) => r,
-                    Err(e) => return format!("vector search error: {e}"),
-                };
-                let entries: Vec<serde_json::Value> = results
-                    .iter()
-                    .map(|(id, dist)| serde_json::json!({"symbol_id": id, "distance": dist}))
-                    .collect();
-                return redact_response(
-                    serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                );
-            } else {
-                return "semantic search requires embed feature to be initialized (run init_embed)"
-                    .into();
+                _ => {
+                    return "semantic search requires embed feature to be initialized (run init_embed)".into()
+                }
             }
         }
         #[cfg(not(feature = "embed"))]

@@ -6,7 +6,7 @@ pub enum EmbedError {
     /// Error from the embedding model (fastembed / ONNX).
     #[error("embedding model error: {0}")]
     Model(String),
-    /// Error from the vector store (LanceDB).
+    /// Error from the vector store (sqlite-vec).
     #[error("vector store error: {0}")]
     Store(String),
     /// I/O error.

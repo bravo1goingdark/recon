@@ -52,11 +52,10 @@ grep-searcher = "0.1.16"
 fff-grep = "=0.4.0"
 fff-query-parser = "=0.4.0"
 
-# Embeddings (optional, feature-gated)
+# Embeddings
 fastembed = "5"
-lancedb = "0.27"
-arrow-array = "57"
-arrow-schema = "57"
+sqlite-vec = "0.1"
+
 
 # Git & file watching
 gix = { version = "0.81.0", default-features = false, features = ["blob-diff", "worktree-stream", "status", "sha1"] }
@@ -98,6 +97,7 @@ ahash = "0.8.12"
 arc-swap = "1.9.1"
 rayon = "1.12.0"
 crossbeam-queue = "0.3.12"
+crossbeam-channel = "0.5"
 memmap2 = "0.9.10"
 
 # Config
