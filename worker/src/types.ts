@@ -9,6 +9,8 @@ export interface Env {
   SESSION_SIGNING_KEY: string;
   ALLOWED_ORIGINS: string;
   FRONTEND_URL: string;
+  /** HMAC-SHA256 key used to sign license responses. Set via `wrangler secret put LICENSE_HMAC_SECRET`. */
+  LICENSE_HMAC_SECRET: string;
 }
 
 /** D1 row: users table. */
@@ -53,6 +55,8 @@ export interface LicenseValidateResponse {
   limits: { max_repos: number; max_files: number; max_loc: number };
   expires_at: number;
   message: string;
+  /** HMAC-SHA256 over "{tier}:{max_repos}:{max_files}:{max_loc}:{expires_at}". */
+  signature: string;
 }
 
 /** Authenticated user context set by auth middleware. */

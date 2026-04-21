@@ -50,7 +50,7 @@ pub fn find_symbols_exact(
         .map_err(|e| Error::Storage(e.to_string()))?;
 
     let rows = stmt
-        .query_map(params![name, limit], |row| Ok(row_to_symbol(row)))
+        .query_map(params![name, limit as i64], |row| Ok(row_to_symbol(row)))
         .map_err(|e| Error::Storage(e.to_string()))?;
 
     let mut results = Vec::with_capacity(limit.min(64));
@@ -82,7 +82,7 @@ pub fn search_symbols_fuzzy(
         .map_err(|e| Error::Storage(e.to_string()))?;
 
     let rows = stmt
-        .query_map(params![query, limit], |row| Ok(row_to_symbol(row)))
+        .query_map(params![query, limit as i64], |row| Ok(row_to_symbol(row)))
         .map_err(|e| Error::Storage(e.to_string()))?;
 
     let mut results = Vec::with_capacity(limit.min(64));
@@ -119,9 +119,9 @@ pub fn refs_for_ident(conn: &Connection, ident: &str) -> Result<Vec<Ref>, Error>
         .query_map(params![ident], |row| {
             Ok(Ref {
                 src_path: Arc::new(PathBuf::from(row.get::<_, String>(0)?)),
-                src_symbol_id: row.get(1)?,
+                src_symbol_id: row.get::<_, i64>(1)? as u64,
                 ident: CompactString::new(row.get::<_, String>(2)?),
-                dst_symbol_id: row.get(3)?,
+                dst_symbol_id: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
                 weight: row.get(4)?,
             })
         })
@@ -166,8 +166,11 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, Error> {
 
 /// Count all symbols.
 pub fn symbol_count(conn: &Connection) -> Result<u64, Error> {
-    conn.query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))
-        .map_err(|e| Error::Storage(e.to_string()))
+    conn.query_row("SELECT COUNT(*) FROM symbols", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|n| n as u64)
+    .map_err(|e| Error::Storage(e.to_string()))
 }
 
 /// Most recent indexed_at across all files.
@@ -204,7 +207,7 @@ pub fn file_symbol_summaries(
     let rows = stmt
         .query_map([], |row| {
             let path: String = row.get(0)?;
-            let count: usize = row.get(1)?;
+            let count: usize = row.get::<_, i64>(1)? as usize;
             let top_raw: Option<String> = row.get(2)?;
             let top: Vec<String> = top_raw
                 .unwrap_or_default()
@@ -234,9 +237,9 @@ pub fn all_refs(conn: &Connection) -> Result<Vec<Ref>, Error> {
         .query_map([], |row| {
             Ok(Ref {
                 src_path: Arc::new(PathBuf::from(row.get::<_, String>(0)?)),
-                src_symbol_id: row.get(1)?,
+                src_symbol_id: row.get::<_, i64>(1)? as u64,
                 ident: CompactString::new(row.get::<_, String>(2)?),
-                dst_symbol_id: row.get(3)?,
+                dst_symbol_id: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
                 weight: row.get(4)?,
             })
         })

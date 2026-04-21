@@ -53,8 +53,8 @@ authRoutes.get("/github/callback", async (c) => {
 
   const db = c.env.RECON_DB;
 
-  // Upsert user
-  await db
+  // Upsert user and return id + tier in a single round-trip (SQLite RETURNING).
+  const user = await db
     .prepare(
       `INSERT INTO users (github_id, github_username, email, avatar_url)
        VALUES (?, ?, ?, ?)
@@ -62,15 +62,10 @@ authRoutes.get("/github/callback", async (c) => {
          github_username = excluded.github_username,
          email = excluded.email,
          avatar_url = excluded.avatar_url,
-         updated_at = datetime('now')`,
+         updated_at = datetime('now')
+       RETURNING id, tier`,
     )
     .bind(ghUser.id, ghUser.login, ghUser.email, ghUser.avatar_url)
-    .run();
-
-  // Get user row (need the id)
-  const user = await db
-    .prepare("SELECT id, tier FROM users WHERE github_id = ?")
-    .bind(ghUser.id)
     .first();
 
   if (!user) {
@@ -80,15 +75,16 @@ authRoutes.get("/github/callback", async (c) => {
   const userId = user.id as string;
   const userTier = user.tier as string;
 
-  // Auto-generate a Free API key if user has none
-  const keyCount = await db
+  // Auto-generate a Free API key if user has none.
+  // SELECT 1 LIMIT 1 is cheaper than COUNT(*) — we only need existence.
+  const hasKey = await db
     .prepare(
-      "SELECT COUNT(*) as cnt FROM api_keys WHERE user_id = ? AND revoked_at IS NULL",
+      "SELECT 1 FROM api_keys WHERE user_id = ? AND revoked_at IS NULL LIMIT 1",
     )
     .bind(userId)
     .first();
 
-  if (!keyCount || (keyCount.cnt as number) === 0) {
+  if (!hasKey) {
     const newKey = generateApiKey();
     const keyHash = await sha256Hex(newKey);
     const keyPrefix = newKey.slice(0, 14); // sk-recon-xxxx

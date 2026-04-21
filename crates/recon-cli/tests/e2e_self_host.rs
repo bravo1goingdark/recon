@@ -2,11 +2,18 @@
 
 use std::process::Command;
 
+fn seed_license_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    recon_server::license::seed_dev_cache(dir.path()).expect("seed_dev_cache failed");
+    dir
+}
+
 #[test]
 fn index_self_and_verify_symbols() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
     let binary = workspace_root.join("target/debug/recon");
+    let lic = seed_license_dir();
 
     if !binary.exists() {
         let status = Command::new("cargo")
@@ -23,6 +30,7 @@ fn index_self_and_verify_symbols() {
     // Index our own repo
     let output = Command::new(&binary)
         .args(["index", "--repo", workspace_root.to_str().unwrap()])
+        .env("RECON_CONFIG_DIR", lic.path())
         .output()
         .expect("failed to run recon index");
 

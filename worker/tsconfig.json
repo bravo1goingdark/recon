@@ -6,6 +6,7 @@
     "strict": true,
     "lib": ["ES2022"],
     "types": ["@cloudflare/workers-types"],
+    "rootDir": "src",
     "outDir": "dist",
     "skipLibCheck": true,
     "esModuleInterop": true,

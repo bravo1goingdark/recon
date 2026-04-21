@@ -88,31 +88,26 @@ billingRoutes.post("/webhook", async (c) => {
       const newTier = paymentRow.tier as string;
       const newLimits = JSON.stringify(getTierConfig(newTier).limits);
 
-      // Update payment status
-      await db
-        .prepare(
-          `UPDATE payments SET razorpay_payment_id = ?, status = 'captured'
-           WHERE razorpay_order_id = ?`,
-        )
-        .bind(payment.id, orderId)
-        .run();
-
-      // Upgrade user tier
-      await db
-        .prepare(
-          "UPDATE users SET tier = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(newTier, userId)
-        .run();
-
-      // Upgrade all active (non-revoked) API keys
-      await db
-        .prepare(
-          `UPDATE api_keys SET tier = ?, limits_json = ?
-           WHERE user_id = ? AND revoked_at IS NULL`,
-        )
-        .bind(newTier, newLimits, userId)
-        .run();
+      // Three independent writes — batch them into a single D1 round-trip.
+      await db.batch([
+        db
+          .prepare(
+            `UPDATE payments SET razorpay_payment_id = ?, status = 'captured'
+             WHERE razorpay_order_id = ?`,
+          )
+          .bind(payment.id, orderId),
+        db
+          .prepare(
+            "UPDATE users SET tier = ?, updated_at = datetime('now') WHERE id = ?",
+          )
+          .bind(newTier, userId),
+        db
+          .prepare(
+            `UPDATE api_keys SET tier = ?, limits_json = ?
+             WHERE user_id = ? AND revoked_at IS NULL`,
+          )
+          .bind(newTier, newLimits, userId),
+      ]);
     }
   }
 

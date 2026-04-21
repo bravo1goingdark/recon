@@ -37,10 +37,10 @@ tree-sitter-c = "0.24.1"
 tree-sitter-cpp = "0.23.4"
 
 # Storage
-rusqlite = { version = "0.37", features = ["bundled", "blob", "array", "modern_sqlite"] }
-rusqlite_migration = "2.3"
-blake3 = "1"
-tantivy = "0.26.0"
+rusqlite = { version = "0.39.0", features = ["bundled", "blob", "array", "modern_sqlite"] }
+rusqlite_migration = "2.5.0"
+blake3 = "1.8.4"
+tantivy = "0.26.1"
 
 # Search
 nucleo = "0.5.0"
@@ -49,12 +49,12 @@ grep-regex = "0.1.14"
 grep-searcher = "0.1.16"
 
 # fff search
-fff-grep = "=0.4.0"
-fff-query-parser = "=0.4.0"
+fff-grep = "=0.6.1"
+fff-query-parser = "=0.6.1"
 
 # Embeddings
-fastembed = "5"
-sqlite-vec = "0.1"
+fastembed = "5.13.3"
+sqlite-vec = "0.1.9"
 
 
 # Git & file watching
@@ -86,38 +86,43 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 
 # Concurrency
-dashmap = "6.1"
-parking_lot = "0.12"
+dashmap = "6.1.0"
+parking_lot = "0.12.5"
 
 # Hot-path performance
-aho-corasick = "1"
+aho-corasick = "1.1.4"
 smallvec = "1.15.1"
 compact_str = { version = "0.9.0", features = ["serde"] }
 ahash = "0.8.12"
 arc-swap = "1.9.1"
 rayon = "1.12.0"
 crossbeam-queue = "0.3.12"
-crossbeam-channel = "0.5"
+crossbeam-channel = "0.5.15"
 memmap2 = "0.9.10"
 
 # Config
-toml = "1"
+toml = "1.1.2+spec-1.1.0"
+dirs = "6.0.0"
 
 # Benchmarking
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 
 # HTTP server
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
-http-body-util = "0.1"
-tower-service = "0.3"
-tokio-util = { version = "0.7", features = ["codec"] }
+hyper = { version = "1.9.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "server-auto", "http1"] }
+http-body-util = "0.1.3"
+tower-service = "0.3.3"
+tokio-util = { version = "0.7.18", features = ["codec"] }
 
 # Allocator
-mimalloc = "0.1"
+mimalloc = "0.1.49"
 
 # License validation (lightweight sync HTTP client)
-ureq = { version = "3", features = ["json"] }
+ureq = { version = "3.3.0", features = ["json"] }
+
+# HMAC-SHA256 for license signing (RustCrypto)
+hmac = "0.12"
+sha2 = "0.10"
 
 # Misc
 tempfile = "3.27.0"

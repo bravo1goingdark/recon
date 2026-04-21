@@ -68,7 +68,7 @@ impl Store {
             .execute(params![
                 meta.path.to_str().unwrap_or(""),
                 meta.lang.name(),
-                meta.size_bytes,
+                meta.size_bytes as i64,
                 meta.content_hash.as_slice(),
                 meta.mtime,
                 meta.indexed_at,
@@ -114,9 +114,9 @@ impl Store {
                 sym.kind.label(),
                 sym.signature.as_deref(),
                 sym.doc.as_deref(),
-                sym.parent_id,
-                sym.byte_range.start,
-                sym.byte_range.end,
+                sym.parent_id.map(|v| v as i64),
+                sym.byte_range.start as i64,
+                sym.byte_range.end as i64,
                 *sym.line_range.start(),
                 *sym.line_range.end(),
                 sym.body_hash.as_slice(),
@@ -151,9 +151,9 @@ impl Store {
                     sym.kind.label(),
                     sym.signature.as_deref(),
                     sym.doc.as_deref(),
-                    sym.parent_id,
-                    sym.byte_range.start,
-                    sym.byte_range.end,
+                    sym.parent_id.map(|v| v as i64),
+                    sym.byte_range.start as i64,
+                    sym.byte_range.end as i64,
                     *sym.line_range.start(),
                     *sym.line_range.end(),
                     sym.body_hash.as_slice(),
@@ -201,7 +201,7 @@ impl Store {
             .execute(params![
                 path_str,
                 meta.lang.name(),
-                meta.size_bytes,
+                meta.size_bytes as i64,
                 meta.content_hash.as_slice(),
                 meta.mtime,
                 meta.indexed_at,
@@ -227,9 +227,9 @@ impl Store {
                             sym.kind.label(),
                             sym.signature.as_deref(),
                             sym.doc.as_deref(),
-                            sym.parent_id,
-                            sym.byte_range.start,
-                            sym.byte_range.end,
+                            sym.parent_id.map(|v| v as i64),
+                            sym.byte_range.start as i64,
+                            sym.byte_range.end as i64,
                             *sym.line_range.start(),
                             *sym.line_range.end(),
                             sym.body_hash.as_slice(),
@@ -251,9 +251,9 @@ impl Store {
                     ref_stmt
                         .execute(params![
                             r.src_path.to_str().unwrap_or(""),
-                            r.src_symbol_id,
+                            r.src_symbol_id as i64,
                             r.ident.as_str(),
-                            r.dst_symbol_id,
+                            r.dst_symbol_id.map(|v| v as i64),
                             r.weight,
                         ])
                         .map_err(|e| Error::Storage(e.to_string()))?;
@@ -321,7 +321,7 @@ impl Store {
                     .execute(params![
                         path_str,
                         meta.lang.name(),
-                        meta.size_bytes,
+                        meta.size_bytes as i64,
                         meta.content_hash.as_slice(),
                         meta.mtime,
                         meta.indexed_at,
@@ -336,9 +336,9 @@ impl Store {
                             sym.kind.label(),
                             sym.signature.as_deref(),
                             sym.doc.as_deref(),
-                            sym.parent_id,
-                            sym.byte_range.start,
-                            sym.byte_range.end,
+                            sym.parent_id.map(|v| v as i64),
+                            sym.byte_range.start as i64,
+                            sym.byte_range.end as i64,
                             *sym.line_range.start(),
                             *sym.line_range.end(),
                             sym.body_hash.as_slice(),
@@ -349,9 +349,9 @@ impl Store {
                     ref_stmt
                         .execute(params![
                             r.src_path.to_str().unwrap_or(""),
-                            r.src_symbol_id,
+                            r.src_symbol_id as i64,
                             r.ident.as_str(),
-                            r.dst_symbol_id,
+                            r.dst_symbol_id.map(|v| v as i64),
                             r.weight,
                         ])
                         .map_err(|e| Error::Storage(e.to_string()))?;
@@ -408,7 +408,7 @@ impl Store {
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![name, limit], |row| Ok(row_to_symbol(row)))
+            .query_map(params![name, limit as i64], |row| Ok(row_to_symbol(row)))
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let mut results = Vec::with_capacity(limit.min(64));
@@ -437,7 +437,7 @@ impl Store {
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![query, limit], |row| Ok(row_to_symbol(row)))
+            .query_map(params![query, limit as i64], |row| Ok(row_to_symbol(row)))
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let mut results = Vec::with_capacity(limit.min(64));
@@ -467,9 +467,9 @@ impl Store {
             for r in refs {
                 stmt.execute(params![
                     r.src_path.to_str().unwrap_or(""),
-                    r.src_symbol_id,
+                    r.src_symbol_id as i64,
                     r.ident.as_str(),
-                    r.dst_symbol_id,
+                    r.dst_symbol_id.map(|v| v as i64),
                     r.weight,
                 ])
                 .map_err(|e| Error::Storage(e.to_string()))?;
@@ -493,9 +493,9 @@ impl Store {
             .query_map(params![ident], |row| {
                 Ok(Ref {
                     src_path: Arc::new(PathBuf::from(row.get::<_, String>(0)?)),
-                    src_symbol_id: row.get(1)?,
+                    src_symbol_id: row.get::<_, i64>(1)? as u64,
                     ident: CompactString::new(row.get::<_, String>(2)?),
-                    dst_symbol_id: row.get(3)?,
+                    dst_symbol_id: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
                     weight: row.get(4)?,
                 })
             })
@@ -555,7 +555,10 @@ impl Store {
     /// Count all symbols in the store.
     pub fn symbol_count(&self) -> Result<u64, Error> {
         self.conn
-            .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM symbols", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|n| n as u64)
             .map_err(|e| Error::Storage(e.to_string()))
     }
 
@@ -596,7 +599,7 @@ impl Store {
         let rows = stmt
             .query_map([], |row| {
                 let path: String = row.get(0)?;
-                let count: usize = row.get(1)?;
+                let count: usize = row.get::<_, i64>(1)? as usize;
                 let top_raw: Option<String> = row.get(2)?;
                 let top: Vec<String> = top_raw
                     .unwrap_or_default()
@@ -663,9 +666,9 @@ impl Store {
             .query_map([], |row| {
                 Ok(Ref {
                     src_path: Arc::new(PathBuf::from(row.get::<_, String>(0)?)),
-                    src_symbol_id: row.get(1)?,
+                    src_symbol_id: row.get::<_, i64>(1)? as u64,
                     ident: CompactString::new(row.get::<_, String>(2)?),
-                    dst_symbol_id: row.get(3)?,
+                    dst_symbol_id: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
                     weight: row.get(4)?,
                 })
             })
@@ -782,13 +785,19 @@ pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
     }
 
     let path_str: String = row.get(1).map_err(|e| Error::Storage(e.to_string()))?;
-    let byte_start: usize = row.get(8).map_err(|e| Error::Storage(e.to_string()))?;
-    let byte_end: usize = row.get(9).map_err(|e| Error::Storage(e.to_string()))?;
+    let byte_start: usize = row
+        .get::<_, i64>(8)
+        .map_err(|e| Error::Storage(e.to_string()))? as usize;
+    let byte_end: usize = row
+        .get::<_, i64>(9)
+        .map_err(|e| Error::Storage(e.to_string()))? as usize;
     let line_start: u32 = row.get(10).map_err(|e| Error::Storage(e.to_string()))?;
     let line_end: u32 = row.get(11).map_err(|e| Error::Storage(e.to_string()))?;
 
     Ok(Symbol {
-        id: row.get(0).map_err(|e| Error::Storage(e.to_string()))?,
+        id: row
+            .get::<_, i64>(0)
+            .map_err(|e| Error::Storage(e.to_string()))? as u64,
         path: Arc::new(PathBuf::from(&path_str)),
         name: CompactString::new(
             row.get::<_, String>(2)
@@ -801,7 +810,10 @@ pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
         kind,
         signature: row.get(5).map_err(|e| Error::Storage(e.to_string()))?,
         doc: row.get(6).map_err(|e| Error::Storage(e.to_string()))?,
-        parent_id: row.get(7).map_err(|e| Error::Storage(e.to_string()))?,
+        parent_id: row
+            .get::<_, Option<i64>>(7)
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .map(|v| v as u64),
         byte_range: byte_start..byte_end,
         line_range: line_start..=line_end,
         body_hash,

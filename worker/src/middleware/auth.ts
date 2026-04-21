@@ -21,28 +21,21 @@ export async function requireAuth(
   const tokenHash = await sha256Hex(token);
   const db = c.env.RECON_DB;
 
+  // Expiry check is pushed to the DB — eliminates the separate DELETE round-trip
+  // on expired sessions (SQLite handles the filter; expired rows stay until vacuum).
   const row = await db
     .prepare(
-      `SELECT s.user_id, s.expires_at,
+      `SELECT s.user_id,
               u.id, u.github_username, u.email, u.avatar_url, u.tier
        FROM sessions s
        JOIN users u ON s.user_id = u.id
-       WHERE s.token_hash = ?`,
+       WHERE s.token_hash = ? AND s.expires_at > datetime('now')`,
     )
     .bind(tokenHash)
     .first();
 
   if (!row) {
-    return c.json({ error: "Invalid session" }, 401);
-  }
-
-  if (new Date(row.expires_at as string) < new Date()) {
-    // Clean up expired session
-    await db
-      .prepare("DELETE FROM sessions WHERE token_hash = ?")
-      .bind(tokenHash)
-      .run();
-    return c.json({ error: "Session expired" }, 401);
+    return c.json({ error: "Invalid or expired session" }, 401);
   }
 
   c.set("user", {

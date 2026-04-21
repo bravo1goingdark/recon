@@ -24,6 +24,9 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 ureq = { workspace = true }
 rayon = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+dirs = { workspace = true }
 ahash = { workspace = true }
 compact_str = { workspace = true }
 recon-embed = { workspace = true, optional = true }

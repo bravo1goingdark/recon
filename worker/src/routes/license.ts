@@ -4,22 +4,19 @@
  * Wire-compatible with the Rust CLI at crates/recon-server/src/license.rs.
  * The CLI sends: Authorization: Bearer {key} AND body {"key": "..."}.
  * We accept the key from either source.
+ *
+ * Every valid response is HMAC-SHA256 signed over the canonical payload:
+ *   "{tier}:{max_repos}:{max_files}:{max_loc}:{expires_at}"
+ * using the LICENSE_HMAC_SECRET environment variable.  The CLI verifies this
+ * signature before trusting the cached response, preventing local tampering.
  */
 
 import { Hono } from "hono";
-import { sha256Hex } from "../lib/crypto";
+import { sha256Hex, hmacSha256Hex } from "../lib/crypto";
 import { getTierConfig } from "../lib/tiers";
 import type { Env, LicenseValidateResponse } from "../types";
 
 export const licenseRoutes = new Hono<{ Bindings: Env }>();
-
-const FREE_RESPONSE: LicenseValidateResponse = {
-  valid: false,
-  tier: "Free",
-  limits: getTierConfig("Free").limits,
-  expires_at: 0,
-  message: "No API key provided",
-};
 
 licenseRoutes.post("/validate", async (c) => {
   // Extract key from Authorization header or body
@@ -41,7 +38,7 @@ licenseRoutes.post("/validate", async (c) => {
   }
 
   if (!key) {
-    return c.json(FREE_RESPONSE);
+    return c.json({ error: "No API key provided", valid: false }, 401);
   }
 
   const keyHash = await sha256Hex(key);
@@ -57,38 +54,34 @@ licenseRoutes.post("/validate", async (c) => {
     .first();
 
   if (!row) {
-    return c.json({
-      ...FREE_RESPONSE,
-      message: "Invalid API key",
-    });
+    return c.json({ error: "Invalid API key", valid: false }, 401);
   }
 
   if (row.revoked_at) {
-    return c.json({
-      ...FREE_RESPONSE,
-      message: "API key has been revoked",
-    });
+    return c.json({ error: "API key has been revoked", valid: false }, 401);
   }
 
-  // Check expiry
+  // Parse expiry
   let expiresAtUnix = 0;
   if (row.expires_at) {
     expiresAtUnix = Math.floor(
       new Date(row.expires_at as string).getTime() / 1000,
     );
     if (Date.now() / 1000 > expiresAtUnix) {
-      return c.json({
-        valid: false,
-        tier: "Free",
-        limits: getTierConfig("Free").limits,
-        expires_at: expiresAtUnix,
-        message: "API key has expired — renew at recon.dev",
-      } satisfies LicenseValidateResponse);
+      return c.json({ error: "API key has expired — renew at recon.dev", valid: false }, 401);
     }
   }
 
-  const limits = JSON.parse(row.limits_json as string);
+  const limits = JSON.parse(row.limits_json as string) as {
+    max_repos: number;
+    max_files: number;
+    max_loc: number;
+  };
   const tier = row.tier as string;
+
+  // Sign the canonical payload so the CLI can detect local tampering.
+  const payload = `${tier}:${limits.max_repos}:${limits.max_files}:${limits.max_loc}:${expiresAtUnix}`;
+  const signature = await hmacSha256Hex(c.env.LICENSE_HMAC_SECRET, payload);
 
   return c.json({
     valid: true,
@@ -96,5 +89,6 @@ licenseRoutes.post("/validate", async (c) => {
     limits,
     expires_at: expiresAtUnix,
     message: `${tier} plan active${row.expires_at ? " until " + (row.expires_at as string).split("T")[0] : ""}`,
+    signature,
   } satisfies LicenseValidateResponse);
 });

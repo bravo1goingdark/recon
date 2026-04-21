@@ -25,38 +25,16 @@ fn serve_stdout_is_clean_jsonrpc() {
         panic!("recon binary not found at {}", binary.display());
     }
 
-    // Create a temp dir with a pre-seeded license cache so the CLI starts
-    // without network access (key required but cache provides offline grace)
+    // Create a temp dir and pre-seed a signed dev license so the CLI starts
+    // without network access.
     let tmp = tempfile::tempdir().unwrap();
     let recon_dir = tmp.path().join(".recon");
-    std::fs::create_dir_all(&recon_dir).unwrap();
-    let cache = serde_json::json!({
-        "cached_at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-        "response": {
-            "valid": true,
-            "tier": "Free",
-            "limits": { "max_repos": 1, "max_files": 250, "max_loc": 5000 },
-            "expires_at": 0,
-            "message": "test"
-        }
-    });
-    std::fs::write(
-        recon_dir.join("license.json"),
-        serde_json::to_string(&cache).unwrap(),
-    )
-    .unwrap();
+    recon_server::license::seed_dev_cache(&recon_dir).expect("seed_dev_cache failed");
 
-    // Start the server with a dummy key + unreachable API (cache provides fallback)
+    // Start the server — license is read from the pre-seeded cache via RECON_CONFIG_DIR.
     let mut child = Command::new(&binary)
-        .args([
-            "serve",
-            "--repo",
-            tmp.path().to_str().unwrap(),
-            "--key",
-            "sk-recon-test-00000000000000000000",
-        ])
-        .env("RECON_API_URL", "http://127.0.0.1:1")
+        .args(["serve", "--repo", tmp.path().to_str().unwrap()])
+        .env("RECON_CONFIG_DIR", recon_dir.to_str().unwrap())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

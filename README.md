@@ -87,38 +87,28 @@ They return structured, token-efficient results.
 
 Restart Claude Code (or your MCP client). The 12 `code_*` tools are now available. Indexing, watching, and ranking all run server-side.
 
-## Self-hosted setup
-
-If you run your own server:
+## Setup
 
 ```bash
-# One-command setup: indexes repo, writes .mcp.json, updates .gitignore
-recon init
+# 1. Authenticate once per machine (caches license globally)
+recon login sk-recon-your-key
 
-# Or manual
-recon index                     # index the repo
-recon serve                     # start MCP server over stdio
-recon serve --port 3100         # start over Streamable HTTP
+# 2. In each project: index + set up IDE MCP config
+recon init --mcp cc        # Claude Code  (.mcp.json)
+recon init --mcp oc        # OpenCode     (.opencode/mcp.json)
+recon init --mcp cursor    # Cursor       (.cursor/mcp.json)
+recon init --mcp windsurf  # Windsurf     (.windsurf/mcp.json)
+recon init                 # Index only, no MCP config
+
+# Your IDE auto-starts recon serve — you never run it manually.
 ```
 
-### Multi-tenant hosted server
+Other license commands:
 
 ```bash
-# Create a keys.json
-cat > keys.json << 'EOF'
-{
-  "keys": {
-    "sk-customer-a": "/srv/repos/customer-a",
-    "sk-customer-b": "/srv/repos/customer-b"
-  }
-}
-EOF
-
-# Start the hosted server with API key auth
-recon serve-hosted --keys keys.json --port 3100
+recon license    # show cached tier, limits, expiry
+recon logout     # remove cached license
 ```
-
-Requests without a valid `Authorization: Bearer <key>` header get `401`. Invalid keys get `403`. Each key routes to its own isolated repo index via DashMap.
 
 ## CLI (`rr` -- recon remote)
 
@@ -184,7 +174,7 @@ crates/
   recon-embed/      # fastembed + LanceDB vector search (feature-gated)
   recon-indexer/    # Merkle tree, gix ColdStart, file watcher, rayon parallel parse
   recon-server/     # rmcp MCP handler, 12 tools, parking_lot Mutex, redaction
-  recon-cli/        # CLI: serve, serve-hosted, init, index, purge, query tools
+  recon-cli/        # CLI: login, init, serve, index, purge, query tools
 ```
 
 ### Search tiers

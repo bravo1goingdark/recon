@@ -1,8 +1,8 @@
 //! fff-grep based text search backend.
 //!
 //! Uses `fff_grep::Searcher` over memory-mapped file slices.
-//! fff-grep 0.4.0 only supports `search_slice` — file I/O is our
-//! responsibility via `memmap2`.
+//! fff-grep 0.6 defines its own `Matcher` trait; we bridge to it via
+//! a thin `FffMatcher` newtype that wraps `grep_regex::RegexMatcher`.
 
 use crate::search_trait::{TextHit, TextQuery, TextSearcher};
 use grep_regex::RegexMatcher;
@@ -26,6 +26,30 @@ impl Default for FffBackend {
         Self::new()
     }
 }
+
+// ── Matcher bridge ─────────────────────────────────────────────────────────────
+
+/// Adapts `grep_regex::RegexMatcher` to implement `fff_grep::Matcher`.
+///
+/// fff-grep 0.6 defines its own `Matcher` trait (simpler than the ripgrep
+/// `grep-matcher` one), so we need this newtype to satisfy the trait bound.
+struct FffMatcher(RegexMatcher);
+
+impl fff_grep::Matcher for FffMatcher {
+    type Error = fff_grep::NoError;
+
+    fn find_at(&self, haystack: &[u8], at: usize) -> Result<Option<fff_grep::Match>, Self::Error> {
+        use grep_matcher::Matcher;
+        Ok(self
+            .0
+            .find_at(haystack, at)
+            // RegexMatcher never returns Err — unwrap_or is safe
+            .unwrap_or(None)
+            .map(|m| fff_grep::Match::new(m.start(), m.end())))
+    }
+}
+
+// ── Sink ───────────────────────────────────────────────────────────────────────
 
 /// Newtype error for the fff_grep Sink (orphan rule prevents impl on std types).
 #[derive(Debug)]
@@ -77,9 +101,11 @@ impl<'a> fff_grep::Sink for CollectSink<'a> {
     }
 }
 
+// ── Core search logic ──────────────────────────────────────────────────────────
+
 /// Search a single memory-mapped file slice with fff-grep.
 fn search_slice_in_file(
-    matcher: &RegexMatcher,
+    matcher: &FffMatcher,
     path: &std::path::Path,
     hits: &mut Vec<TextHit>,
     max: usize,
@@ -90,7 +116,7 @@ fn search_slice_in_file(
         return Ok(());
     }
 
-    // SAFETY: file is open and non-empty; we only read during the search
+    // SAFETY: file is open and non-empty; we only read during the search.
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
     let searcher = fff_grep::SearcherBuilder::new().line_number(true).build();
@@ -103,13 +129,15 @@ fn search_slice_in_file(
     Ok(())
 }
 
-fn build_matcher(pattern: &str, is_regex: bool) -> Result<RegexMatcher, Error> {
+fn build_matcher(pattern: &str, is_regex: bool) -> Result<FffMatcher, Error> {
     let pat = if is_regex {
         pattern.to_string()
     } else {
         regex_escape(pattern)
     };
-    RegexMatcher::new(&pat).map_err(|e| Error::Search(format!("invalid pattern: {e}")))
+    RegexMatcher::new(&pat)
+        .map(FffMatcher)
+        .map_err(|e| Error::Search(format!("invalid pattern: {e}")))
 }
 
 fn regex_escape(pattern: &str) -> String {
@@ -122,6 +150,8 @@ fn regex_escape(pattern: &str) -> String {
     }
     escaped
 }
+
+// ── TextSearcher impl ──────────────────────────────────────────────────────────
 
 impl TextSearcher for FffBackend {
     fn search(&self, q: &TextQuery) -> Result<Vec<TextHit>, Error> {
@@ -234,5 +264,77 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].1.len(), 1);
         assert_eq!(results[1].1.len(), 1);
+    }
+
+    #[test]
+    fn fff_search_empty_file_ok() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("empty.rs");
+        std::fs::write(&file, b"").unwrap();
+        let backend = FffBackend::new();
+        let q = TextQuery {
+            pattern: "anything".into(),
+            is_regex: false,
+            max_results: 10,
+            scope: vec![file],
+        };
+        let hits = backend.search(&q).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn fff_search_no_matches() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("no_match.rs");
+        std::fs::write(&file, "fn hello() {}").unwrap();
+        let backend = FffBackend::new();
+        let q = TextQuery {
+            pattern: "xyz_not_present".into(),
+            is_regex: false,
+            max_results: 10,
+            scope: vec![file],
+        };
+        let hits = backend.search(&q).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn fff_search_special_chars_escaped() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("special.rs");
+        std::fs::write(&file, "let x = vec![1, 2, 3];").unwrap();
+        let backend = FffBackend::new();
+        let q = TextQuery {
+            pattern: "vec![1".into(), // contains regex special chars
+            is_regex: false,
+            max_results: 10,
+            scope: vec![file],
+        };
+        let hits = backend.search(&q).unwrap();
+        assert_eq!(hits.len(), 1, "should find literal vec![1");
+    }
+
+    #[test]
+    fn fff_search_nonexistent_file_skipped() {
+        let backend = FffBackend::new();
+        let q = TextQuery {
+            pattern: "anything".into(),
+            is_regex: false,
+            max_results: 10,
+            scope: vec![PathBuf::from("/nonexistent/file.rs")],
+        };
+        // Should not panic — error is logged and skipped.
+        let hits = backend.search(&q).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn fff_multi_search_empty_patterns() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn foo() {}").unwrap();
+        let backend = FffBackend::new();
+        let results = backend.multi_search(&[], &[file], 10).unwrap();
+        assert!(results.is_empty());
     }
 }

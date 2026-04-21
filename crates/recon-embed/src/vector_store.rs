@@ -105,6 +105,7 @@ impl VectorStore {
 ///
 /// Idempotent — SQLite deduplicates registrations of the same entry point.
 /// Called by both [`VectorStore::open`] and [`crate::VecReadPool::new`].
+#[allow(clippy::missing_transmute_annotations)]
 pub(crate) fn register_sqlite_vec() {
     // SAFETY: sqlite3_vec_init is a valid SQLite extension entry point.
     unsafe {

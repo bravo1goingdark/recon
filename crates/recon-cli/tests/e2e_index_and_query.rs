@@ -3,6 +3,13 @@
 use std::path::Path;
 use std::process::Command;
 
+/// Write a signed dev license (Pro tier) into a temp dir for test isolation.
+fn seed_license_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    recon_server::license::seed_dev_cache(dir.path()).expect("seed_dev_cache failed");
+    dir
+}
+
 fn recon_binary() -> std::path::PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
@@ -51,9 +58,10 @@ fn git_commit(dir: &Path, msg: &str) {
         .unwrap();
 }
 
-fn run_index(dir: &Path) -> String {
+fn run_index(dir: &Path, license_dir: &Path) -> String {
     let output = Command::new(recon_binary())
         .args(["index", "--repo", dir.to_str().unwrap()])
+        .env("RECON_CONFIG_DIR", license_dir)
         .output()
         .expect("failed to run recon index");
     assert!(
@@ -68,6 +76,7 @@ fn run_index(dir: &Path) -> String {
 fn cold_index_creates_all_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    let lic = seed_license_dir();
 
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
@@ -84,7 +93,7 @@ fn cold_index_creates_all_artifacts() {
     init_git(root);
     git_commit(root, "init");
 
-    let stderr = run_index(root);
+    let stderr = run_index(root, lic.path());
 
     // Verify artifacts
     assert!(
@@ -112,16 +121,17 @@ fn cold_index_creates_all_artifacts() {
 fn head_unchanged_skips_entirely() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    let lic = seed_license_dir();
 
     std::fs::write(root.join("lib.rs"), "pub fn a() {}").unwrap();
     init_git(root);
     git_commit(root, "init");
 
     // First index
-    run_index(root);
+    run_index(root, lic.path());
 
     // Second index — HEAD unchanged
-    let stderr = run_index(root);
+    let stderr = run_index(root, lic.path());
     assert!(
         stderr.contains("HEAD matches") || stderr.contains("skipping"),
         "should skip on unchanged HEAD: {stderr}"
@@ -136,20 +146,21 @@ fn head_unchanged_skips_entirely() {
 fn merkle_incremental_on_new_commit() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    let lic = seed_license_dir();
 
     std::fs::write(root.join("a.rs"), "pub fn original() {}").unwrap();
     init_git(root);
     git_commit(root, "init");
 
     // First full index
-    run_index(root);
+    run_index(root, lic.path());
 
     // Add a new file and commit
     std::fs::write(root.join("b.rs"), "pub fn added() {}").unwrap();
     git_commit(root, "add b");
 
     // Second index — should detect changed file via gix diff
-    let stderr = run_index(root);
+    let stderr = run_index(root, lic.path());
     assert!(
         stderr.contains("gix diff") || stderr.contains("incremental"),
         "should use gix diff: {stderr}"
@@ -160,19 +171,20 @@ fn merkle_incremental_on_new_commit() {
 fn deleted_file_cascades() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    let lic = seed_license_dir();
 
     std::fs::write(root.join("keep.rs"), "pub fn keep() {}").unwrap();
     std::fs::write(root.join("remove.rs"), "pub fn remove() {}").unwrap();
     init_git(root);
     git_commit(root, "init");
 
-    run_index(root);
+    run_index(root, lic.path());
 
     // Delete a file and commit
     std::fs::remove_file(root.join("remove.rs")).unwrap();
     git_commit(root, "delete remove.rs");
 
-    let stderr = run_index(root);
+    let stderr = run_index(root, lic.path());
     assert!(
         stderr.contains("deleted") || stderr.contains("gix diff"),
         "should detect deleted file: {stderr}"
@@ -183,6 +195,7 @@ fn deleted_file_cascades() {
 fn multi_language_indexing() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    let lic = seed_license_dir();
 
     std::fs::write(root.join("main.rs"), "pub fn rust_fn() {}").unwrap();
     std::fs::write(root.join("app.py"), "def python_fn(): pass").unwrap();
@@ -198,7 +211,7 @@ fn multi_language_indexing() {
     init_git(root);
     git_commit(root, "init");
 
-    let stderr = run_index(root);
+    let stderr = run_index(root, lic.path());
 
     // Should report indexing completed with symbols
     assert!(
