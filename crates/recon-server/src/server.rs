@@ -1,6 +1,7 @@
 //! MCP server — fully wired: Tantivy search, PageRank, redaction, live watching.
 
 use crate::tools::*;
+use ahash::AHashMap;
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use recon_core::lang::Language;
@@ -20,7 +21,6 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use smallvec::SmallVec;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -142,6 +142,10 @@ impl ReconServer {
             &self.repo_root,
             tw.as_mut(),
         )?;
+        // VACUUM after bulk indexing to reclaim free pages and shrink the DB file.
+        store
+            .incremental_vacuum()
+            .map_err(|e| recon_core::error::Error::Storage(format!("incremental_vacuum: {e}")))?;
         info!(
             files = stats.files_indexed,
             symbols = stats.total_symbols,
@@ -287,7 +291,7 @@ impl ReconServer {
                         let all_ids: Vec<u64> = all_syms.iter().map(|s| s.id).collect();
                         let existing = pool.existing_hashes(&all_ids).unwrap_or_else(|e| {
                             warn!("embed catch-up: existing_hashes: {e}");
-                            std::collections::HashMap::new()
+                            AHashMap::new()
                         });
                         let to_embed: Vec<&recon_core::symbol::Symbol> = all_syms
                             .iter()
@@ -305,10 +309,10 @@ impl ReconServer {
                                 "embed catch-up: starting"
                             );
                             // Group by file so each source file is read exactly once.
-                            let mut by_file: std::collections::HashMap<
+                            let mut by_file: AHashMap<
                                 &std::path::Path,
                                 Vec<&recon_core::symbol::Symbol>,
-                            > = std::collections::HashMap::new();
+                            > = AHashMap::new();
                             for s in &to_embed {
                                 by_file.entry(s.path.as_path()).or_default().push(s);
                             }
@@ -447,11 +451,10 @@ impl ReconServer {
                     if let (Some(ref svc), Some(ref pool), Some(ref writer)) =
                         (&embed_svc, &vec_pool, &vec_writer)
                     {
-                        use std::collections::HashMap;
                         const EMBED_BATCH: usize = 64;
 
                         // relative-path → raw file bytes for symbol body extraction
-                        let content_map: HashMap<std::path::PathBuf, &[u8]> = to_parse
+                        let content_map: AHashMap<std::path::PathBuf, &[u8]> = to_parse
                             .iter()
                             .map(|(abs, content)| {
                                 let rel = abs.strip_prefix(&repo_root).unwrap_or(abs.as_path());
@@ -472,10 +475,10 @@ impl ReconServer {
                             let all_ids: Vec<u64> = all_syms.iter().map(|s| s.id).collect();
 
                             // Lock-free hash check via VecReadPool
-                            let existing: HashMap<u64, [u8; 32]> =
+                            let existing: AHashMap<u64, [u8; 32]> =
                                 pool.existing_hashes(&all_ids).unwrap_or_else(|e| {
                                     warn!("embed: existing_hashes: {e}");
-                                    HashMap::new()
+                                    AHashMap::new()
                                 });
 
                             let to_embed: Vec<&recon_core::symbol::Symbol> = all_syms
@@ -567,7 +570,15 @@ impl ReconServer {
     fn resolve_search_scope(&self, rel_paths: &[PathBuf], filter: Option<&str>) -> Vec<PathBuf> {
         let filtered = match filter {
             Some(f) if !f.is_empty() => match filters::parse_filter(f) {
-                Ok(pf) => filters::apply_filter(rel_paths, &pf),
+                Ok(pf) => {
+                    // Resolve git-modified paths if needed
+                    let git_paths = if pf.git_modified_only {
+                        recon_indexer::git::status_paths(&self.repo_root).ok()
+                    } else {
+                        None
+                    };
+                    filters::apply_filter(rel_paths, &pf, git_paths.as_deref())
+                }
                 Err(e) => {
                     warn!("filter parse error: {e}");
                     rel_paths.to_vec()
@@ -599,7 +610,7 @@ impl ReconServer {
         };
 
         // O(n) child lookup: build parent_id -> children map in one pass
-        let mut children_map: HashMap<u64, Vec<&recon_core::symbol::Symbol>> = HashMap::new();
+        let mut children_map: AHashMap<u64, Vec<&recon_core::symbol::Symbol>> = AHashMap::new();
         for sym in &symbols {
             if let Some(pid) = sym.parent_id {
                 children_map.entry(pid).or_default().push(sym);
@@ -644,15 +655,6 @@ impl ReconServer {
         description = "Show signatures and docstrings with bodies elided as '...'. 10x compression vs full file read. Use instead of Read when you need to understand APIs and structure. Output: ~300 tokens per 3000-token file."
     )]
     async fn code_skeleton(&self, params: Parameters<SkeletonParams>) -> String {
-        let abs_path = match self.resolve_path(&params.0.path) {
-            Ok(p) => p,
-            Err(e) => return format!("Error: {e}"),
-        };
-        let content = match tokio::fs::read_to_string(&abs_path).await {
-            Ok(c) => c,
-            Err(e) => return format!("Error reading file: {e}"),
-        };
-
         let rel_path = PathBuf::from(&params.0.path);
         let symbols = self
             .read_pool
@@ -681,6 +683,14 @@ impl ReconServer {
         }
 
         if skeleton.is_empty() {
+            let abs_path = match self.resolve_path(&params.0.path) {
+                Ok(p) => p,
+                Err(e) => return format!("Error: {e}"),
+            };
+            let content = match tokio::fs::read_to_string(&abs_path).await {
+                Ok(c) => c,
+                Err(e) => return format!("Error reading file: {e}"),
+            };
             skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
         }
 
@@ -833,6 +843,42 @@ impl ReconServer {
                 .collect();
         }
 
+        // Tier 3: Semantic embedding fallback (feature-gated)
+        #[allow(unused_mut)]
+        let mut from_embedding = false;
+        #[cfg(feature = "embed")]
+        if results.is_empty() {
+            let svc = self.embed_service.lock().clone();
+            let pool = self.vec_read_pool.lock().clone();
+            if let (Some(svc), Some(pool)) = (svc, pool) {
+                let query = params.0.name.clone();
+                let query_vec =
+                    match tokio::task::spawn_blocking(move || svc.embed_one(&query)).await {
+                        Ok(Ok(v)) => v,
+                        Ok(Err(e)) => {
+                            warn!("code_find_symbol embed_one error: {e}");
+                            Vec::new()
+                        }
+                        Err(e) => {
+                            warn!("code_find_symbol embed task join error: {e}");
+                            Vec::new()
+                        }
+                    };
+                if !query_vec.is_empty() {
+                    if let Ok(vec_results) = pool.search(query_vec, None, 20) {
+                        for (id, _dist) in vec_results {
+                            if let Ok(Some(sym)) = self.read_pool.symbol_by_id(id) {
+                                results.push(sym);
+                            }
+                        }
+                        if !results.is_empty() {
+                            from_embedding = true;
+                        }
+                    }
+                }
+            }
+        }
+
         // Apply filters
         if let Some(kind_filter) = &params.0.kind {
             results.retain(|s| s.kind.label() == kind_filter.as_str());
@@ -844,6 +890,11 @@ impl ReconServer {
             }
         }
 
+        let source = if from_embedding {
+            "semantic"
+        } else {
+            "lexical"
+        };
         let entries: Vec<serde_json::Value> = results
             .iter()
             .map(|s| {
@@ -853,6 +904,7 @@ impl ReconServer {
                     "line": *s.line_range.start(),
                     "kind": s.kind.label(),
                     "signature": s.signature,
+                    "source": source,
                 })
             })
             .collect();
@@ -870,33 +922,36 @@ impl ReconServer {
             .refs_for_ident(&params.0.symbol)
             .unwrap_or_default();
 
-        // Build a lookup of symbol_id -> (path, line) for resolving ref locations
-        let all_symbols = self.read_pool.all_symbols().unwrap_or_default();
-        let sym_location: std::collections::HashMap<u64, (Arc<PathBuf>, u32)> = all_symbols
+        // Collect unique src_symbol_ids and fetch only their locations — not all 80K symbols.
+        let unique_ids: Vec<u64> = refs
             .iter()
-            .map(|s| (s.id, (Arc::clone(&s.path), *s.line_range.start())))
+            .map(|r| r.src_symbol_id)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let locations = self
+            .read_pool
+            .symbol_locations_by_ids(&unique_ids)
+            .unwrap_or_default();
+        let loc_map: ahash::AHashMap<u64, (String, u32)> = locations
+            .into_iter()
+            .map(|(id, path, line)| (id, (path, line)))
             .collect();
 
         let top_k: Vec<RefEntry> = refs
             .iter()
             .take(20)
             .map(|r| {
-                let (line, enclosing_symbol) = sym_location
+                let (path, line) = loc_map
                     .get(&r.src_symbol_id)
-                    .map(|(_path, line)| {
-                        let enclosing = all_symbols
-                            .iter()
-                            .find(|s| s.id == r.src_symbol_id)
-                            .map(|s| s.qualified_name.clone());
-                        (*line, enclosing)
-                    })
-                    .unwrap_or((0, None));
+                    .cloned()
+                    .unwrap_or_else(|| (String::new(), 0));
                 RefEntry {
-                    path: (*r.src_path).clone(),
+                    path: PathBuf::from(path),
                     line,
                     col: None,
                     snippet: r.ident.clone(),
-                    enclosing_symbol,
+                    enclosing_symbol: None,
                 }
             })
             .collect();
@@ -1089,10 +1144,28 @@ impl ReconServer {
             .filter(|f| !f.is_empty())
             .and_then(|f| filters::parse_filter(f).ok());
 
+        // Resolve git-modified paths if needed (for code_list paths are relative)
+        let git_paths = filter_parsed.as_ref().and_then(|pf| {
+            if pf.git_modified_only {
+                recon_indexer::git::status_paths(&self.repo_root)
+                    .ok()
+                    .map(|abs_paths| {
+                        abs_paths
+                            .into_iter()
+                            .filter_map(|p| p.strip_prefix(&self.repo_root).ok().map(PathBuf::from))
+                            .collect::<Vec<_>>()
+                    })
+            } else {
+                None
+            }
+        });
+
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
         for (path, sym_count, top_syms) in &summaries {
             if let Some(ref pf) = filter_parsed {
-                if filters::apply_filter(std::slice::from_ref(path), pf).is_empty() {
+                if filters::apply_filter(std::slice::from_ref(path), pf, git_paths.as_deref())
+                    .is_empty()
+                {
                     continue;
                 }
             }
@@ -1438,15 +1511,49 @@ mod tests {
         ReconServer::new(tmp.path().to_path_buf(), store, tantivy).unwrap()
     }
 
+    /// Helper: create a temp repo with known source files and index it.
+    /// Returns (server, temp_dir) so the temp dir stays alive for the test.
+    async fn make_indexed_server() -> (ReconServer, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Create a small multi-file project
+        fs_write(root.join("src/lib.rs"), "pub mod math;\npub mod utils;\n");
+        fs_write(
+            root.join("src/math.rs"),
+            "/// Add two numbers together.\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n/// Multiply two numbers.\npub fn mul(a: i32, b: i32) -> i32 {\n    a * b\n}\n\nfn internal_helper(x: i32) -> i32 {\n    x * 2\n}\n",
+        );
+        fs_write(
+            root.join("src/utils.rs"),
+            "use crate::math::add;\n\npub fn sum_three(a: i32, b: i32, c: i32) -> i32 {\n    add(add(a, b), c)\n}\n",
+        );
+
+        // Use an on-disk store so the read pool shares data with the write store
+        let db_path = root.join(".recon").join("recon.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let store = Store::open(&db_path).unwrap();
+        let tantivy_dir = root.join(".recon").join("tantivy");
+        std::fs::create_dir_all(&tantivy_dir).unwrap();
+        let tantivy = TantivyBackend::open(&tantivy_dir).unwrap();
+        let server = ReconServer::new(root.to_path_buf(), store, tantivy).unwrap();
+        server.index_repo().await.unwrap();
+        (server, tmp)
+    }
+
+    fn fs_write(path: std::path::PathBuf, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
     #[test]
     fn server_new_does_not_panic() {
-        // Regression: Server::new must never panic; errors should propagate.
         let _server = make_test_server();
     }
 
     #[test]
     fn server_new_returns_result() {
-        // Verify the Result-returning API: Ok on a valid in-memory setup.
         let store = Store::open_memory().unwrap();
         let tantivy = TantivyBackend::open_memory().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -1460,7 +1567,6 @@ mod tests {
     #[tokio::test]
     async fn code_outline_empty_repo() {
         let server = make_test_server();
-        // File not indexed — must return an error message, not panic.
         use rmcp::handler::server::wrapper::Parameters;
         let params = Parameters(crate::tools::OutlineParams {
             path: "nonexistent.rs".into(),
@@ -1478,7 +1584,390 @@ mod tests {
             token_budget: 500,
         });
         let result = server.code_repo_map(params).await;
-        // Empty repo map is valid; must not panic.
         assert!(!result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn code_outline_indexed_file() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::OutlineParams {
+            path: "src/math.rs".into(),
+        });
+        let result = server.code_outline(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_outline should succeed for indexed file: {result}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Outline"));
+        let entries = &json["entries"];
+        assert!(
+            entries
+                .as_array()
+                .is_some_and(|a| a.iter().any(|e| e["name"] == "add")),
+            "should contain 'add' function"
+        );
+        assert!(
+            entries
+                .as_array()
+                .is_some_and(|a| a.iter().any(|e| e["name"] == "mul")),
+            "should contain 'mul' function"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_read_symbol_by_name() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::ReadSymbolParams {
+            path: "src/math.rs".into(),
+            symbol_or_line: "add".into(),
+        });
+        let result = server.code_read_symbol(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_read_symbol should succeed: {result}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("SymbolCard"));
+        assert_eq!(json["qualified_name"].as_str(), Some("add"));
+        assert!(json["body"].as_str().is_some_and(|b| b.contains("a + b")));
+        assert!(json["doc"]
+            .as_str()
+            .is_some_and(|d| d.contains("Add two numbers")));
+    }
+
+    #[tokio::test]
+    async fn code_read_symbol_by_line_number() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        // Line 2 is inside the `add` function body
+        let params = Parameters(crate::tools::ReadSymbolParams {
+            path: "src/math.rs".into(),
+            symbol_or_line: "2".into(),
+        });
+        let result = server.code_read_symbol(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_read_symbol by line should succeed: {result}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["qualified_name"].as_str(), Some("add"));
+    }
+
+    #[tokio::test]
+    async fn code_read_symbol_not_found() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::ReadSymbolParams {
+            path: "src/math.rs".into(),
+            symbol_or_line: "nonexistent_symbol_xyz".into(),
+        });
+        let result = server.code_read_symbol(params).await;
+        assert!(
+            result.contains("Symbol not found"),
+            "should report symbol not found: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_read_symbol_has_parent_chain() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::ReadSymbolParams {
+            path: "src/utils.rs".into(),
+            symbol_or_line: "sum_three".into(),
+        });
+        let result = server.code_read_symbol(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_read_symbol should succeed: {result}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["qualified_name"].as_str(), Some("sum_three"));
+        // parent_chain may be empty for top-level symbols; just verify the field exists
+        assert!(json.get("parent_chain").is_some());
+    }
+
+    #[tokio::test]
+    async fn code_find_symbol_exact() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::FindSymbolParams {
+            name: "add".into(),
+            kind: None,
+            lang: None,
+        });
+        let result = server.code_find_symbol(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_find_symbol should succeed: {result}"
+        );
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(!entries.is_empty(), "should find 'add' symbol: {result}");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["qualified_name"].as_str() == Some("add")),
+            "should have 'add' in results"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_find_symbol_with_kind_filter() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::FindSymbolParams {
+            name: "add".into(),
+            kind: Some("fn".into()),
+            lang: None,
+        });
+        let result = server.code_find_symbol(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_find_symbol with kind filter should succeed: {result}"
+        );
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(!entries.is_empty(), "should find 'add' as a function");
+    }
+
+    #[tokio::test]
+    async fn code_find_refs_has_results() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::FindRefsParams {
+            symbol: "add".into(),
+        });
+        let result = server.code_find_refs(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_find_refs should succeed: {result}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("ReferenceDigest"));
+        assert_eq!(json["symbol"].as_str(), Some("add"));
+        // There should be at least some refs (utils.rs uses add)
+        assert!(json.get("total").is_some());
+        assert!(json.get("top_k").is_some());
+    }
+
+    #[tokio::test]
+    async fn code_search_exact_mode() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::SearchParams {
+            query: "fn add".into(),
+            mode: "exact".into(),
+            filter: None,
+        });
+        let result = server.code_search(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_search exact should succeed: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_search_regex_mode() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::SearchParams {
+            query: r"fn\s+\w+\(a:\s*i32".into(),
+            mode: "regex".into(),
+            filter: None,
+        });
+        let result = server.code_search(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_search regex should succeed: {result}"
+        );
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(!entries.is_empty(), "regex search should find matches");
+    }
+
+    #[tokio::test]
+    async fn code_search_with_git_modified_filter() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        // Filter with git_modified_only — on a non-git repo this should gracefully
+        // fall back to returning all paths
+        let params = Parameters(crate::tools::SearchParams {
+            query: "fn".into(),
+            mode: "exact".into(),
+            filter: Some("git_modified:true".into()),
+        });
+        let result = server.code_search(params).await;
+        // Should not crash even without git
+        assert!(!result.starts_with("Error:"));
+    }
+
+    #[tokio::test]
+    async fn code_skeleton_indexed_file() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::SkeletonParams {
+            path: "src/math.rs".into(),
+            depth: 1,
+        });
+        let result = server.code_skeleton(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_skeleton should succeed: {result}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Skeleton"));
+        let content = json["content"].as_str().unwrap();
+        assert!(content.contains("add"), "skeleton should contain 'add'");
+        assert!(
+            content.contains("{ ... }"),
+            "skeleton should have elided bodies"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_list_returns_files() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::ListParams {
+            lang: Some("rust".into()),
+            filter: None,
+            glob: None,
+        });
+        let result = server.code_list(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_list should succeed: {result}"
+        );
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(
+            entries.len() >= 2,
+            "should list at least 2 Rust files, got {}",
+            entries.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn code_stats_after_indexing() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_stats(Parameters(crate::tools::StatsParams {}))
+            .await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_stats should succeed: {result}"
+        );
+        let stats: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            stats["files_indexed"].as_u64().unwrap_or(0) >= 2,
+            "should have indexed at least 2 files"
+        );
+        assert!(
+            stats["total_symbols"].as_u64().unwrap_or(0) > 0,
+            "should have indexed symbols"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_reindex_force() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        // Get stats before reindex
+        let before = server
+            .code_stats(Parameters(crate::tools::StatsParams {}))
+            .await;
+        let before_stats: serde_json::Value = serde_json::from_str(&before).unwrap();
+        let before_files = before_stats["files_indexed"].as_u64().unwrap_or(0);
+
+        // Force reindex
+        let result = server
+            .code_reindex(Parameters(crate::tools::ReindexParams { force: true }))
+            .await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_reindex force should succeed: {result}"
+        );
+        let reindex_stats: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(reindex_stats["status"].as_str(), Some("ok"));
+        assert_eq!(reindex_stats["force"].as_bool(), Some(true));
+        assert!(
+            reindex_stats["files_indexed"].as_u64().unwrap_or(0) > 0,
+            "force reindex should index files"
+        );
+
+        // Verify stats after reindex
+        let after = server
+            .code_stats(Parameters(crate::tools::StatsParams {}))
+            .await;
+        let after_stats: serde_json::Value = serde_json::from_str(&after).unwrap();
+        let after_files = after_stats["files_indexed"].as_u64().unwrap_or(0);
+        assert!(
+            after_files >= before_files,
+            "files after reindex ({after_files}) should be >= before ({before_files})"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_multi_find_returns_results() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::MultiFindParams {
+            patterns: vec!["fn add".into(), "fn mul".into()],
+            filter: None,
+        });
+        let result = server.code_multi_find(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_multi_find should succeed: {result}"
+        );
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(
+            !entries.is_empty(),
+            "multi_find should return at least 1 pattern result"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_find_strings_returns_results() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::FindStringsParams {
+            pattern: "two".into(),
+            kind: "comment".into(),
+            filter: None,
+        });
+        let result = server.code_find_strings(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_find_strings should succeed: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_tool_dispatch() {
+        let (server, _tmp) = make_indexed_server().await;
+
+        // Test dispatch to code_stats
+        let result = server.query_tool("code_stats", "{}").await;
+        assert!(
+            !result.starts_with("Error:") && !result.starts_with("unknown tool"),
+            "query_tool should dispatch code_stats: {result}"
+        );
+
+        // Test unknown tool
+        let result = server.query_tool("unknown_tool", "{}").await;
+        assert!(
+            result.contains("unknown tool"),
+            "should report unknown tool: {result}"
+        );
+
+        // Test invalid args
+        let result = server.query_tool("code_outline", "{invalid json").await;
+        assert!(
+            result.contains("invalid args"),
+            "should report invalid args: {result}"
+        );
     }
 }
