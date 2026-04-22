@@ -1,8 +1,8 @@
 //! Merkle tree for efficient change detection across repo snapshots.
 //!
-//! Leaves are blake3 hashes of file content. Directory nodes are blake3
-//! hashes of their sorted children's hashes. Diffing two snapshots
-//! identifies changed paths without re-hashing unchanged subtrees.
+//! A flat snapshot: relative path → blake3 content hash (files only).
+//! Directory hashes are NOT computed — this is a flat index, not a hierarchical tree.
+//! Diffing two snapshots identifies changed paths without re-hashing unchanged files.
 
 use recon_core::error::Error;
 use std::collections::BTreeMap;

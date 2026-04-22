@@ -1,5 +1,6 @@
 //! Core indexing logic: parallel parse with pooled parsers, batch store + Tantivy.
 
+use crate::merkle::{MerkleDiff, MerkleSnapshot};
 use crate::walker;
 use rayon::prelude::*;
 use recon_core::error::Error;
@@ -23,6 +24,71 @@ pub struct ParsedFile {
     pub symbols: Vec<Symbol>,
     /// Extracted symbol references.
     pub refs: Vec<Ref>,
+}
+
+/// Path to the persisted Merkle snapshot within the repo.
+const MERKLE_SNAPSHOT_PATH: &str = ".recon/merkle.json";
+
+/// Resolve the merkle snapshot path for a given repo root.
+fn merkle_snapshot_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(MERKLE_SNAPSHOT_PATH)
+}
+
+/// Build a MerkleSnapshot by hashing all indexable files in parallel.
+///
+/// Walks the repo using [`walker::walk_repo`], reads each file, filters out
+/// generated content, and computes blake3 content hashes. The resulting
+/// snapshot maps relative paths to their content hashes.
+pub fn build_merkle_snapshot(repo_root: &Path) -> MerkleSnapshot {
+    let paths = walker::walk_repo(repo_root);
+    let hashes: Vec<_> = paths
+        .par_iter()
+        .filter_map(|path| {
+            let content = match std::fs::read(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(?path, "read error during merkle build: {e}");
+                    return None;
+                }
+            };
+            if walker::is_generated_content(&content) {
+                return None;
+            }
+            let rel = match path.strip_prefix(repo_root) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => path.clone(),
+            };
+            let content_hash = hash::blake3_bytes(&content);
+            Some((rel, content_hash))
+        })
+        .collect();
+    MerkleSnapshot::build(hashes)
+}
+
+/// Load the previous Merkle snapshot from the repo, if it exists.
+fn load_previous_snapshot(repo_root: &Path) -> Option<MerkleSnapshot> {
+    let snap_path = merkle_snapshot_path(repo_root);
+    match MerkleSnapshot::load(&snap_path) {
+        Ok(snap) => {
+            debug!(entries = snap.len(), "loaded previous merkle snapshot");
+            Some(snap)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Save the current Merkle snapshot to the repo.
+fn save_snapshot(repo_root: &Path, snapshot: &MerkleSnapshot) {
+    let snap_path = merkle_snapshot_path(repo_root);
+    if let Err(e) = std::fs::create_dir_all(snap_path.parent().unwrap_or(repo_root)) {
+        warn!("failed to create .recon directory: {e}");
+        return;
+    }
+    if let Err(e) = snapshot.save(&snap_path) {
+        warn!("failed to save merkle snapshot: {e}");
+    } else {
+        debug!(entries = snapshot.len(), "saved merkle snapshot");
+    }
 }
 
 fn now_secs() -> i64 {
@@ -144,6 +210,10 @@ pub fn index_file(
 /// Index all files in a repo — parallel parse, sequential batch store + Tantivy.
 /// Full repo index. If `shared_writer` is provided, uses it instead of creating
 /// a new IndexWriter (avoids LockBusy when a watcher already holds the lock).
+///
+/// On subsequent runs, loads the previous Merkle snapshot and skips files whose
+/// content hash has not changed, making cold-start re-indexing faster.
+#[allow(clippy::needless_option_as_deref)]
 pub fn index_repo(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
@@ -155,7 +225,10 @@ pub fn index_repo(
 
     let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
 
-    // Phase 1: Parallel read + parse
+    // Load previous Merkle snapshot for change detection
+    let previous_snapshot = load_previous_snapshot(repo_root);
+
+    // Phase 1: Parallel read + parse, skipping unchanged files
     let parsed: Vec<_> = paths
         .par_iter()
         .filter_map(|path| {
@@ -170,6 +243,20 @@ pub fn index_repo(
                 return None;
             }
             let content_hash = hash::blake3_bytes(&content);
+
+            // Skip if hash matches previous snapshot
+            if let Some(ref prev) = previous_snapshot {
+                let rel = match path.strip_prefix(repo_root) {
+                    Ok(r) => r,
+                    Err(_) => path,
+                };
+                if let Some(prev_hash) = prev.hashes.get(rel) {
+                    if *prev_hash == content_hash {
+                        return None;
+                    }
+                }
+            }
+
             let mtime = mtime_of(path);
             parse_file_with_content(&content, path, repo_root, &pools, content_hash, mtime)
         })
@@ -221,6 +308,10 @@ pub fn index_repo(
         }
     }
 
+    // Build and save the new Merkle snapshot
+    let new_snapshot = build_merkle_snapshot(repo_root);
+    save_snapshot(repo_root, &new_snapshot);
+
     stats.total_symbols = store.symbol_count().unwrap_or(0);
     info!(
         files = stats.files_indexed,
@@ -235,8 +326,9 @@ pub fn index_repo(
 ///
 /// 1. If HEAD matches the last indexed commit → only check worktree status.
 /// 2. If HEAD differs → gix tree diff (old..new) + worktree status.
-/// 3. Non-git repos or first index → fall back to full `index_repo`.
-/// 4. Only changed files are read, parsed, and stored.
+/// 3. Non-git repos or first index → fall back to Merkle diff.
+/// 4. If gix operations fail → fall back to Merkle diff instead of full index.
+/// 5. Only changed files are read, parsed, and stored.
 ///
 /// If `shared_writer` is provided, uses it for Tantivy writes instead of
 /// creating a new writer (prevents LockBusy).
@@ -255,7 +347,7 @@ pub fn index_repo_incremental(
     let repo = match crate::git::open_repo(repo_root) {
         Ok(r) => Some(r),
         Err(e) => {
-            debug!("gix open unavailable, will do full index: {e}");
+            debug!("gix open unavailable, will try merkle diff: {e}");
             None
         }
     };
@@ -263,30 +355,36 @@ pub fn index_repo_incremental(
     let current_head = match repo.as_ref().map(crate::git::head_sha_with_repo) {
         Some(Ok(sha)) => Some(sha),
         Some(Err(e)) => {
-            debug!("gix head_sha unavailable, will do full index: {e}");
+            debug!("gix head_sha unavailable, will try merkle diff: {e}");
             None
         }
         None => None,
     };
 
-    // Non-git directory or first index: fall back to full scan
+    // Non-git directory or first index: fall back to Merkle diff
     let current_head = match current_head {
         Some(sha) => sha,
         None => {
-            info!("not a git repo, full index");
-            return index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut());
+            info!("not a git repo or no HEAD, using merkle diff");
+            return index_repo_merkle_fallback(
+                store,
+                tantivy,
+                repo_root,
+                shared_writer.as_deref_mut(),
+            );
         }
     };
     // `repo` is Some because we got a valid current_head from it above.
-    // Fall back to full index rather than panic if this invariant is somehow violated.
+    // Fall back to Merkle diff rather than panic if this invariant is somehow violated.
     let Some(repo) = repo else {
-        warn!("git repo handle unexpectedly missing after HEAD was resolved; doing full index");
-        return index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut());
+        warn!("git repo handle unexpectedly missing after HEAD was resolved; using merkle diff");
+        return index_repo_merkle_fallback(store, tantivy, repo_root, shared_writer.as_deref_mut());
     };
 
     if last_commit.is_none() {
-        info!("no previous index, full index");
-        let stats = index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut())?;
+        info!("no previous index, using merkle diff");
+        let stats =
+            index_repo_merkle_fallback(store, tantivy, repo_root, shared_writer.as_deref_mut())?;
         if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
             warn!("failed to store last_indexed_commit: {e}");
         }
@@ -294,8 +392,8 @@ pub fn index_repo_incremental(
     }
     // `last_commit` is Some because the is_none() branch returned above.
     let Some(last_commit) = last_commit else {
-        warn!("last_commit unexpectedly None after non-None check; doing full index");
-        return index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut());
+        warn!("last_commit unexpectedly None after non-None check; using merkle diff");
+        return index_repo_merkle_fallback(store, tantivy, repo_root, shared_writer.as_deref_mut());
     };
 
     // Get committed changes (tree diff) if HEAD advanced
@@ -313,12 +411,13 @@ pub fn index_repo_incremental(
                 }
             }
             Err(e) => {
-                warn!("gix tree diff failed, falling back to full index: {e}");
-                let stats = index_repo(store, tantivy, repo_root, shared_writer.as_deref_mut())?;
-                if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
-                    warn!("failed to store last_indexed_commit: {e}");
-                }
-                return Ok(stats);
+                warn!("gix tree diff failed, falling back to merkle diff: {e}");
+                return index_repo_merkle_fallback(
+                    store,
+                    tantivy,
+                    repo_root,
+                    shared_writer.as_deref_mut(),
+                );
             }
         }
     }
@@ -385,6 +484,68 @@ pub fn index_repo_incremental(
     if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
         warn!("failed to store last_indexed_commit: {e}");
     }
+
+    Ok(stats)
+}
+
+/// Incremental indexing fallback using Merkle snapshot diff.
+///
+/// Used when git operations are unavailable or fail, and for non-git repos.
+/// Compares the current file tree against the saved Merkle snapshot and
+/// only re-indexes files whose content hash has changed.
+#[allow(clippy::needless_option_as_deref)]
+fn index_repo_merkle_fallback(
+    store: &Store,
+    tantivy: Option<&TantivyBackend>,
+    repo_root: &Path,
+    shared_writer: Option<&mut tantivy::IndexWriter>,
+) -> Result<IndexStats, Error> {
+    let current_snapshot = build_merkle_snapshot(repo_root);
+    let previous_snapshot = load_previous_snapshot(repo_root);
+
+    let diff = match &previous_snapshot {
+        Some(prev) => current_snapshot.diff(prev),
+        None => {
+            // No previous snapshot — index everything
+            MerkleDiff {
+                changed: current_snapshot.hashes.keys().cloned().collect(),
+                deleted: Vec::new(),
+            }
+        }
+    };
+
+    if diff.changed.is_empty() && diff.deleted.is_empty() {
+        let total = store.symbol_count().unwrap_or(0);
+        info!(symbols = total, "merkle diff: no changes detected");
+        save_snapshot(repo_root, &current_snapshot);
+        return Ok(IndexStats {
+            files_indexed: 0,
+            total_symbols: total,
+            errors: 0,
+        });
+    }
+
+    info!(
+        changed = diff.changed.len(),
+        deleted = diff.deleted.len(),
+        "merkle diff: incremental reindex"
+    );
+
+    // Convert relative paths to absolute for indexing
+    let changed_abs: Vec<PathBuf> = diff.changed.iter().map(|rel| repo_root.join(rel)).collect();
+    let deleted_abs: Vec<PathBuf> = diff.deleted.iter().map(|rel| repo_root.join(rel)).collect();
+
+    let stats = index_diff(
+        store,
+        tantivy,
+        repo_root,
+        &changed_abs,
+        &deleted_abs,
+        shared_writer,
+    )?;
+
+    // Save the new snapshot after successful indexing
+    save_snapshot(repo_root, &current_snapshot);
 
     Ok(stats)
 }
@@ -670,7 +831,7 @@ mod tests {
 
     #[test]
     fn incremental_on_non_git_dir_falls_back_to_full_index() {
-        // A plain directory (not a git repo) must fall back to full index without panicking.
+        // A plain directory (not a git repo) must fall back to merkle diff without panicking.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "pub fn foo() {}").unwrap();
 
@@ -681,6 +842,95 @@ mod tests {
             "full fallback should index the file"
         );
         assert_eq!(stats.errors, 0);
+    }
+
+    #[test]
+    fn merkle_fallback_on_non_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn foo() {}").unwrap();
+        std::fs::write(dir.path().join("util.rs"), "pub fn util() {}").unwrap();
+
+        let store = Store::open_memory().unwrap();
+
+        // First run: should index all files and save snapshot
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
+        assert!(stats.files_indexed >= 2);
+
+        // Verify snapshot was saved
+        let snap_path = dir.path().join(".recon/merkle.json");
+        assert!(snap_path.exists(), "merkle snapshot should be saved");
+
+        // Second run: no changes, should skip
+        let stats2 = index_repo_incremental(&store, None, dir.path(), None).unwrap();
+        assert_eq!(stats2.files_indexed, 0, "should skip when no changes");
+
+        // Modify one file
+        std::fs::write(dir.path().join("lib.rs"), "pub fn foo() { println!(); }").unwrap();
+
+        // Third run: should only re-index the changed file
+        let stats3 = index_repo_incremental(&store, None, dir.path(), None).unwrap();
+        assert_eq!(
+            stats3.files_indexed, 1,
+            "should only re-index 1 changed file"
+        );
+    }
+
+    #[test]
+    fn merkle_detects_deleted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("extra.rs"), "pub fn extra() {}").unwrap();
+
+        let store = Store::open_memory().unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
+        assert!(stats.files_indexed >= 2);
+        let count_before = store.symbol_count().unwrap();
+
+        // Delete a file
+        std::fs::remove_file(dir.path().join("extra.rs")).unwrap();
+
+        let _stats2 = index_repo_incremental(&store, None, dir.path(), None).unwrap();
+        let count_after = store.symbol_count().unwrap();
+        assert!(
+            count_after < count_before,
+            "symbols should decrease after deletion: before={count_before}, after={count_after}"
+        );
+    }
+
+    #[test]
+    fn build_merkle_snapshot_works() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}").unwrap();
+
+        let snapshot = build_merkle_snapshot(dir.path());
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.hashes.contains_key(&PathBuf::from("a.rs")));
+        assert!(snapshot.hashes.contains_key(&PathBuf::from("b.rs")));
+    }
+
+    #[test]
+    fn index_repo_skips_unchanged_with_merkle() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn lib() {}").unwrap();
+
+        let store = Store::open_memory().unwrap();
+
+        // First run
+        let stats1 = index_repo(&store, None, dir.path(), None).unwrap();
+        assert!(stats1.files_indexed >= 2);
+
+        // Second run with no changes — should skip all files
+        let stats2 = index_repo(&store, None, dir.path(), None).unwrap();
+        assert_eq!(stats2.files_indexed, 0, "should skip all unchanged files");
+
+        // Modify one file
+        std::fs::write(dir.path().join("main.rs"), "fn main() { println!(); }").unwrap();
+
+        // Third run — should only index the changed file
+        let stats3 = index_repo(&store, None, dir.path(), None).unwrap();
+        assert_eq!(stats3.files_indexed, 1, "should only index 1 changed file");
     }
 
     #[test]
