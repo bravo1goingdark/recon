@@ -97,3 +97,180 @@ impl Watcher {
         self.rx.try_recv().ok()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Helper: create a temp dir with a .git subdir so it looks like a repo.
+    fn make_temp_root() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".git")).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn watcher_new_on_valid_dir() {
+        let tmp = make_temp_root();
+        // Watcher::new should succeed on any readable directory
+        let watcher = Watcher::new(tmp.path());
+        assert!(
+            watcher.is_ok(),
+            "Watcher::new should succeed on a valid temp dir"
+        );
+    }
+
+    #[test]
+    fn watcher_new_on_nonexistent_dir_fails() {
+        let result = Watcher::new(Path::new("/nonexistent/path/that/does/not/exist"));
+        assert!(
+            result.is_err(),
+            "Watcher::new should fail on a nonexistent directory"
+        );
+    }
+
+    #[test]
+    fn watcher_detects_file_creation() {
+        let tmp = make_temp_root();
+        let watcher = Watcher::new(tmp.path()).unwrap();
+
+        // Write a Rust file — the watcher should pick it up
+        let file_path = tmp.path().join("hello.rs");
+        fs::write(&file_path, "fn main() {}").unwrap();
+
+        // Wait for the debounce window (250ms) plus a safety margin
+        thread::sleep(Duration::from_millis(500));
+
+        let events = watcher.try_recv();
+        assert!(
+            events.is_some(),
+            "watcher should have detected the new .rs file"
+        );
+        let paths = events.unwrap();
+        assert!(
+            paths.iter().any(|p| p.ends_with("hello.rs")),
+            "hello.rs should be in the event paths: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn watcher_filters_recon_directory() {
+        let tmp = make_temp_root();
+        let recon_dir = tmp.path().join(".recon");
+        fs::create_dir(&recon_dir).unwrap();
+
+        let watcher = Watcher::new(tmp.path()).unwrap();
+
+        // Write a file inside .recon — it should be filtered out
+        let file_path = recon_dir.join("cache.db");
+        fs::write(&file_path, b"fake cache data").unwrap();
+
+        // Wait for debounce
+        thread::sleep(Duration::from_millis(500));
+
+        // try_recv may return None (filtered) or Some with no .recon paths
+        if let Some(paths) = watcher.try_recv() {
+            let has_recon = paths
+                .iter()
+                .any(|p| p.components().any(|c| c.as_os_str() == ".recon"));
+            assert!(!has_recon, ".recon paths should be filtered out: {paths:?}");
+        }
+    }
+
+    #[test]
+    fn watcher_filters_non_source_files() {
+        let tmp = make_temp_root();
+        let watcher = Watcher::new(tmp.path()).unwrap();
+
+        // Write a non-source file (e.g., .png) — should be filtered
+        let file_path = tmp.path().join("image.png");
+        fs::write(&file_path, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        thread::sleep(Duration::from_millis(500));
+
+        if let Some(paths) = watcher.try_recv() {
+            let has_png = paths.iter().any(|p| p.ends_with("image.png"));
+            assert!(
+                !has_png,
+                "non-source files like .png should be filtered: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn watcher_detects_multiple_files() {
+        let tmp = make_temp_root();
+        let watcher = Watcher::new(tmp.path()).unwrap();
+
+        // Write multiple Rust files
+        fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+        fs::write(tmp.path().join("b.rs"), "fn b() {}").unwrap();
+        fs::write(tmp.path().join("c.rs"), "fn c() {}").unwrap();
+
+        thread::sleep(Duration::from_millis(500));
+
+        let events = watcher.try_recv();
+        assert!(
+            events.is_some(),
+            "watcher should have detected the new files"
+        );
+        let paths = events.unwrap();
+        assert!(
+            !paths.is_empty(),
+            "should have at least 1 event path, got {}",
+            paths.len()
+        );
+    }
+
+    #[test]
+    fn watcher_recv_blocks_until_event() {
+        let tmp = make_temp_root();
+        let watcher = Watcher::new(tmp.path()).unwrap();
+
+        // Spawn a thread that writes a file after a short delay
+        let root = tmp.path().to_path_buf();
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            fs::write(root.join("delayed.rs"), "fn delayed() {}").unwrap();
+        });
+
+        // recv() should block and then return when the file is written
+        let events = watcher.recv();
+        assert!(
+            events.is_some(),
+            "recv() should return events after file creation"
+        );
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn watcher_detects_file_modification() {
+        let tmp = make_temp_root();
+
+        // Pre-create a Rust file
+        let file_path = tmp.path().join("existing.rs");
+        fs::write(&file_path, "fn main() {}").unwrap();
+
+        let watcher = Watcher::new(tmp.path()).unwrap();
+
+        // Modify the file
+        fs::write(&file_path, "fn main() { println!(\"hello\"); }").unwrap();
+
+        thread::sleep(Duration::from_millis(500));
+
+        let events = watcher.try_recv();
+        assert!(
+            events.is_some(),
+            "watcher should have detected the file modification"
+        );
+        let paths = events.unwrap();
+        assert!(
+            paths.iter().any(|p| p.ends_with("existing.rs")),
+            "existing.rs should be in the event paths: {paths:?}"
+        );
+    }
+}
