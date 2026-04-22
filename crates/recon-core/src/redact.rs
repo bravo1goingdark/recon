@@ -45,6 +45,15 @@ const PEM_MARKERS: &[&str] = &[
     "-----BEGIN OPENSSH PRIVATE KEY-----",
 ];
 
+/// Pre-computed PEM (header, end_marker) pairs — built once via `LazyLock`.
+static PEM_PAIRS: std::sync::LazyLock<Vec<(&'static str, String)>> =
+    std::sync::LazyLock::new(|| {
+        PEM_MARKERS
+            .iter()
+            .map(|&m| (m, m.replace("BEGIN", "END")))
+            .collect()
+    });
+
 /// Aho-Corasick automaton for fast pre-screening of all secret patterns + PEM markers.
 /// Built once, reused across all calls. Returns `None` if construction fails (logged as error).
 /// If no pattern matches, we skip the full scan entirely.
@@ -113,13 +122,12 @@ pub fn redact_secrets(text: &str) -> Option<String> {
     // This avoids O(n) replace_range calls that each shift the entire string.
     let mut replacements: Vec<(usize, usize)> = Vec::new();
 
-    // Check for PEM private key blocks
-    for marker in PEM_MARKERS {
+    // Check for PEM private key blocks — uses pre-computed end markers.
+    for &(marker, ref end_marker) in PEM_PAIRS.iter() {
         let mut search_from = 0;
         while let Some(start) = text[search_from..].find(marker) {
             let abs_start = search_from + start;
-            let end_marker = marker.replace("BEGIN", "END");
-            if let Some(end) = text[abs_start..].find(&end_marker) {
+            if let Some(end) = text[abs_start..].find(end_marker.as_str()) {
                 let block_end = abs_start + end + end_marker.len();
                 replacements.push((abs_start, block_end));
                 search_from = block_end;

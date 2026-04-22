@@ -90,7 +90,7 @@ impl TextSearcher for GrepBackend {
 
         // Parallel scan: partition files across rayon threads, merge buckets.
         let n_patterns = non_empty.len();
-        let results: Vec<Vec<TextHit>> = scope
+        let mut results: Vec<Vec<TextHit>> = scope
             .par_iter()
             .map(|path: &PathBuf| {
                 let mut local_buckets: Vec<Vec<TextHit>> =
@@ -141,7 +141,7 @@ impl TextSearcher for GrepBackend {
             if pat.is_empty() {
                 final_results.push((pat.to_string(), Vec::new()));
             } else {
-                let mut hits = std::mem::take(&mut results[non_empty_idx].clone());
+                let mut hits = std::mem::take(&mut results[non_empty_idx]);
                 hits.truncate(max_per_pattern);
                 final_results.push((pat.to_string(), hits));
                 non_empty_idx += 1;

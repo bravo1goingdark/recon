@@ -210,6 +210,13 @@ pub fn symbol_count(conn: &Connection) -> Result<u64, Error> {
     .map_err(|e| Error::Storage(e.to_string()))
 }
 
+/// Count all indexed files.
+pub fn file_count(conn: &Connection) -> Result<u64, Error> {
+    conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
+        .map(|n| n as u64)
+        .map_err(|e| Error::Storage(e.to_string()))
+}
+
 /// Most recent indexed_at across all files.
 pub fn max_indexed_at(conn: &Connection) -> Result<i64, Error> {
     conn.query_row(

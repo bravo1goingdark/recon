@@ -228,7 +228,11 @@ pub fn validate_license(key: Option<&str>, cache_dir: &Path) -> Result<Validated
 ///
 /// This function is `pub` so that e2e test helpers in other crates (e.g.
 /// `recon-cli` integration tests) can generate valid fake licenses.
-pub fn compute_signature(resp: &LicenseResponse) -> String {
+///
+/// # Errors
+/// Returns `Err` if the HMAC key cannot be initialized (should never happen
+/// with the compile-time embedded key).
+pub fn compute_signature(resp: &LicenseResponse) -> Result<String, String> {
     let payload = format!(
         "{}:{}:{}:{}:{}",
         resp.tier,
@@ -237,13 +241,14 @@ pub fn compute_signature(resp: &LicenseResponse) -> String {
         resp.limits.max_loc,
         resp.expires_at
     );
-    let mut mac = new_mac().expect("HMAC key is always non-empty");
+    let mut mac = new_mac().ok_or_else(|| "HMAC key initialization failed".to_string())?;
     mac.update(payload.as_bytes());
-    mac.finalize()
+    Ok(mac
+        .finalize()
         .into_bytes()
         .iter()
         .map(|b| format!("{b:02x}"))
-        .collect()
+        .collect())
 }
 
 /// Write a signed Pro-tier dev license to `<cache_dir>/license.json`.
@@ -384,7 +389,7 @@ fn write_cache(path: &Path, resp: &LicenseResponse) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let mut resp = resp.clone();
-    resp.signature = Some(compute_signature(&resp));
+    resp.signature = Some(compute_signature(&resp)?);
     let cached = CachedLicense {
         cached_at: now_secs(),
         response: resp,
@@ -449,7 +454,7 @@ mod tests {
     fn seed_cache(dir: &Path, resp: LicenseResponse, cached_at: u64) {
         let path = dir.join("license.json");
         let mut resp = resp;
-        resp.signature = Some(compute_signature(&resp));
+        resp.signature = Some(compute_signature(&resp).unwrap());
         let entry = CachedLicense {
             cached_at,
             response: resp,
@@ -589,15 +594,15 @@ mod tests {
     #[test]
     fn compute_signature_is_deterministic() {
         let resp = make_resp("Pro", 10, 0);
-        let sig1 = compute_signature(&resp);
-        let sig2 = compute_signature(&resp);
+        let sig1 = compute_signature(&resp).unwrap();
+        let sig2 = compute_signature(&resp).unwrap();
         assert_eq!(sig1, sig2);
     }
 
     #[test]
     fn compute_signature_changes_with_tier() {
-        let pro = compute_signature(&make_resp("Pro", 10, 0));
-        let ent = compute_signature(&make_resp("Enterprise", 10, 0));
+        let pro = compute_signature(&make_resp("Pro", 10, 0)).unwrap();
+        let ent = compute_signature(&make_resp("Enterprise", 10, 0)).unwrap();
         assert_ne!(pro, ent);
     }
 
@@ -726,7 +731,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("license.json");
         let mut resp = make_resp("Pro", 10, 0);
-        resp.signature = Some(compute_signature(&resp));
+        resp.signature = Some(compute_signature(&resp).unwrap());
         let entry = CachedLicense {
             cached_at: 0, // epoch → ancient
             response: resp,

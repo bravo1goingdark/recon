@@ -4192,6 +4192,7 @@ dependencies = [
  "arc-swap",
  "compact_str",
  "criterion",
+ "dashmap",
  "fff-grep",
  "fff-query-parser",
  "filetime",
@@ -4218,6 +4219,7 @@ name = "recon-server"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "arc-swap",
  "compact_str",
  "dashmap",
  "dirs",

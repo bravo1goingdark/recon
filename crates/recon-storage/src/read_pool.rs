@@ -130,6 +130,11 @@ impl ReadPool {
         self.with(read_fns::symbol_count)
     }
 
+    /// Count all indexed files.
+    pub fn file_count(&self) -> Result<u64, Error> {
+        self.with(read_fns::file_count)
+    }
+
     /// Most recent indexed_at across all files.
     pub fn max_indexed_at(&self) -> Result<i64, Error> {
         self.with(read_fns::max_indexed_at)

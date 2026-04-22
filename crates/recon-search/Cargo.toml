@@ -28,6 +28,7 @@ aho-corasick = { workspace = true }
 arc-swap = { workspace = true }
 smallvec = { workspace = true }
 rayon = { workspace = true }
+dashmap = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

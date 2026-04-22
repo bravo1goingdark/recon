@@ -2,6 +2,7 @@
 
 use crate::tools::*;
 use ahash::AHashMap;
+use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use recon_core::lang::Language;
@@ -22,6 +23,7 @@ use rmcp::model::{Implementation, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use smallvec::SmallVec;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -40,6 +42,14 @@ pub struct ReconServer {
     tantivy_writer: Arc<Mutex<Option<tantivy::IndexWriter>>>,
     text_searcher: Arc<dyn TextSearcher>,
     repo_root: PathBuf,
+    /// Cached file paths — invalidated on index/reindex. Avoids SQLite query on every tool call.
+    cached_paths: Arc<ArcSwap<Vec<PathBuf>>>,
+    /// Cached file count — updated on index/reindex. Avoids loading all paths just for count.
+    cached_file_count: Arc<AtomicU64>,
+    /// Cached all_symbols — avoids 80MB+ alloc on every code_repo_map call.
+    cached_symbols: Arc<ArcSwap<Vec<recon_core::symbol::Symbol>>>,
+    /// Cached all_refs — avoids alloc on every code_repo_map call.
+    cached_refs: Arc<ArcSwap<Vec<recon_core::symbol::Ref>>>,
     /// Lock-free embedding service — shared via Arc, no mutex on hot path.
     #[cfg(feature = "embed")]
     embed_service: Arc<Mutex<Option<Arc<recon_embed::EmbedService>>>>,
@@ -54,6 +64,10 @@ pub struct ReconServer {
 fn redact_response(response: String) -> String {
     redact::redact_secrets(&response).unwrap_or(response)
 }
+
+/// Maximum file size for `read_to_string` calls (2 MB).
+/// Prevents OOM on accidentally large files (e.g. minified bundles, lock files).
+const MAX_READ_FILE_SIZE: u64 = 2 * 1024 * 1024;
 
 impl ReconServer {
     /// Create a new server for the given repo root.
@@ -94,6 +108,10 @@ impl ReconServer {
             tantivy_writer: Arc::new(Mutex::new(writer)),
             text_searcher: Arc::new(FffBackend::new()),
             repo_root,
+            cached_paths: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
+            cached_file_count: Arc::new(AtomicU64::new(0)),
+            cached_symbols: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
+            cached_refs: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             #[cfg(feature = "embed")]
             embed_service: Arc::new(Mutex::new(None)),
             #[cfg(feature = "embed")]
@@ -101,6 +119,81 @@ impl ReconServer {
             #[cfg(feature = "embed")]
             vec_writer: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Refresh all cached data from the database.
+    /// Called after initial index and reindex to keep caches warm.
+    fn refresh_caches(&self) {
+        match self.read_pool.all_file_paths() {
+            Ok(paths) => {
+                self.cached_file_count
+                    .store(paths.len() as u64, Ordering::Relaxed);
+                self.cached_paths.store(Arc::new(paths));
+            }
+            Err(e) => warn!("failed to refresh path cache: {e}"),
+        }
+        match self.read_pool.all_symbols() {
+            Ok(syms) => self.cached_symbols.store(Arc::new(syms)),
+            Err(e) => warn!("failed to refresh symbols cache: {e}"),
+        }
+        match self.read_pool.all_refs() {
+            Ok(refs) => self.cached_refs.store(Arc::new(refs)),
+            Err(e) => warn!("failed to refresh refs cache: {e}"),
+        }
+    }
+
+    /// Get cached file paths — avoids SQLite query on hot path.
+    fn cached_file_paths(&self) -> Arc<Vec<PathBuf>> {
+        let guard = self.cached_paths.load();
+        if guard.is_empty() {
+            // Cache cold — populate on first access.
+            match self.read_pool.all_file_paths() {
+                Ok(loaded) => {
+                    self.cached_file_count
+                        .store(loaded.len() as u64, Ordering::Relaxed);
+                    let arc = Arc::new(loaded);
+                    self.cached_paths.store(arc.clone());
+                    arc
+                }
+                Err(_) => guard.clone(),
+            }
+        } else {
+            guard.clone()
+        }
+    }
+
+    /// Get cached all_symbols — avoids 80MB+ alloc on hot path.
+    fn cached_all_symbols(&self) -> Arc<Vec<recon_core::symbol::Symbol>> {
+        let guard = self.cached_symbols.load();
+        if guard.is_empty() {
+            match self.read_pool.all_symbols() {
+                Ok(loaded) => {
+                    let arc = Arc::new(loaded);
+                    self.cached_symbols.store(arc.clone());
+                    arc
+                }
+                Err(_) => guard.clone(),
+            }
+        } else {
+            guard.clone()
+        }
+    }
+
+    /// Get cached all_refs — avoids alloc on hot path.
+    fn cached_all_refs(&self) -> Arc<Vec<recon_core::symbol::Ref>> {
+        let guard = self.cached_refs.load();
+        if guard.is_empty() {
+            match self.read_pool.all_refs() {
+                Ok(loaded) => {
+                    let arc = Arc::new(loaded);
+                    self.cached_refs.store(arc.clone());
+                    arc
+                }
+                Err(_) => guard.clone(),
+            }
+        } else {
+            guard.clone()
+        }
     }
 
     /// Initialize the embedding engine (model download on first run).
@@ -153,11 +246,16 @@ impl ReconServer {
         );
         drop(tw);
 
+        // Pre-warm the file path cache so tool calls don't hit SQLite on first query.
+        drop(store);
+        self.refresh_caches();
+        let store = self.write_store.lock();
+
         // Pre-warm the repo_map cache so the first user call is instant.
-        // Runs PageRank in the background — doesn't block server startup.
+        // Uses cached symbols/refs from refresh_caches() above.
         if stats.total_symbols > 0 {
-            let all_symbols = self.read_pool.all_symbols().unwrap_or_default();
-            let all_refs = self.read_pool.all_refs().unwrap_or_default();
+            let all_symbols = self.cached_all_symbols();
+            let all_refs = self.cached_all_refs();
             let last_idx = self.read_pool.max_indexed_at().unwrap_or(0);
             let budget = 2000;
             let cache_key = format!("map_cache:{last_idx}:{budget}");
@@ -256,6 +354,10 @@ impl ReconServer {
         let tantivy = self.tantivy.clone();
         let tantivy_writer = self.tantivy_writer.clone();
         let repo_root = self.repo_root.clone();
+        let cached_paths = self.cached_paths.clone();
+        let cached_file_count = self.cached_file_count.clone();
+        let cached_symbols = self.cached_symbols.clone();
+        let cached_refs = self.cached_refs.clone();
         // Clone the Arc handles once; the hot path inside the loop needs no locks.
         #[cfg(feature = "embed")]
         let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.lock().clone();
@@ -542,6 +644,12 @@ impl ReconServer {
                     }
 
                     debug!(files = parsed.len(), "watcher batch indexed");
+
+                    // Invalidate all caches — new files/symbols may have been added or changed.
+                    cached_paths.store(Arc::new(Vec::new()));
+                    cached_file_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                    cached_symbols.store(Arc::new(Vec::new()));
+                    cached_refs.store(Arc::new(Vec::new()));
                 }));
 
                 if result.is_err() {
@@ -566,24 +674,34 @@ impl ReconServer {
         Ok(canonical)
     }
 
-    /// Resolve indexed paths to absolute paths, applying an optional filter DSL.
-    fn resolve_search_scope(&self, rel_paths: &[PathBuf], filter: Option<&str>) -> Vec<PathBuf> {
-        let filtered = match filter {
-            Some(f) if !f.is_empty() => match filters::parse_filter(f) {
-                Ok(pf) => {
-                    // Resolve git-modified paths if needed
-                    let git_paths = if pf.git_modified_only {
-                        recon_indexer::git::status_paths(&self.repo_root).ok()
-                    } else {
-                        None
-                    };
+    /// Resolve indexed paths to absolute paths — async version with spawn_blocking for git status.
+    async fn resolve_search_scope_async(
+        &self,
+        rel_paths: &[PathBuf],
+        filter: Option<&str>,
+    ) -> Vec<PathBuf> {
+        let filtered: Vec<PathBuf> = match filter {
+            Some(f) if !f.is_empty() => {
+                let pf = match filters::parse_filter(f) {
+                    Ok(pf) => pf,
+                    Err(e) => {
+                        warn!("filter parse error: {e}");
+                        return rel_paths.iter().map(|p| self.repo_root.join(p)).collect();
+                    }
+                };
+                if pf.git_modified_only {
+                    let root = self.repo_root.clone();
+                    let git_paths = tokio::task::spawn_blocking(move || {
+                        recon_indexer::git::status_paths(&root).ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten();
                     filters::apply_filter(rel_paths, &pf, git_paths.as_deref())
+                } else {
+                    filters::apply_filter(rel_paths, &pf, None)
                 }
-                Err(e) => {
-                    warn!("filter parse error: {e}");
-                    rel_paths.to_vec()
-                }
-            },
+            }
             _ => rel_paths.to_vec(),
         };
         filtered.iter().map(|p| self.repo_root.join(p)).collect()
@@ -687,6 +805,18 @@ impl ReconServer {
                 Ok(p) => p,
                 Err(e) => return format!("Error: {e}"),
             };
+            // Size cap to prevent OOM on large files (minified bundles, lock files, etc.)
+            match tokio::fs::metadata(&abs_path).await {
+                Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
+                    return format!(
+                        "Error: file too large ({} MB, max {} MB)",
+                        m.len() / (1024 * 1024),
+                        MAX_READ_FILE_SIZE / (1024 * 1024)
+                    );
+                }
+                Err(e) => return format!("Error reading file metadata: {e}"),
+                _ => {}
+            }
             let content = match tokio::fs::read_to_string(&abs_path).await {
                 Ok(c) => c,
                 Err(e) => return format!("Error reading file: {e}"),
@@ -712,6 +842,18 @@ impl ReconServer {
             Ok(p) => p,
             Err(e) => return format!("Error: {e}"),
         };
+        // Size cap to prevent OOM on large files.
+        match tokio::fs::metadata(&abs_path).await {
+            Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
+                return format!(
+                    "Error: file too large ({} MB, max {} MB)",
+                    m.len() / (1024 * 1024),
+                    MAX_READ_FILE_SIZE / (1024 * 1024)
+                );
+            }
+            Err(e) => return format!("Error reading file metadata: {e}"),
+            _ => {}
+        }
         let content = match tokio::fs::read_to_string(&abs_path).await {
             Ok(c) => c,
             Err(e) => return format!("Error: {e}"),
@@ -972,9 +1114,11 @@ impl ReconServer {
         description = "Search for text patterns. Modes: exact (default), regex, hybrid (BM25 + text fused via reciprocal rank fusion). Use instead of Grep for code search."
     )]
     async fn code_search(&self, params: Parameters<SearchParams>) -> String {
-        let paths = self.read_pool.all_file_paths().unwrap_or_default();
+        let paths = self.cached_file_paths();
 
-        let abs_paths = self.resolve_search_scope(&paths, params.0.filter.as_deref());
+        let abs_paths = self
+            .resolve_search_scope_async(&paths, params.0.filter.as_deref())
+            .await;
 
         // Semantic mode — fully lock-free via EmbedService channel + VecReadPool.
         #[cfg(feature = "embed")]
@@ -1203,7 +1347,7 @@ impl ReconServer {
         let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
         let budget = params.0.token_budget;
 
-        // All reads go through lock-free ReadPool
+        // All reads go through lock-free cached accessors
         let (all_symbols, all_refs, cache_key) = {
             // Check cache for unfocused maps
             if focus_files.is_empty() {
@@ -1212,12 +1356,12 @@ impl ReconServer {
                 if let Ok(Some(cached)) = self.read_pool.get_meta(&key) {
                     return cached;
                 }
-                let syms = self.read_pool.all_symbols().unwrap_or_default();
-                let refs = self.read_pool.all_refs().unwrap_or_default();
+                let syms = self.cached_all_symbols();
+                let refs = self.cached_all_refs();
                 (syms, refs, Some(key))
             } else {
-                let syms = self.read_pool.all_symbols().unwrap_or_default();
-                let refs = self.read_pool.all_refs().unwrap_or_default();
+                let syms = self.cached_all_symbols();
+                let refs = self.cached_all_refs();
                 (syms, refs, None)
             }
         };
@@ -1276,9 +1420,11 @@ impl ReconServer {
         description = "Search for patterns in string literals and comments. Finds SQL fragments, i18n keys, log messages that structural search misses."
     )]
     async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
-        let paths = self.read_pool.all_file_paths().unwrap_or_default();
+        let paths = self.cached_file_paths();
 
-        let abs_paths = self.resolve_search_scope(&paths, params.0.filter.as_deref());
+        let abs_paths = self
+            .resolve_search_scope_async(&paths, params.0.filter.as_deref())
+            .await;
         let q = TextQuery {
             pattern: params.0.pattern.clone(),
             is_regex: false,
@@ -1303,9 +1449,11 @@ impl ReconServer {
         description = "Search for multiple patterns at once. More efficient than multiple code_search calls. Returns results grouped by pattern."
     )]
     async fn code_multi_find(&self, params: Parameters<MultiFindParams>) -> String {
-        let paths = self.read_pool.all_file_paths().unwrap_or_default();
+        let paths = self.cached_file_paths();
 
-        let abs_paths = self.resolve_search_scope(&paths, params.0.filter.as_deref());
+        let abs_paths = self
+            .resolve_search_scope_async(&paths, params.0.filter.as_deref())
+            .await;
         let pat_refs: Vec<&str> = params.0.patterns.iter().map(|s| s.as_str()).collect();
         let multi_results = self
             .text_searcher
@@ -1357,89 +1505,116 @@ impl ReconServer {
                 info!("force reindex: clearing existing data");
                 {
                     let store = write_store.lock();
-                    // Delete all symbols and files
                     let all_paths = store.all_file_paths().unwrap_or_default();
                     for path in &all_paths {
                         let _ = store.delete_file_cascade(path);
                     }
-                    // Clear Tantivy by recreating the index
                     if let Some(ref mut writer) = tantivy_writer.lock().as_mut() {
                         let _ = tantivy.commit(writer);
                     }
                 }
-            }
 
-            // Phase 1: Walk + parse (NO locks held)
-            let paths = walker::walk_repo(&repo_root);
-            let pools =
-                std::sync::Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
-            let parsed: Vec<indexer::ParsedFile> = paths
-                .par_iter()
-                .filter_map(|path| {
-                    let content = std::fs::read(path).ok()?;
-                    if walker::is_generated_content(&content) {
-                        return None;
-                    }
-                    let hash = recon_storage::hash::blake3_bytes(&content);
-                    let mtime = indexer::mtime_of(path);
-                    indexer::parse_file_with_content(
-                        &content, path, &repo_root, &pools, hash, mtime,
-                    )
-                })
-                .collect();
-
-            // Phase 2: Batch store in 500-file chunks — lock released between chunks
-            let mut files_indexed = 0usize;
-            let mut errors = 0usize;
-            const CHUNK_SIZE: usize = 500;
-
-            for chunk in parsed.chunks(CHUNK_SIZE) {
-                let bulk: Vec<_> = chunk
-                    .iter()
-                    .map(|p| (&p.meta, p.symbols.as_slice(), p.refs.as_slice()))
+                // Full walk + parse (force path)
+                let paths = walker::walk_repo(&repo_root);
+                let pools =
+                    std::sync::Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
+                let parsed: Vec<indexer::ParsedFile> = paths
+                    .par_iter()
+                    .filter_map(|path| {
+                        let content = std::fs::read(path).ok()?;
+                        if walker::is_generated_content(&content) {
+                            return None;
+                        }
+                        let hash = recon_storage::hash::blake3_bytes(&content);
+                        let mtime = indexer::mtime_of(path);
+                        indexer::parse_file_with_content(
+                            &content, path, &repo_root, &pools, hash, mtime,
+                        )
+                    })
                     .collect();
-                let store = write_store.lock();
-                match store.batch_index_files(&bulk) {
-                    Ok(()) => files_indexed += chunk.len(),
-                    Err(e) => {
-                        warn!(chunk_size = chunk.len(), "reindex store error: {e}");
-                        errors += chunk.len();
-                    }
-                }
-                // Lock released here between chunks — reads can proceed
-            }
 
-            // Phase 3: Tantivy indexing (short lock)
-            {
-                let mut tw = tantivy_writer.lock();
-                if let Some(ref mut writer) = *tw {
-                    let mut docs = 0usize;
-                    for pf in &parsed {
-                        let _ = tantivy.index_symbols(writer, &pf.meta.path, &pf.symbols);
-                        docs += pf.symbols.len();
-                        if docs >= 20_000 {
-                            let _ = tantivy.commit(writer);
-                            docs = 0;
+                let mut files_indexed = 0usize;
+                let mut errors = 0usize;
+                const CHUNK_SIZE: usize = 500;
+
+                for chunk in parsed.chunks(CHUNK_SIZE) {
+                    let bulk: Vec<_> = chunk
+                        .iter()
+                        .map(|p| (&p.meta, p.symbols.as_slice(), p.refs.as_slice()))
+                        .collect();
+                    let store = write_store.lock();
+                    match store.batch_index_files(&bulk) {
+                        Ok(()) => files_indexed += chunk.len(),
+                        Err(e) => {
+                            warn!(chunk_size = chunk.len(), "reindex store error: {e}");
+                            errors += chunk.len();
                         }
                     }
-                    let _ = tantivy.commit(writer);
+                }
+
+                // Tantivy indexing
+                {
+                    let mut tw = tantivy_writer.lock();
+                    if let Some(ref mut writer) = *tw {
+                        let mut docs = 0usize;
+                        for pf in &parsed {
+                            let _ = tantivy.index_symbols(writer, &pf.meta.path, &pf.symbols);
+                            docs += pf.symbols.len();
+                            if docs >= 20_000 {
+                                let _ = tantivy.commit(writer);
+                                docs = 0;
+                            }
+                        }
+                        let _ = tantivy.commit(writer);
+                    }
+                }
+
+                let total_symbols = write_store.lock().symbol_count().unwrap_or(0);
+
+                serde_json::json!({
+                    "status": "ok",
+                    "files_indexed": files_indexed,
+                    "total_symbols": total_symbols,
+                    "errors": errors,
+                    "force": true,
+                })
+            } else {
+                // Incremental reindex: use git diff (or Merkle fallback) to only re-parse changed files
+                let store = write_store.lock();
+                let result = indexer::index_repo_incremental(
+                    &store,
+                    Some(&tantivy),
+                    &repo_root,
+                    tantivy_writer.lock().as_mut(),
+                );
+                match result {
+                    Ok(stats) => {
+                        serde_json::json!({
+                            "status": "ok",
+                            "files_indexed": stats.files_indexed,
+                            "total_symbols": stats.total_symbols,
+                            "errors": stats.errors,
+                            "force": false,
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "status": "error",
+                            "error": format!("{e}"),
+                            "force": false,
+                        })
+                    }
                 }
             }
-
-            let total_symbols = write_store.lock().symbol_count().unwrap_or(0);
-
-            serde_json::json!({
-                "status": "ok",
-                "files_indexed": files_indexed,
-                "total_symbols": total_symbols,
-                "errors": errors,
-                "force": force,
-            })
         })
         .await;
 
         match result {
-            Ok(stats) => serde_json::to_string(&stats).unwrap_or_else(|e| format!("Error: {e}")),
+            Ok(stats) => {
+                // Refresh path cache after reindex.
+                self.refresh_caches();
+                serde_json::to_string(&stats).unwrap_or_else(|e| format!("Error: {e}"))
+            }
             Err(e) => format!("Reindex failed: {e}"),
         }
     }
@@ -1449,11 +1624,12 @@ impl ReconServer {
         description = "Report index health: total files, symbols, last indexed time, Tantivy doc count. Use to check if the index is fresh and complete."
     )]
     async fn code_stats(&self, _params: Parameters<StatsParams>) -> String {
-        let file_count = self
-            .read_pool
-            .all_file_paths()
-            .map(|p| p.len())
-            .unwrap_or(0);
+        let mut file_count = self.cached_file_count.load(Ordering::Relaxed);
+        if file_count == 0 {
+            // Cache cold — get actual count.
+            file_count = self.read_pool.file_count().unwrap_or(0);
+            self.cached_file_count.store(file_count, Ordering::Relaxed);
+        }
         let symbol_count = self.read_pool.symbol_count().unwrap_or(0);
         let tantivy_docs = self.tantivy.doc_count();
         let schema_version = self

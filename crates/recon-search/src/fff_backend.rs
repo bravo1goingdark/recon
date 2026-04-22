@@ -6,15 +6,13 @@
 
 use crate::search_trait::{TextHit, TextQuery, TextSearcher};
 use crate::utils::regex_escape;
-use ahash::AHashMap;
 use aho_corasick::AhoCorasick;
-use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use grep_regex::RegexMatcher;
 use rayon::prelude::*;
 use recon_core::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 /// Maximum number of entries in the mmap cache.
 const MAX_CACHE_ENTRIES: usize = 1024;
@@ -22,32 +20,29 @@ const MAX_CACHE_ENTRIES: usize = 1024;
 /// fff-grep backed text search.
 ///
 /// Memory-maps each file and delegates search to `fff_grep::Searcher::search_slice`.
-/// Caches mmaps in an `ArcSwap<AHashMap>` for lock-free reads, with a `Mutex` for
-/// write-side mutations. Cache is bounded to `MAX_CACHE_ENTRIES` entries.
+/// Uses `DashMap` for concurrent lock-free reads and fine-grained write locking —
+/// no full-map clone on cache miss (unlike the previous ArcSwap approach).
 pub struct FffBackend {
-    /// Lock-free mmap cache for hot files.
-    cache: ArcSwap<AHashMap<PathBuf, Arc<memmap2::Mmap>>>,
-    /// Mutex for cache mutations (write side).
-    cache_lock: Mutex<()>,
+    /// Concurrent mmap cache — reads are lock-free, writes lock only one shard.
+    cache: DashMap<PathBuf, Arc<memmap2::Mmap>>,
 }
 
 impl FffBackend {
     /// Create a new `FffBackend`.
     pub fn new() -> Self {
         Self {
-            cache: ArcSwap::new(Arc::new(AHashMap::new())),
-            cache_lock: Mutex::new(()),
+            cache: DashMap::with_capacity(MAX_CACHE_ENTRIES),
         }
     }
 
     /// Look up or create an mmap for the given path.
     fn get_mmap(&self, path: &std::path::Path) -> Option<Arc<memmap2::Mmap>> {
-        let map = self.cache.load();
-        if let Some(mmap) = map.get(path) {
-            return Some(Arc::clone(mmap));
+        // Fast path: lock-free read from DashMap.
+        if let Some(mmap) = self.cache.get(path) {
+            return Some(Arc::clone(&mmap));
         }
 
-        // Not in cache — mmap and insert.
+        // Not in cache — mmap the file.
         let file = match std::fs::File::open(path) {
             Ok(f) => f,
             Err(e) => {
@@ -75,31 +70,21 @@ impl FffBackend {
             }
         };
 
-        // Insert into cache under the write lock — double-check pattern avoids
-        // cloning the entire map on every miss.
-        let _guard = match self.cache_lock.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-
-        // Re-check under lock — another thread may have inserted it.
-        let current = self.cache.load();
-        if let Some(mmap) = current.get(path) {
-            return Some(Arc::clone(mmap));
+        // Evict if at capacity — DashMap handles concurrent insertion safely.
+        if self.cache.len() >= MAX_CACHE_ENTRIES {
+            self.cache.clear();
         }
 
-        // Build new map incrementally — only clone if we must evict.
-        let mut new_map = if current.len() >= MAX_CACHE_ENTRIES {
-            // Cache full — clear entirely (simple and effective for file-watcher scenarios).
-            AHashMap::with_capacity(MAX_CACHE_ENTRIES)
-        } else {
-            // Clone only when adding a new entry (amortized O(1) per miss, not per query).
-            (**current).clone()
-        };
-        new_map.insert(path.to_path_buf(), Arc::clone(&mmap));
-        self.cache.store(Arc::new(new_map));
-
-        Some(mmap)
+        // Double-check: another thread may have inserted while we were mmap'ing.
+        // DashMap::entry avoids the race entirely.
+        use dashmap::mapref::entry::Entry;
+        match self.cache.entry(path.to_path_buf()) {
+            Entry::Occupied(e) => Some(Arc::clone(e.get())),
+            Entry::Vacant(e) => {
+                e.insert(Arc::clone(&mmap));
+                Some(mmap)
+            }
+        }
     }
 }
 
@@ -296,7 +281,7 @@ impl TextSearcher for FffBackend {
         // Parallel scan across all files — rayon distributes work across CPU cores.
         // Each thread builds local buckets, then we merge them lock-free.
         let n_patterns = non_empty.len();
-        let results: Vec<Vec<TextHit>> = scope
+        let mut results: Vec<Vec<TextHit>> = scope
             .par_iter()
             .map(|path: &PathBuf| {
                 let mut local_buckets: Vec<Vec<TextHit>> =
@@ -347,7 +332,7 @@ impl TextSearcher for FffBackend {
             if pat.is_empty() {
                 final_results.push((pat.to_string(), Vec::new()));
             } else {
-                let mut hits = std::mem::take(&mut results[non_empty_idx].clone());
+                let mut hits = std::mem::take(&mut results[non_empty_idx]);
                 hits.truncate(max_per_pattern);
                 final_results.push((pat.to_string(), hits));
                 non_empty_idx += 1;
@@ -357,28 +342,18 @@ impl TextSearcher for FffBackend {
     }
 
     fn refresh(&self, changed_paths: &[PathBuf]) -> Result<(), Error> {
-        let _guard = match self.cache_lock.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-
-        let current = self.cache.load();
-        if current.is_empty() {
+        if self.cache.is_empty() {
             return Ok(());
         }
 
-        let mut new_map = (**current).clone();
-
         // If changed paths are a significant fraction of cache, clear entirely.
-        if changed_paths.len() >= new_map.len() / 2 {
-            new_map.clear();
+        if changed_paths.len() >= self.cache.len() / 2 {
+            self.cache.clear();
         } else {
             for path in changed_paths {
-                new_map.remove(path);
+                self.cache.remove(path);
             }
         }
-
-        self.cache.store(Arc::new(new_map));
         Ok(())
     }
 }
@@ -583,7 +558,6 @@ mod tests {
         backend.refresh(&changed).unwrap();
 
         // Cache should now be empty.
-        let cache = backend.cache.load();
-        assert!(cache.is_empty());
+        assert!(backend.cache.is_empty());
     }
 }
