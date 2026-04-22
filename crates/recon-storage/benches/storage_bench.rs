@@ -35,7 +35,7 @@ fn setup_store(n: u64) -> Store {
     };
     store.upsert_file(&meta).unwrap();
     let symbols: Vec<Symbol> = (0..n).map(make_symbol).collect();
-    store.upsert_symbols_batch(&symbols).unwrap();
+    store.insert_symbols_batch(&symbols).unwrap();
     store
 }
 
@@ -55,7 +55,7 @@ fn bench_symbol_fuzzy_search(c: &mut Criterion) {
 
 fn bench_batch_insert(c: &mut Criterion) {
     let symbols: Vec<Symbol> = (0..1000).map(make_symbol).collect();
-    c.bench_function("upsert_symbols_batch/1k", |b| {
+    c.bench_function("insert_symbols_batch/1k", |b| {
         b.iter(|| {
             let store = Store::open_memory().unwrap();
             let meta = FileMeta {
@@ -67,7 +67,7 @@ fn bench_batch_insert(c: &mut Criterion) {
                 indexed_at: 0,
             };
             store.upsert_file(&meta).unwrap();
-            store.upsert_symbols_batch(&symbols).unwrap();
+            store.insert_symbols_batch(&symbols).unwrap();
         })
     });
 }

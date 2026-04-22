@@ -106,6 +106,20 @@ pub fn get_symbol_by_qname(conn: &Connection, qname: &str) -> Result<Option<Symb
     .transpose()
 }
 
+/// Look up a symbol by its numeric ID.
+pub fn symbol_by_id(conn: &Connection, id: u64) -> Result<Option<Symbol>, Error> {
+    conn.query_row(
+        "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
+                byte_start, byte_end, line_start, line_end, body_hash
+         FROM symbols WHERE id = ?1",
+        params![id as i64],
+        |row| Ok(row_to_symbol(row)),
+    )
+    .optional()
+    .map_err(|e| Error::Storage(e.to_string()))?
+    .transpose()
+}
+
 /// Find all refs for a given identifier.
 pub fn refs_for_ident(conn: &Connection, ident: &str) -> Result<Vec<Ref>, Error> {
     let mut stmt = conn
@@ -141,11 +155,23 @@ pub fn get_file_hash(conn: &Connection, path: &Path) -> Result<Option<[u8; 32]>,
         "SELECT content_hash FROM files WHERE path = ?1",
         params![path_str],
         |row| {
-            let blob: Vec<u8> = row.get(0)?;
-            let mut hash = [0u8; 32];
-            if blob.len() == 32 {
-                hash.copy_from_slice(&blob);
+            let blob = row.get_ref(0)?;
+            let bytes = blob.as_blob().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    0,
+                    "content_hash".into(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+            if bytes.len() != 32 {
+                return Err(rusqlite::Error::InvalidColumnType(
+                    0,
+                    "content_hash".into(),
+                    rusqlite::types::Type::Blob,
+                ));
             }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(bytes);
             Ok(hash)
         },
     )
@@ -184,6 +210,9 @@ pub fn max_indexed_at(conn: &Connection) -> Result<i64, Error> {
 }
 
 /// Get symbol counts and top-3 names per file in a single query.
+///
+/// Single GROUP BY pass with GROUP_CONCAT — fast for up to ~100K symbols.
+/// The CASE filter ensures only top-level symbols are concatenated.
 pub fn file_symbol_summaries(
     conn: &Connection,
 ) -> Result<Vec<(PathBuf, usize, Vec<CompactString>)>, Error> {
@@ -307,6 +336,42 @@ pub fn file_paths_by_lang(conn: &Connection, lang: &str) -> Result<Vec<PathBuf>,
         .map_err(|e| Error::Storage(e.to_string()))?;
 
     let mut results = Vec::with_capacity(64);
+    for r in rows {
+        results.push(r.map_err(|e| Error::Storage(e.to_string()))?);
+    }
+    Ok(results)
+}
+
+/// Look up symbols by a set of IDs — only fetches the rows needed.
+/// Returns a Vec of (id, path, line_start) for resolving ref locations.
+pub fn symbol_locations_by_ids(
+    conn: &Connection,
+    ids: &[u64],
+) -> Result<Vec<(u64, String, u32)>, Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Build IN clause with placeholders
+    let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id, path, line_start FROM symbols WHERE id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+    let params: Vec<i64> = ids.iter().map(|id| *id as i64).collect();
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            let id: i64 = row.get(0)?;
+            let path: String = row.get(1)?;
+            let line: u32 = row.get(2)?;
+            Ok((id as u64, path, line))
+        })
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+    let mut results = Vec::with_capacity(ids.len());
     for r in rows {
         results.push(r.map_err(|e| Error::Storage(e.to_string()))?);
     }

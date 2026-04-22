@@ -42,7 +42,7 @@ impl Store {
              PRAGMA cache_size=-32000;
              PRAGMA mmap_size=268435456;
              PRAGMA temp_store=MEMORY;
-             PRAGMA optimize;",
+             PRAGMA auto_vacuum=INCREMENTAL;",
         )
         .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -99,7 +99,7 @@ impl Store {
     }
 
     /// Insert a symbol, returning its assigned ID.
-    pub fn upsert_symbol(&self, sym: &Symbol) -> Result<u64, Error> {
+    pub fn insert_symbol(&self, sym: &Symbol) -> Result<u64, Error> {
         self.conn
             .prepare_cached(
                 "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
@@ -125,8 +125,11 @@ impl Store {
         Ok(self.conn.last_insert_rowid() as u64)
     }
 
-    /// Batch-insert symbols in a single transaction. Much faster than individual inserts.
-    pub fn upsert_symbols_batch(&self, symbols: &[Symbol]) -> Result<(), Error> {
+    /// Batch-insert symbols in a single transaction.
+    ///
+    /// Uses a single prepared statement executed per symbol within one
+    /// transaction — much faster than individual transactions.
+    pub fn insert_symbols_batch(&self, symbols: &[Symbol]) -> Result<(), Error> {
         if symbols.is_empty() {
             return Ok(());
         }
@@ -139,7 +142,7 @@ impl Store {
                 .prepare_cached(
                     "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
                                          byte_start, byte_end, line_start, line_end, body_hash)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )
                 .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -448,7 +451,7 @@ impl Store {
     }
 
     /// Insert a batch of refs.
-    pub fn upsert_refs(&self, refs: &[Ref]) -> Result<(), Error> {
+    pub fn insert_refs(&self, refs: &[Ref]) -> Result<(), Error> {
         if refs.is_empty() {
             return Ok(());
         }
@@ -516,11 +519,23 @@ impl Store {
                 "SELECT content_hash FROM files WHERE path = ?1",
                 params![path_str],
                 |row| {
-                    let blob: Vec<u8> = row.get(0)?;
-                    let mut hash = [0u8; 32];
-                    if blob.len() == 32 {
-                        hash.copy_from_slice(&blob);
+                    let blob = row.get_ref(0)?;
+                    let bytes = blob.as_blob().map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            "content_hash".into(),
+                            rusqlite::types::Type::Blob,
+                        )
+                    })?;
+                    if bytes.len() != 32 {
+                        return Err(rusqlite::Error::InvalidColumnType(
+                            0,
+                            "content_hash".into(),
+                            rusqlite::types::Type::Blob,
+                        ));
                     }
+                    let mut hash = [0u8; 32];
+                    hash.copy_from_slice(bytes);
                     Ok(hash)
                 },
             )
@@ -757,6 +772,31 @@ impl Store {
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
+
+    /// Run VACUUM to reclaim unused space and defragment the database.
+    ///
+    /// Call after bulk deletes or large batch inserts to shrink the file.
+    /// This is a blocking operation — run it during idle periods.
+    pub fn vacuum(&self) -> Result<(), Error> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Run incremental vacuum to reclaim free pages without the full VACUUM cost.
+    pub fn incremental_vacuum(&self) -> Result<(), Error> {
+        self.conn
+            .execute_batch("PRAGMA incremental_vacuum; PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = self.conn.execute_batch("PRAGMA optimize;");
+    }
 }
 
 /// Convert a rusqlite row to a Symbol. Public so `read_fns` can reuse it.
@@ -780,11 +820,21 @@ pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
         other => return Err(Error::Storage(format!("unknown symbol kind: {other}"))),
     };
 
-    let body_blob: Vec<u8> = row.get(12).map_err(|e| Error::Storage(e.to_string()))?;
-    let mut body_hash = [0u8; 32];
-    if body_blob.len() == 32 {
-        body_hash.copy_from_slice(&body_blob);
-    }
+    let body_hash: [u8; 32] = {
+        let blob = row.get_ref(12).map_err(|e| Error::Storage(e.to_string()))?;
+        let bytes = blob
+            .as_blob()
+            .map_err(|_| Error::Storage("body_hash not a blob".into()))?;
+        if bytes.len() != 32 {
+            return Err(Error::Storage(format!(
+                "invalid body_hash length: {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes);
+        arr
+    };
 
     let path_str: String = row.get(1).map_err(|e| Error::Storage(e.to_string()))?;
     let byte_start: usize = row
@@ -879,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_symbol_and_find() {
+    fn insert_symbol_and_find() {
         let store = Store::open_memory().unwrap();
         store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
 
@@ -888,7 +938,7 @@ mod tests {
             "mymod::validate_email",
             SymbolKind::Function,
         );
-        let id = store.upsert_symbol(&sym).unwrap();
+        let id = store.insert_symbol(&sym).unwrap();
         assert!(id > 0);
 
         let found = store
@@ -903,10 +953,10 @@ mod tests {
         let store = Store::open_memory().unwrap();
         store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
         store
-            .upsert_symbol(&make_symbol("Foo", "mymod::Foo", SymbolKind::Struct))
+            .insert_symbol(&make_symbol("Foo", "mymod::Foo", SymbolKind::Struct))
             .unwrap();
         store
-            .upsert_symbol(&make_symbol("foo", "mymod::foo", SymbolKind::Function))
+            .insert_symbol(&make_symbol("foo", "mymod::foo", SymbolKind::Function))
             .unwrap();
 
         let results = store.find_symbols_exact("foo", 10).unwrap();
@@ -918,7 +968,7 @@ mod tests {
         let store = Store::open_memory().unwrap();
         store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
         store
-            .upsert_symbol(&make_symbol(
+            .insert_symbol(&make_symbol(
                 "validate_email",
                 "mymod::validate_email",
                 SymbolKind::Function,
@@ -935,7 +985,7 @@ mod tests {
         let store = Store::open_memory().unwrap();
         store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
         store
-            .upsert_symbol(&make_symbol("bar", "mymod::bar", SymbolKind::Function))
+            .insert_symbol(&make_symbol("bar", "mymod::bar", SymbolKind::Function))
             .unwrap();
 
         assert_eq!(store.symbol_count().unwrap(), 1);
@@ -948,7 +998,7 @@ mod tests {
         let store = Store::open_memory().unwrap();
         store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
         let id = store
-            .upsert_symbol(&make_symbol("foo", "mymod::foo", SymbolKind::Function))
+            .insert_symbol(&make_symbol("foo", "mymod::foo", SymbolKind::Function))
             .unwrap();
 
         let refs = vec![Ref {
@@ -958,7 +1008,7 @@ mod tests {
             dst_symbol_id: Some(id),
             weight: 1.0,
         }];
-        store.upsert_refs(&refs).unwrap();
+        store.insert_refs(&refs).unwrap();
 
         let found = store.refs_for_ident("foo").unwrap();
         assert_eq!(found.len(), 1);
@@ -979,7 +1029,7 @@ mod tests {
             .collect();
 
         let start = std::time::Instant::now();
-        store.upsert_symbols_batch(&symbols).unwrap();
+        store.insert_symbols_batch(&symbols).unwrap();
         let elapsed = start.elapsed();
         eprintln!("10K batched symbol inserts took {elapsed:?}");
         assert!(
@@ -1077,7 +1127,7 @@ mod tests {
             "mod::validate_email",
             SymbolKind::Function,
         );
-        store.upsert_symbol(&sym).unwrap();
+        store.insert_symbol(&sym).unwrap();
 
         // FTS should find it via trigram
         let results = store.search_symbols_fuzzy("valid", 10).unwrap();
@@ -1114,8 +1164,8 @@ mod tests {
 
         let foo = make_symbol("foo", "foo", SymbolKind::Function);
         let bar = make_symbol("Bar", "Bar", SymbolKind::Struct);
-        store.upsert_symbol(&foo).unwrap();
-        store.upsert_symbol(&bar).unwrap();
+        store.insert_symbol(&foo).unwrap();
+        store.insert_symbol(&bar).unwrap();
 
         let summaries = store.file_symbol_summaries().unwrap();
         assert_eq!(summaries.len(), 1);
@@ -1145,7 +1195,7 @@ mod tests {
         store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
 
         let sym = make_symbol("check", "mod::check", SymbolKind::Function);
-        store.upsert_symbol(&sym).unwrap();
+        store.insert_symbol(&sym).unwrap();
 
         let found = store.find_symbols_exact("check", 1).unwrap();
         assert_eq!(found.len(), 1);

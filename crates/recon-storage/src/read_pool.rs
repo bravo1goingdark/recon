@@ -100,6 +100,11 @@ impl ReadPool {
         self.with(|conn| read_fns::get_symbol_by_qname(conn, qname))
     }
 
+    /// Look up a symbol by its numeric ID.
+    pub fn symbol_by_id(&self, id: u64) -> Result<Option<Symbol>, Error> {
+        self.with(|conn| read_fns::symbol_by_id(conn, id))
+    }
+
     /// Find all refs for a given identifier.
     pub fn refs_for_ident(&self, ident: &str) -> Result<Vec<Ref>, Error> {
         self.with(|conn| read_fns::refs_for_ident(conn, ident))
@@ -151,6 +156,12 @@ impl ReadPool {
     pub fn file_paths_by_lang(&self, lang: &str) -> Result<Vec<PathBuf>, Error> {
         self.with(|conn| read_fns::file_paths_by_lang(conn, lang))
     }
+
+    /// Look up (id, path, line_start) for a set of symbol IDs.
+    /// Much cheaper than loading all symbols when you only need location data.
+    pub fn symbol_locations_by_ids(&self, ids: &[u64]) -> Result<Vec<(u64, String, u32)>, Error> {
+        self.with(|conn| read_fns::symbol_locations_by_ids(conn, ids))
+    }
 }
 
 #[cfg(test)]
@@ -192,7 +203,7 @@ mod tests {
             body_hash: [0u8; 32],
             lang: Language::Rust,
         };
-        store.upsert_symbol(&sym).unwrap();
+        store.insert_symbol(&sym).unwrap();
 
         (dir, db_path)
     }
@@ -276,7 +287,7 @@ mod tests {
             body_hash: [1u8; 32],
             lang: Language::Rust,
         };
-        store.upsert_symbol(&sym2).unwrap();
+        store.insert_symbol(&sym2).unwrap();
 
         // Reader should see the new data (WAL readers see committed writes)
         let count = pool.symbol_count().unwrap();
