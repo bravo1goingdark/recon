@@ -353,6 +353,8 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
+    const MAX_CONCURRENT: usize = 100;
+
     let cancel = CancellationToken::new();
     let config = StreamableHttpServerConfig::default()
         .with_stateful_mode(true)
@@ -375,13 +377,18 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Streamable HTTP server listening on http://{addr}/mcp");
 
+    let mut tasks = tokio::task::JoinSet::new();
+
     loop {
         tokio::select! {
             accept = listener.accept() => {
                 let (stream, _peer) = accept?;
                 let io = TokioIo::new(stream);
                 let svc = service.clone();
-                tokio::spawn(async move {
+                if tasks.len() >= MAX_CONCURRENT {
+                    let _ = tasks.join_next().await;
+                }
+                tasks.spawn(async move {
                     if let Err(e) = hyper_util::server::conn::auto::Builder::new(
                         hyper_util::rt::TokioExecutor::new(),
                     )
@@ -405,6 +412,8 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
             }
         }
     }
+
+    tasks.shutdown().await;
     Ok(())
 }
 

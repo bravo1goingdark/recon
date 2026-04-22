@@ -116,8 +116,8 @@ pub(crate) fn register_sqlite_vec() {
 }
 
 /// Serialize a `&[f32]` to little-endian IEEE 754 bytes for sqlite-vec.
-pub(crate) fn f32_to_le_bytes(v: &[f32]) -> Vec<u8> {
-    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+pub(crate) fn f32_to_le_bytes(v: &[f32]) -> &[u8] {
+    bytemuck::cast_slice(v)
 }
 
 #[cfg(test)]

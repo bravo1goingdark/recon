@@ -6,7 +6,7 @@
 //! new overflow connection is opened on-the-fly. All reads are fully
 //! concurrent — no mutex is ever held.
 
-use std::collections::HashMap;
+use ahash::AHashMap;
 use std::path::{Path, PathBuf};
 
 use crossbeam_queue::ArrayQueue;
@@ -113,11 +113,10 @@ impl VecReadPool {
     ///
     /// IDs absent from the store are omitted — the caller treats them as
     /// needing embedding. Used in the watcher to skip unchanged symbols.
-    pub fn existing_hashes(&self, ids: &[u64]) -> Result<HashMap<u64, [u8; 32]>, EmbedError> {
+    pub fn existing_hashes(&self, ids: &[u64]) -> Result<AHashMap<u64, [u8; 32]>, EmbedError> {
         if ids.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(AHashMap::new());
         }
-        // Build IN list from plain integers — no user input, so no injection risk.
         let in_list = ids
             .iter()
             .map(|id| id.to_string())
@@ -137,7 +136,7 @@ impl VecReadPool {
                 .map_err(|e| EmbedError::Store(format!("query: {e}")))?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| EmbedError::Store(format!("row: {e}")))?;
-            let mut map = HashMap::with_capacity(pairs.len());
+            let mut map = AHashMap::with_capacity(pairs.len());
             for (id, hash) in pairs {
                 if hash.len() == 32 {
                     let mut arr = [0u8; 32];

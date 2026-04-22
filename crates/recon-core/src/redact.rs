@@ -103,53 +103,81 @@ pub fn is_blocked_path(path: &Path) -> bool {
 /// Falls back to direct pattern scanning if the automaton is unavailable.
 pub fn redact_secrets(text: &str) -> Option<String> {
     // Fast-path: single-pass pre-screen — if no pattern prefix found, skip entirely.
-    // If the scanner failed to build, skip the fast path and always run the slow scan.
     if let Some(ac) = secret_scanner() {
         if !ac.is_match(text) {
             return None;
         }
     }
 
-    // Slow path: AC found a prefix (or scanner unavailable) — verify with full pattern matching.
-    // String is cloned here; if no real match is found, we return None (no cost to caller).
-    let mut redacted = String::from(text);
-    let mut changed = false;
+    // Collect all replacement ranges in a single pass, then build output once.
+    // This avoids O(n) replace_range calls that each shift the entire string.
+    let mut replacements: Vec<(usize, usize)> = Vec::new();
 
     // Check for PEM private key blocks
     for marker in PEM_MARKERS {
-        if let Some(start) = redacted.find(marker) {
+        let mut search_from = 0;
+        while let Some(start) = text[search_from..].find(marker) {
+            let abs_start = search_from + start;
             let end_marker = marker.replace("BEGIN", "END");
-            if let Some(end) = redacted[start..].find(&end_marker) {
-                let block_end = start + end + end_marker.len();
-                redacted.replace_range(start..block_end, REDACTED);
-                changed = true;
+            if let Some(end) = text[abs_start..].find(&end_marker) {
+                let block_end = abs_start + end + end_marker.len();
+                replacements.push((abs_start, block_end));
+                search_from = block_end;
+            } else {
+                break;
             }
         }
     }
 
     // Check for known secret prefixes
     for &(_label, prefix, min_len) in SECRET_PATTERNS {
-        while let Some(pos) = redacted.find(prefix) {
-            // Find the end of the token (whitespace, quote, or EOL)
-            let remaining = &redacted[pos..];
+        let mut search_from = 0;
+        while let Some(pos) = text[search_from..].find(prefix) {
+            let abs_pos = search_from + pos;
+            let remaining = &text[abs_pos..];
             let token_end = remaining
                 .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '`' || c == ',')
                 .unwrap_or(remaining.len());
 
             if min_len == 0 || token_end >= min_len {
-                redacted.replace_range(pos..pos + token_end, REDACTED);
-                changed = true;
+                replacements.push((abs_pos, abs_pos + token_end));
+                search_from = abs_pos + token_end;
             } else {
-                break; // Not a real match, stop searching for this pattern
+                break;
             }
         }
     }
 
-    if changed {
-        Some(redacted)
-    } else {
-        None
+    if replacements.is_empty() {
+        return None;
     }
+
+    // Sort and merge overlapping ranges, then build output in one pass.
+    replacements.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(replacements.len());
+    for (start, end) in replacements {
+        if let Some(last) = merged.last_mut() {
+            if start < last.1 {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        } else {
+            merged.push((start, end));
+        }
+    }
+
+    // Build output: copy unchanged segments, insert REDACTED for replaced ranges.
+    let mut output = String::with_capacity(text.len());
+    let mut prev_end = 0;
+    for (start, end) in &merged {
+        output.push_str(&text[prev_end..*start]);
+        output.push_str(REDACTED);
+        prev_end = *end;
+    }
+    output.push_str(&text[prev_end..]);
+
+    Some(output)
 }
 
 #[cfg(test)]

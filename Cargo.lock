@@ -4118,7 +4118,9 @@ dependencies = [
 name = "recon-embed"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "blake3",
+ "bytemuck",
  "compact_str",
  "crossbeam-channel",
  "crossbeam-queue",
@@ -4161,6 +4163,7 @@ dependencies = [
 name = "recon-parser"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "blake3",
  "compact_str",
  "criterion",
@@ -4185,20 +4188,25 @@ name = "recon-search"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "aho-corasick",
+ "arc-swap",
  "compact_str",
  "criterion",
  "fff-grep",
  "fff-query-parser",
+ "filetime",
  "globset",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "memmap2",
  "nucleo",
+ "rayon",
  "recon-core",
  "recon-storage",
  "serde",
  "serde_json",
+ "smallvec",
  "tantivy",
  "tempfile",
  "tiktoken-rs",

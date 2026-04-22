@@ -36,3 +36,5 @@ embed = ["recon-server/embed"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }

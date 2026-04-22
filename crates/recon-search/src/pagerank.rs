@@ -357,32 +357,34 @@ pub fn render_repo_map(symbols: &[Symbol], ranked: &[RankedSymbol], token_budget
     let mut output = String::with_capacity(token_budget * 4);
     let mut est_tokens = 0usize;
 
-    // Use fast heuristic in the loop; it slightly overestimates so we won't
-    // blow past the budget.  One accurate count at the end for the response.
     for entry in ranked {
         let sym = &symbols[entry.index];
-        let line = format!(
+
+        // Estimate tokens using write! directly into a small buffer to avoid
+        // intermediate String allocations from format!().
+        let mut line_buf = smallvec::SmallVec::<[u8; 256]>::new();
+        use std::io::Write;
+        let _ = write!(
+            line_buf,
             "{}:{} {} {}",
             sym.path.to_string_lossy(),
             sym.line_range.start(),
             sym.kind.label(),
             sym.qualified_name,
         );
+        if let Some(sig) = &sym.signature {
+            let _ = write!(line_buf, " — {sig}");
+        }
+        let _ = writeln!(line_buf);
 
-        let sig_suffix = sym
-            .signature
-            .as_deref()
-            .map(|s| format!(" — {s}"))
-            .unwrap_or_default();
-
-        let full_line = format!("{line}{sig_suffix}\n");
-        let line_est = crate::tokens::estimate_tokens(&full_line);
+        let line_str = String::from_utf8_lossy(&line_buf);
+        let line_est = crate::tokens::estimate_tokens(&line_str);
 
         if est_tokens + line_est > token_budget {
             break;
         }
 
-        output.push_str(&full_line);
+        output.push_str(&line_str);
         est_tokens += line_est;
     }
 

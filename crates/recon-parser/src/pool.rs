@@ -1,8 +1,8 @@
 //! Thread-safe parser pool (Parser is Send but not Sync).
 
+use ahash::AHashMap;
 use crossbeam_queue::ArrayQueue;
 use recon_core::lang::Language;
-use std::collections::HashMap;
 use tracing::error;
 use tree_sitter::{Language as TsLanguage, Parser};
 
@@ -43,13 +43,13 @@ impl ParserPool {
 
 /// Registry of parser pools, one per language. Thread-safe for rayon.
 pub struct LanguagePools {
-    pools: HashMap<Language, ParserPool>,
+    pools: AHashMap<Language, ParserPool>,
 }
 
 impl LanguagePools {
     /// Create pools for all supported languages.
     pub fn new(capacity_per_lang: usize) -> Self {
-        let mut pools = HashMap::new();
+        let mut pools = AHashMap::with_capacity(9);
         let langs = [
             Language::Rust,
             Language::Python,

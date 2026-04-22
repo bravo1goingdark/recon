@@ -9,10 +9,15 @@
 //! `EmbedService` is `Send + Sync` (it only holds a `Sender`) so it can be
 //! shared via `Arc` with zero locking on the hot path.
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use std::time::Duration;
+
+use crossbeam_channel::{bounded, Receiver, Sender};
 
 use crate::embedder::Embedder;
 use crate::error::EmbedError;
+
+const CHANNEL_CAPACITY: usize = 1024;
+const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct Request {
     texts: Vec<String>,
@@ -39,7 +44,7 @@ impl EmbedService {
     /// # Errors
     /// Returns `Err` if the OS refuses to spawn the thread (e.g., resource limits).
     pub fn spawn(mut embedder: Embedder) -> std::io::Result<Self> {
-        let (tx, rx): (Sender<Request>, Receiver<Request>) = unbounded();
+        let (tx, rx): (Sender<Request>, Receiver<Request>) = bounded(CHANNEL_CAPACITY);
         std::thread::Builder::new()
             .name("recon-embed-worker".into())
             .spawn(move || {
@@ -56,11 +61,14 @@ impl EmbedService {
     pub fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError> {
         let (reply_tx, reply_rx) = bounded(1);
         self.tx
-            .send(Request {
-                texts,
-                reply: reply_tx,
-            })
-            .map_err(|_| EmbedError::Model("embed service closed".into()))?;
+            .send_timeout(
+                Request {
+                    texts,
+                    reply: reply_tx,
+                },
+                SEND_TIMEOUT,
+            )
+            .map_err(|_| EmbedError::Model("embed service closed or timed out".into()))?;
         reply_rx
             .recv()
             .map_err(|_| EmbedError::Model("embed worker died".into()))?
