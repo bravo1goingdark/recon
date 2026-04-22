@@ -105,6 +105,11 @@ impl ReadPool {
         self.with(|conn| read_fns::symbol_by_id(conn, id))
     }
 
+    /// Get the docstring for a symbol from the separate symbol_docs table.
+    pub fn symbol_doc_by_id(&self, id: u64) -> Result<Option<String>, Error> {
+        self.with(|conn| read_fns::symbol_doc_by_id(conn, id))
+    }
+
     /// Find all refs for a given identifier.
     pub fn refs_for_ident(&self, ident: &str) -> Result<Vec<Ref>, Error> {
         self.with(|conn| read_fns::refs_for_ident(conn, ident))

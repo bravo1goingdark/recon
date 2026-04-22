@@ -741,6 +741,9 @@ impl ReconServer {
             .unwrap_or("[byte range out of bounds]")
             .to_string();
 
+        // Extract doc from source file: comment block immediately before symbol
+        let doc = extract_doc_from_source(&content, sym.byte_range.start);
+
         let refs = self
             .read_pool
             .refs_for_ident(sym.name.as_str())
@@ -793,7 +796,7 @@ impl ReconServer {
             qualified_name: sym.qualified_name.to_string(),
             kind: sym.kind,
             signature: sym.signature.as_deref().map(str::to_owned),
-            doc: sym.doc.as_deref().map(str::to_owned),
+            doc,
             body,
             line_range: (*sym.line_range.start(), *sym.line_range.end()),
             parent_chain,
@@ -1496,6 +1499,77 @@ impl ServerHandler for ReconServer {
                 .to_string(),
         )
     }
+}
+
+/// Extract documentation comment from source code immediately before a symbol.
+/// Handles Rust (///, /** */), Python (""", '''), and Go (//) doc comments.
+fn extract_doc_from_source(content: &str, byte_start: usize) -> Option<String> {
+    let before = content.get(..byte_start)?;
+    let lines: Vec<&str> = before.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut doc_lines: Vec<&str> = Vec::new();
+    let mut i = lines.len();
+
+    // Skip blank lines before the symbol
+    while i > 0 && lines[i - 1].trim().is_empty() {
+        i -= 1;
+    }
+
+    // Collect doc comment lines (working backwards)
+    while i > 0 {
+        let line = lines[i - 1].trim();
+        if line.starts_with("///") {
+            doc_lines.push(line.strip_prefix("///").unwrap_or(line).trim());
+            i -= 1;
+        } else if line.starts_with("//") {
+            doc_lines.push(line.strip_prefix("//").unwrap_or(line).trim());
+            i -= 1;
+        } else if line.starts_with('#') && line.contains('"') {
+            // Python docstring or decorator — stop at decorator
+            if line.starts_with("#[") {
+                break;
+            }
+            doc_lines.push(line.trim_start_matches('#').trim().trim_matches('"'));
+            i -= 1;
+        } else if line == "\"\"\"" || line == "'''" {
+            // End of Python multi-line docstring
+            i -= 1;
+            // Collect until opening """
+            while i > 0 {
+                let inner = lines[i - 1].trim();
+                if inner.ends_with("\"\"\"") || inner.ends_with("'''") {
+                    doc_lines.push(
+                        inner
+                            .trim_end_matches("\"\"\"")
+                            .trim_end_matches("'''")
+                            .trim(),
+                    );
+                    i -= 1;
+                    break;
+                }
+                doc_lines.push(inner);
+                i -= 1;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if doc_lines.is_empty() {
+        return None;
+    }
+
+    doc_lines.reverse();
+    Some(
+        doc_lines
+            .iter()
+            .map(|s| s.trim())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 #[cfg(test)]

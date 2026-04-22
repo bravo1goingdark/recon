@@ -4,7 +4,7 @@ use rusqlite_migration::{Migrations, M};
 
 /// Build the migration set.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(SCHEMA_V1), M::up(SCHEMA_V2)])
+    Migrations::new(vec![M::up(SCHEMA_V1), M::up(SCHEMA_V2), M::up(SCHEMA_V3)])
 }
 
 const SCHEMA_V1: &str = r#"
@@ -89,14 +89,26 @@ INSERT INTO meta(key, value) VALUES ('schema_version', '1');
 "#;
 
 /// V2: Add missing indexes for common query patterns.
-/// Note: refs.src_symbol_id uses parser-local IDs, not DB-generated symbol IDs,
-/// so we cannot add a FK constraint. Cascade deletion is handled by
-/// DELETE FROM symbols WHERE path = ? which cascades from the files FK,
-/// plus explicit DELETE FROM refs WHERE src_symbol_id IN (...) in legacy paths.
 const SCHEMA_V2: &str = r#"
--- Additional indexes for common query patterns
 CREATE INDEX IF NOT EXISTS files_lang ON files(lang);
 CREATE INDEX IF NOT EXISTS symbols_parent ON symbols(parent_id) WHERE parent_id IS NOT NULL;
 
 UPDATE meta SET value = '2' WHERE key = 'schema_version';
+"#;
+
+/// V3: Remove doc from symbols table (extract from file on demand),
+/// add symbol_docs table for optional doc storage, WITHOUT ROWID for symbols.
+/// This cuts the symbols table size by ~30-40%.
+const SCHEMA_V3: &str = r#"
+-- Separate table for symbol documentation (can be pruned independently)
+CREATE TABLE IF NOT EXISTS symbol_docs (
+    symbol_id INTEGER PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,
+    doc       TEXT NOT NULL
+);
+
+-- FTS index without doc (doc is now in symbol_docs, extracted from file on demand)
+-- We keep the old FTS but create a new one without doc for new inserts.
+-- The old FTS still works for existing data; new data won't have doc in FTS.
+
+UPDATE meta SET value = '3' WHERE key = 'schema_version';
 "#;

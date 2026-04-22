@@ -1,18 +1,28 @@
 //! Merkle tree for efficient change detection across repo snapshots.
 //!
-//! A flat snapshot: relative path → blake3 content hash (files only).
+//! A flat snapshot: relative path → (blake3 content hash, mtime).
 //! Directory hashes are NOT computed — this is a flat index, not a hierarchical tree.
 //! Diffing two snapshots identifies changed paths without re-hashing unchanged files.
+//! Mtime pre-filtering avoids reading file content when mtime hasn't changed.
 
 use recon_core::error::Error;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// A flat snapshot: relative path → blake3 content hash (files only).
+/// Entry in a Merkle snapshot: content hash + file mtime.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapshotEntry {
+    /// Blake3 content hash (32 bytes).
+    pub hash: [u8; 32],
+    /// File modification time as Unix epoch seconds.
+    pub mtime: i64,
+}
+
+/// A flat snapshot: relative path → (content hash, mtime).
 #[derive(Debug, Clone, Default)]
 pub struct MerkleSnapshot {
-    /// Map of relative file path → blake3 hash (32 bytes).
-    pub hashes: BTreeMap<PathBuf, [u8; 32]>,
+    /// Map of relative file path → snapshot entry (hash + mtime).
+    pub entries: BTreeMap<PathBuf, SnapshotEntry>,
 }
 
 /// Diff result between two Merkle snapshots.
@@ -25,13 +35,13 @@ pub struct MerkleDiff {
 }
 
 impl MerkleSnapshot {
-    /// Build a snapshot from a list of `(relative_path, content_hash)` pairs.
-    pub fn build(file_hashes: Vec<(PathBuf, [u8; 32])>) -> Self {
-        let mut hashes = BTreeMap::new();
-        for (path, hash) in file_hashes {
-            hashes.insert(path, hash);
+    /// Build a snapshot from a list of `(relative_path, content_hash, mtime)` triples.
+    pub fn build(file_entries: Vec<(PathBuf, [u8; 32], i64)>) -> Self {
+        let mut entries = BTreeMap::new();
+        for (path, hash, mtime) in file_entries {
+            entries.insert(path, SnapshotEntry { hash, mtime });
         }
-        Self { hashes }
+        Self { entries }
     }
 
     /// Diff this snapshot against a previous one.
@@ -42,16 +52,16 @@ impl MerkleSnapshot {
         let mut deleted = Vec::new();
 
         // Find changed or new paths
-        for (path, hash) in &self.hashes {
-            match previous.hashes.get(path) {
-                Some(prev_hash) if prev_hash == hash => {} // unchanged
-                _ => changed.push(path.clone()),           // new or modified
+        for (path, entry) in &self.entries {
+            match previous.entries.get(path) {
+                Some(prev) if prev.hash == entry.hash => {} // unchanged
+                _ => changed.push(path.clone()),            // new or modified
             }
         }
 
         // Find deleted paths
-        for path in previous.hashes.keys() {
-            if !self.hashes.contains_key(path) {
+        for path in previous.entries.keys() {
+            if !self.entries.contains_key(path) {
                 deleted.push(path.clone());
             }
         }
@@ -59,12 +69,31 @@ impl MerkleSnapshot {
         MerkleDiff { changed, deleted }
     }
 
+    /// Check if a file is unchanged compared to this snapshot.
+    /// Returns true if the path exists in the snapshot with the same mtime.
+    /// This is a fast pre-check before reading/hashing file content.
+    pub fn is_unchanged(&self, path: &Path, mtime: i64) -> bool {
+        self.entries
+            .get(path)
+            .is_some_and(|entry| entry.mtime == mtime)
+    }
+
+    /// Get the stored hash for a path, if present.
+    pub fn get_hash(&self, path: &Path) -> Option<[u8; 32]> {
+        self.entries.get(path).map(|e| e.hash)
+    }
+
     /// Save snapshot to a JSON file.
     pub fn save(&self, path: &Path) -> Result<(), Error> {
-        let serializable: BTreeMap<String, String> = self
-            .hashes
+        let serializable: BTreeMap<String, (String, i64)> = self
+            .entries
             .iter()
-            .map(|(p, h)| (p.to_string_lossy().to_string(), hex::encode(h)))
+            .map(|(p, e)| {
+                (
+                    p.to_string_lossy().to_string(),
+                    (hex::encode(&e.hash), e.mtime),
+                )
+            })
             .collect();
         let json = serde_json::to_string(&serializable)
             .map_err(|e| Error::Storage(format!("serialize merkle: {e}")))?;
@@ -75,11 +104,11 @@ impl MerkleSnapshot {
     /// Load snapshot from a JSON file.
     pub fn load(path: &Path) -> Result<Self, Error> {
         let json = std::fs::read_to_string(path)?;
-        let serializable: BTreeMap<String, String> = serde_json::from_str(&json)
+        let serializable: BTreeMap<String, (String, i64)> = serde_json::from_str(&json)
             .map_err(|e| Error::Storage(format!("deserialize merkle: {e}")))?;
 
-        let mut hashes = BTreeMap::new();
-        for (p, h) in serializable {
+        let mut entries = BTreeMap::new();
+        for (p, (h, mtime)) in serializable {
             let bytes = hex::decode(&h).map_err(|e| Error::Storage(format!("decode hash: {e}")))?;
             if bytes.len() != 32 {
                 return Err(Error::Storage(format!(
@@ -89,20 +118,20 @@ impl MerkleSnapshot {
             }
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&bytes);
-            hashes.insert(PathBuf::from(p), arr);
+            entries.insert(PathBuf::from(p), SnapshotEntry { hash: arr, mtime });
         }
 
-        Ok(Self { hashes })
+        Ok(Self { entries })
     }
 
     /// Number of entries in the snapshot.
     pub fn len(&self) -> usize {
-        self.hashes.len()
+        self.entries.len()
     }
 
     /// Whether the snapshot is empty.
     pub fn is_empty(&self) -> bool {
-        self.hashes.is_empty()
+        self.entries.is_empty()
     }
 }
 
@@ -141,8 +170,8 @@ mod tests {
     #[test]
     fn build_and_diff_identical() {
         let files = vec![
-            (PathBuf::from("src/main.rs"), [1u8; 32]),
-            (PathBuf::from("src/lib.rs"), [2u8; 32]),
+            (PathBuf::from("src/main.rs"), [1u8; 32], 1000i64),
+            (PathBuf::from("src/lib.rs"), [2u8; 32], 1000i64),
         ];
         let s1 = MerkleSnapshot::build(files.clone());
         let s2 = MerkleSnapshot::build(files);
@@ -153,10 +182,10 @@ mod tests {
 
     #[test]
     fn diff_detects_new_file() {
-        let s1 = MerkleSnapshot::build(vec![(PathBuf::from("a.rs"), [1u8; 32])]);
+        let s1 = MerkleSnapshot::build(vec![(PathBuf::from("a.rs"), [1u8; 32], 1000i64)]);
         let s2 = MerkleSnapshot::build(vec![
-            (PathBuf::from("a.rs"), [1u8; 32]),
-            (PathBuf::from("b.rs"), [2u8; 32]),
+            (PathBuf::from("a.rs"), [1u8; 32], 1000i64),
+            (PathBuf::from("b.rs"), [2u8; 32], 1000i64),
         ]);
         let diff = s2.diff(&s1);
         assert_eq!(diff.changed, vec![PathBuf::from("b.rs")]);
@@ -165,8 +194,8 @@ mod tests {
 
     #[test]
     fn diff_detects_modified_file() {
-        let s1 = MerkleSnapshot::build(vec![(PathBuf::from("a.rs"), [1u8; 32])]);
-        let s2 = MerkleSnapshot::build(vec![(PathBuf::from("a.rs"), [9u8; 32])]);
+        let s1 = MerkleSnapshot::build(vec![(PathBuf::from("a.rs"), [1u8; 32], 1000i64)]);
+        let s2 = MerkleSnapshot::build(vec![(PathBuf::from("a.rs"), [9u8; 32], 1001i64)]);
         let diff = s2.diff(&s1);
         assert_eq!(diff.changed, vec![PathBuf::from("a.rs")]);
     }
@@ -174,10 +203,10 @@ mod tests {
     #[test]
     fn diff_detects_deleted_file() {
         let s1 = MerkleSnapshot::build(vec![
-            (PathBuf::from("a.rs"), [1u8; 32]),
-            (PathBuf::from("b.rs"), [2u8; 32]),
+            (PathBuf::from("a.rs"), [1u8; 32], 1000i64),
+            (PathBuf::from("b.rs"), [2u8; 32], 1000i64),
         ]);
-        let s2 = MerkleSnapshot::build(vec![(PathBuf::from("a.rs"), [1u8; 32])]);
+        let s2 = MerkleSnapshot::build(vec![(PathBuf::from("a.rs"), [1u8; 32], 1000i64)]);
         let diff = s2.diff(&s1);
         assert!(diff.changed.is_empty());
         assert_eq!(diff.deleted, vec![PathBuf::from("b.rs")]);
@@ -189,19 +218,19 @@ mod tests {
         let snap_path = dir.path().join("snapshot.json");
 
         let s1 = MerkleSnapshot::build(vec![
-            (PathBuf::from("src/main.rs"), [0xAB; 32]),
-            (PathBuf::from("src/lib.rs"), [0xCD; 32]),
+            (PathBuf::from("src/main.rs"), [0xAB; 32], 12345i64),
+            (PathBuf::from("src/lib.rs"), [0xCD; 32], 12346i64),
         ]);
         s1.save(&snap_path).unwrap();
 
         let s2 = MerkleSnapshot::load(&snap_path).unwrap();
         assert_eq!(
-            s1.hashes.get(&PathBuf::from("src/main.rs")),
-            s2.hashes.get(&PathBuf::from("src/main.rs"))
+            s1.entries.get(&PathBuf::from("src/main.rs")),
+            s2.entries.get(&PathBuf::from("src/main.rs"))
         );
         assert_eq!(
-            s1.hashes.get(&PathBuf::from("src/lib.rs")),
-            s2.hashes.get(&PathBuf::from("src/lib.rs"))
+            s1.entries.get(&PathBuf::from("src/lib.rs")),
+            s2.entries.get(&PathBuf::from("src/lib.rs"))
         );
     }
 
@@ -210,5 +239,16 @@ mod tests {
         let s = MerkleSnapshot::default();
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn is_unchanged_checks_mtime() {
+        let s = MerkleSnapshot::build(vec![
+            (PathBuf::from("a.rs"), [1u8; 32], 1000i64),
+            (PathBuf::from("b.rs"), [2u8; 32], 2000i64),
+        ]);
+        assert!(s.is_unchanged(&PathBuf::from("a.rs"), 1000));
+        assert!(!s.is_unchanged(&PathBuf::from("a.rs"), 9999));
+        assert!(!s.is_unchanged(&PathBuf::from("c.rs"), 1000));
     }
 }

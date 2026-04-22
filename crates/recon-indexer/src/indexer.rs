@@ -38,10 +38,10 @@ fn merkle_snapshot_path(repo_root: &Path) -> PathBuf {
 ///
 /// Walks the repo using [`walker::walk_repo`], reads each file, filters out
 /// generated content, and computes blake3 content hashes. The resulting
-/// snapshot maps relative paths to their content hashes.
+/// snapshot maps relative paths to (content hash, mtime).
 pub fn build_merkle_snapshot(repo_root: &Path) -> MerkleSnapshot {
     let paths = walker::walk_repo(repo_root);
-    let hashes: Vec<_> = paths
+    let entries: Vec<_> = paths
         .par_iter()
         .filter_map(|path| {
             let content = match std::fs::read(path) {
@@ -59,10 +59,11 @@ pub fn build_merkle_snapshot(repo_root: &Path) -> MerkleSnapshot {
                 Err(_) => path.clone(),
             };
             let content_hash = hash::blake3_bytes(&content);
-            Some((rel, content_hash))
+            let mtime = mtime_of(path);
+            Some((rel, content_hash, mtime))
         })
         .collect();
-    MerkleSnapshot::build(hashes)
+    MerkleSnapshot::build(entries)
 }
 
 /// Load the previous Merkle snapshot from the repo, if it exists.
@@ -138,13 +139,14 @@ pub fn parse_file_with_content(
 }
 
 /// Read mtime from a path, returning 0 on failure.
+/// Uses millisecond precision to detect rapid modifications.
 pub fn mtime_of(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .unwrap_or(UNIX_EPOCH)
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64
+        .as_millis() as i64
 }
 
 /// Index a single file: read once, hash, parse, store in SQLite + Tantivy.
@@ -223,6 +225,9 @@ pub fn index_repo(
     let paths = walker::walk_repo(repo_root);
     info!(files = paths.len(), "starting repo indexing");
 
+    // Enter high-throughput indexing mode for faster bulk inserts
+    store.enter_indexing_mode()?;
+
     let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
 
     // Load previous Merkle snapshot for change detection
@@ -232,6 +237,18 @@ pub fn index_repo(
     let parsed: Vec<_> = paths
         .par_iter()
         .filter_map(|path| {
+            // Mtime pre-filter: skip if mtime matches snapshot (no read needed)
+            if let Some(ref prev) = previous_snapshot {
+                let rel = match path.strip_prefix(repo_root) {
+                    Ok(r) => r,
+                    Err(_) => path,
+                };
+                let mtime = mtime_of(path);
+                if prev.is_unchanged(rel, mtime) {
+                    return None;
+                }
+            }
+
             let content = match std::fs::read(path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -244,14 +261,14 @@ pub fn index_repo(
             }
             let content_hash = hash::blake3_bytes(&content);
 
-            // Skip if hash matches previous snapshot
+            // Double-check: skip if hash matches previous snapshot
             if let Some(ref prev) = previous_snapshot {
                 let rel = match path.strip_prefix(repo_root) {
                     Ok(r) => r,
                     Err(_) => path,
                 };
-                if let Some(prev_hash) = prev.hashes.get(rel) {
-                    if *prev_hash == content_hash {
+                if let Some(prev_hash) = prev.get_hash(rel) {
+                    if prev_hash == content_hash {
                         return None;
                     }
                 }
@@ -311,6 +328,9 @@ pub fn index_repo(
     // Build and save the new Merkle snapshot
     let new_snapshot = build_merkle_snapshot(repo_root);
     save_snapshot(repo_root, &new_snapshot);
+
+    // Restore safe SQLite defaults and flush WAL
+    store.exit_indexing_mode()?;
 
     stats.total_symbols = store.symbol_count().unwrap_or(0);
     info!(
@@ -508,7 +528,7 @@ fn index_repo_merkle_fallback(
         None => {
             // No previous snapshot — index everything
             MerkleDiff {
-                changed: current_snapshot.hashes.keys().cloned().collect(),
+                changed: current_snapshot.entries.keys().cloned().collect(),
                 deleted: Vec::new(),
             }
         }
@@ -905,8 +925,8 @@ mod tests {
 
         let snapshot = build_merkle_snapshot(dir.path());
         assert_eq!(snapshot.len(), 2);
-        assert!(snapshot.hashes.contains_key(&PathBuf::from("a.rs")));
-        assert!(snapshot.hashes.contains_key(&PathBuf::from("b.rs")));
+        assert!(snapshot.entries.contains_key(&PathBuf::from("a.rs")));
+        assert!(snapshot.entries.contains_key(&PathBuf::from("b.rs")));
     }
 
     #[test]

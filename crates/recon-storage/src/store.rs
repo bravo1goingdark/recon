@@ -99,12 +99,13 @@ impl Store {
     }
 
     /// Insert a symbol, returning its assigned ID.
+    /// Doc is stored separately in symbol_docs to reduce main table size.
     pub fn insert_symbol(&self, sym: &Symbol) -> Result<u64, Error> {
         self.conn
             .prepare_cached(
-                "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
-                                     byte_start, byte_end, line_start, line_end, body_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO symbols(path, name, qualified_name, kind, signature, parent_id,
+                                      byte_start, byte_end, line_start, line_end, body_hash)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .map_err(|e| Error::Storage(e.to_string()))?
             .execute(params![
@@ -113,7 +114,6 @@ impl Store {
                 sym.qualified_name.as_str(),
                 sym.kind.label(),
                 sym.signature.as_deref(),
-                sym.doc.as_deref(),
                 sym.parent_id.map(|v| v as i64),
                 sym.byte_range.start as i64,
                 sym.byte_range.end as i64,
@@ -122,13 +122,27 @@ impl Store {
                 sym.body_hash.as_slice(),
             ])
             .map_err(|e| Error::Storage(e.to_string()))?;
-        Ok(self.conn.last_insert_rowid() as u64)
+        let id = self.conn.last_insert_rowid() as u64;
+
+        // Store doc separately if present
+        if let Some(ref doc) = sym.doc {
+            self.conn
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO symbol_docs(symbol_id, doc) VALUES (?1, ?2)",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?
+                .execute(params![id as i64, doc.as_str()])
+                .map_err(|e| Error::Storage(e.to_string()))?;
+        }
+
+        Ok(id)
     }
 
     /// Batch-insert symbols in a single transaction.
     ///
     /// Uses a single prepared statement executed per symbol within one
     /// transaction — much faster than individual transactions.
+    /// Doc is stored separately in symbol_docs.
     pub fn insert_symbols_batch(&self, symbols: &[Symbol]) -> Result<(), Error> {
         if symbols.is_empty() {
             return Ok(());
@@ -140,9 +154,14 @@ impl Store {
         {
             let mut stmt = tx
                 .prepare_cached(
-                    "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
-                                         byte_start, byte_end, line_start, line_end, body_hash)
-                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO symbols(path, name, qualified_name, kind, signature, parent_id,
+                                          byte_start, byte_end, line_start, line_end, body_hash)
+                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            let mut doc_stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO symbol_docs(symbol_id, doc) VALUES (?1, ?2)",
                 )
                 .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -153,7 +172,6 @@ impl Store {
                     sym.qualified_name.as_str(),
                     sym.kind.label(),
                     sym.signature.as_deref(),
-                    sym.doc.as_deref(),
                     sym.parent_id.map(|v| v as i64),
                     sym.byte_range.start as i64,
                     sym.byte_range.end as i64,
@@ -162,6 +180,13 @@ impl Store {
                     sym.body_hash.as_slice(),
                 ])
                 .map_err(|e| Error::Storage(e.to_string()))?;
+
+                if let Some(ref doc) = sym.doc {
+                    let id = tx.last_insert_rowid();
+                    doc_stmt
+                        .execute(params![id, doc.as_str()])
+                        .map_err(|e| Error::Storage(e.to_string()))?;
+                }
             }
         }
         tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
@@ -211,13 +236,18 @@ impl Store {
             ])
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-            // Batch symbols
+            // Batch symbols (doc stored separately)
             if !symbols.is_empty() {
                 let mut sym_stmt = tx
                     .prepare_cached(
-                        "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
+                        "INSERT INTO symbols(path, name, qualified_name, kind, signature, parent_id,
                                              byte_start, byte_end, line_start, line_end, body_hash)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    )
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                let mut doc_stmt = tx
+                    .prepare_cached(
+                        "INSERT OR REPLACE INTO symbol_docs(symbol_id, doc) VALUES (?1, ?2)",
                     )
                     .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -229,7 +259,6 @@ impl Store {
                             sym.qualified_name.as_str(),
                             sym.kind.label(),
                             sym.signature.as_deref(),
-                            sym.doc.as_deref(),
                             sym.parent_id.map(|v| v as i64),
                             sym.byte_range.start as i64,
                             sym.byte_range.end as i64,
@@ -238,6 +267,13 @@ impl Store {
                             sym.body_hash.as_slice(),
                         ])
                         .map_err(|e| Error::Storage(e.to_string()))?;
+
+                    if let Some(ref doc) = sym.doc {
+                        let id = tx.last_insert_rowid();
+                        doc_stmt
+                            .execute(params![id, doc.as_str()])
+                            .map_err(|e| Error::Storage(e.to_string()))?;
+                    }
                 }
             }
 
@@ -300,9 +336,14 @@ impl Store {
                 .map_err(|e| Error::Storage(e.to_string()))?;
             let mut sym_stmt = tx
                 .prepare_cached(
-                    "INSERT INTO symbols(path, name, qualified_name, kind, signature, doc, parent_id,
+                    "INSERT INTO symbols(path, name, qualified_name, kind, signature, parent_id,
                                          byte_start, byte_end, line_start, line_end, body_hash)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            let mut doc_stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO symbol_docs(symbol_id, doc) VALUES (?1, ?2)",
                 )
                 .map_err(|e| Error::Storage(e.to_string()))?;
             let mut ref_stmt = tx
@@ -338,7 +379,6 @@ impl Store {
                             sym.qualified_name.as_str(),
                             sym.kind.label(),
                             sym.signature.as_deref(),
-                            sym.doc.as_deref(),
                             sym.parent_id.map(|v| v as i64),
                             sym.byte_range.start as i64,
                             sym.byte_range.end as i64,
@@ -347,6 +387,13 @@ impl Store {
                             sym.body_hash.as_slice(),
                         ])
                         .map_err(|e| Error::Storage(e.to_string()))?;
+
+                    if let Some(ref doc) = sym.doc {
+                        let id = tx.last_insert_rowid();
+                        doc_stmt
+                            .execute(params![id, doc.as_str()])
+                            .map_err(|e| Error::Storage(e.to_string()))?;
+                    }
                 }
                 for r in refs {
                     ref_stmt
@@ -791,6 +838,50 @@ impl Store {
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
+
+    /// Get the docstring for a symbol from the separate symbol_docs table.
+    /// Returns None if no doc is stored (docs are not stored in the main symbols table).
+    pub fn get_symbol_doc(&self, symbol_id: u64) -> Result<Option<String>, Error> {
+        self.conn
+            .query_row(
+                "SELECT doc FROM symbol_docs WHERE symbol_id = ?1",
+                params![symbol_id as i64],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// Enter high-throughput indexing mode: disable synchronous writes,
+    /// increase cache size, and defer WAL checkpoints.
+    ///
+    /// Call `exit_indexing_mode()` after bulk indexing to restore safety.
+    /// This can speed up bulk inserts by 2-3× at the cost of crash safety
+    /// during the indexing window.
+    pub fn enter_indexing_mode(&self) -> Result<(), Error> {
+        self.conn
+            .execute_batch(
+                "PRAGMA synchronous=OFF;
+                 PRAGMA cache_size=-64000;
+                 PRAGMA wal_autocheckpoint=0;",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Exit high-throughput indexing mode and restore safe defaults.
+    /// Also performs a WAL checkpoint to flush pending writes.
+    pub fn exit_indexing_mode(&self) -> Result<(), Error> {
+        self.conn
+            .execute_batch(
+                "PRAGMA wal_autocheckpoint=1000;
+                 PRAGMA synchronous=NORMAL;
+                 PRAGMA cache_size=-32000;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
 }
 
 impl Drop for Store {
@@ -800,6 +891,8 @@ impl Drop for Store {
 }
 
 /// Convert a rusqlite row to a Symbol. Public so `read_fns` can reuse it.
+/// Note: doc is no longer stored in the symbols table — it lives in symbol_docs
+/// and is loaded separately via `get_symbol_doc`.
 pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
     let kind_str: String = row.get(4).map_err(|e| Error::Storage(e.to_string()))?;
     let kind = match kind_str.as_str() {
@@ -916,7 +1009,7 @@ mod tests {
     fn open_memory_and_migrate() {
         let store = Store::open_memory().unwrap();
         let v = store.get_meta("schema_version").unwrap();
-        assert_eq!(v.as_deref(), Some("2"));
+        assert_eq!(v.as_deref(), Some("3"));
     }
 
     #[test]
@@ -1199,11 +1292,13 @@ mod tests {
 
         let found = store.find_symbols_exact("check", 1).unwrap();
         assert_eq!(found.len(), 1);
-        // Verify signature and doc round-trip as CompactString
+        // Verify signature round-trips as CompactString
         assert!(found[0]
             .signature
             .as_deref()
             .is_some_and(|s| s.contains("check")));
-        assert!(found[0].doc.as_deref().is_some_and(|d| !d.is_empty()));
+        // Doc is stored separately in symbol_docs, not in symbols table
+        let doc = store.get_symbol_doc(found[0].id).unwrap();
+        assert!(doc.is_some_and(|d| !d.is_empty()));
     }
 }

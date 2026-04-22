@@ -120,6 +120,17 @@ pub fn symbol_by_id(conn: &Connection, id: u64) -> Result<Option<Symbol>, Error>
     .transpose()
 }
 
+/// Get the docstring for a symbol from the separate symbol_docs table.
+pub fn symbol_doc_by_id(conn: &Connection, id: u64) -> Result<Option<String>, Error> {
+    conn.query_row(
+        "SELECT doc FROM symbol_docs WHERE symbol_id = ?1",
+        params![id as i64],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| Error::Storage(e.to_string()))
+}
+
 /// Find all refs for a given identifier.
 pub fn refs_for_ident(conn: &Connection, ident: &str) -> Result<Vec<Ref>, Error> {
     let mut stmt = conn
