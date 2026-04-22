@@ -206,4 +206,53 @@ mod tests {
         let back: Symbol = serde_json::from_str(&json).unwrap();
         assert_eq!(back.doc.as_deref(), Some("Returns a number."));
     }
+
+    #[test]
+    fn ref_serde_roundtrip() {
+        let r = Ref {
+            src_path: Arc::new(PathBuf::from("src/main.rs")),
+            src_symbol_id: 1,
+            ident: CompactString::new("process_data"),
+            dst_symbol_id: Some(2),
+            weight: 1.5,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Ref = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ident.as_str(), "process_data");
+        assert_eq!(back.src_symbol_id, 1);
+        assert_eq!(back.dst_symbol_id, Some(2));
+        assert!((back.weight - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn ref_with_no_dst() {
+        let r = Ref {
+            src_path: Arc::new(PathBuf::from("src/lib.rs")),
+            src_symbol_id: 5,
+            ident: CompactString::new("unknown_fn"),
+            dst_symbol_id: None,
+            weight: 1.0,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Ref = serde_json::from_str(&json).unwrap();
+        assert!(back.dst_symbol_id.is_none());
+    }
+
+    #[test]
+    fn file_meta_serde_roundtrip() {
+        let meta = FileMeta {
+            path: PathBuf::from("src/auth/mod.rs"),
+            lang: Language::Rust,
+            size_bytes: 4096,
+            content_hash: [0xAB; 32],
+            mtime: 1_700_000_000,
+            indexed_at: 1_700_000_100,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: FileMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.path.to_string_lossy(), "src/auth/mod.rs");
+        assert_eq!(back.lang, Language::Rust);
+        assert_eq!(back.size_bytes, 4096);
+        assert_eq!(back.content_hash, [0xAB; 32]);
+    }
 }

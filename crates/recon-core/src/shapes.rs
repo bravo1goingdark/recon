@@ -2,7 +2,7 @@
 
 use crate::symbol::SymbolKind;
 use compact_str::CompactString;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::path::PathBuf;
 
@@ -114,7 +114,7 @@ pub struct DiagView {
 }
 
 /// A single diagnostic.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagEntry {
     /// File path.
     pub path: PathBuf,
@@ -129,7 +129,7 @@ pub struct DiagEntry {
 }
 
 /// Diagnostic severity level.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagSeverity {
     /// Error.
@@ -242,5 +242,105 @@ mod tests {
             children: vec![],
         };
         assert_eq!(entry.name.as_str(), "short_name");
+    }
+
+    #[test]
+    fn symbol_card_view_serde() {
+        let view = ToolOutput::SymbolCard(SymbolCardView {
+            path: PathBuf::from("src/auth.rs"),
+            qualified_name: "auth::validate".into(),
+            kind: SymbolKind::Function,
+            signature: Some("pub fn validate(token: &str) -> bool".into()),
+            doc: Some("Validates an auth token.".into()),
+            body: "pub fn validate(token: &str) -> bool {\n    true\n}".into(),
+            line_range: (10, 12),
+            parent_chain: vec!["mod auth".into()],
+            callers: vec![RefEntry {
+                path: PathBuf::from("src/main.rs"),
+                line: 5,
+                col: Some(10),
+                snippet: "validate(tok)".into(),
+                enclosing_symbol: Some("main".into()),
+            }],
+            callees: vec![RefEntry {
+                path: PathBuf::from("src/auth.rs"),
+                line: 11,
+                col: None,
+                snippet: "parse_token".into(),
+                enclosing_symbol: None,
+            }],
+        });
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"shape\":\"SymbolCard\""));
+        assert!(json.contains("\"auth::validate\""));
+        assert!(json.contains("\"parent_chain\""));
+        assert!(json.contains("\"callers\""));
+        assert!(json.contains("\"callees\""));
+    }
+
+    #[test]
+    fn diagnostics_serde() {
+        let view = ToolOutput::Diagnostics(DiagView {
+            entries: vec![
+                DiagEntry {
+                    path: PathBuf::from("src/lib.rs"),
+                    line: 42,
+                    col: 5,
+                    message: "unused variable".into(),
+                    severity: DiagSeverity::Warning,
+                },
+                DiagEntry {
+                    path: PathBuf::from("src/lib.rs"),
+                    line: 50,
+                    col: 0,
+                    message: "cannot find value".into(),
+                    severity: DiagSeverity::Error,
+                },
+            ],
+        });
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"shape\":\"Diagnostics\""));
+        assert!(json.contains("\"warning\""));
+        assert!(json.contains("\"error\""));
+        assert!(json.contains("\"unused variable\""));
+    }
+
+    #[test]
+    fn diag_severity_serde_variants() {
+        assert_eq!(
+            serde_json::to_string(&DiagSeverity::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiagSeverity::Warning).unwrap(),
+            "\"warning\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiagSeverity::Info).unwrap(),
+            "\"info\""
+        );
+    }
+
+    #[test]
+    fn diag_entry_roundtrip() {
+        let entry = DiagEntry {
+            path: PathBuf::from("tests/test.rs"),
+            line: 100,
+            col: 12,
+            message: "assertion failed".into(),
+            severity: DiagSeverity::Error,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: DiagEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.line, 100);
+        assert_eq!(back.message, "assertion failed");
+        assert_eq!(back.severity, DiagSeverity::Error);
+    }
+
+    #[test]
+    fn empty_diagnostics() {
+        let view = ToolOutput::Diagnostics(DiagView { entries: vec![] });
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"entries\":[]"));
     }
 }

@@ -1049,4 +1049,118 @@ impl Foo {
             assert_eq!(d.kind, p.kind);
         }
     }
+
+    #[test]
+    fn java_basic() {
+        let src = br#"
+package com.example;
+
+public class UserService {
+    /** Creates a new user. */
+    public User create(String name) {
+        return new User(name);
+    }
+
+    public UserService() {}
+}
+
+interface Repository<T> {
+    T findById(long id);
+}
+
+enum Status {
+    ACTIVE, INACTIVE
+}
+"#;
+        let result = extract_symbols(src, Language::Java, Path::new("UserService.java"));
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"UserService"),
+            "missing UserService: {names:?}"
+        );
+        assert!(names.contains(&"create"), "missing create: {names:?}");
+        assert!(
+            names.contains(&"Repository"),
+            "missing Repository: {names:?}"
+        );
+        assert!(names.contains(&"Status"), "missing Status: {names:?}");
+    }
+
+    #[test]
+    fn c_basic() {
+        let src = br#"
+#include <stdio.h>
+
+struct Point {
+    int x;
+    int y;
+};
+
+int add(int a, int b) {
+    return a + b;
+}
+
+static void print_point(const struct Point *p) {
+    printf("(%d, %d)\n", p->x, p->y);
+}
+"#;
+        let result = extract_symbols(src, Language::C, Path::new("math.c"));
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"add"), "missing add: {names:?}");
+        assert!(
+            names.contains(&"print_point"),
+            "missing print_point: {names:?}"
+        );
+        assert!(names.contains(&"Point"), "missing Point: {names:?}");
+    }
+
+    #[test]
+    fn cpp_basic() {
+        let src = br#"
+#include <string>
+
+class Greeter {
+public:
+    Greeter(const std::string& name);
+    void greet() const;
+private:
+    std::string name_;
+};
+
+enum class Color { Red, Green, Blue };
+
+template<typename T>
+T max(T a, T b) {
+    return a > b ? a : b;
+}
+"#;
+        let result = extract_symbols(src, Language::Cpp, Path::new("greeter.cpp"));
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Greeter"), "missing Greeter: {names:?}");
+        assert!(names.contains(&"Color"), "missing Color: {names:?}");
+        assert!(names.contains(&"max"), "missing max: {names:?}");
+    }
+
+    #[test]
+    fn rust_refs_are_extracted() {
+        let src = br#"
+pub mod utils {
+    pub fn process(data: Vec<u8>) -> String {
+        let result = format_data(&data);
+        validate(&result);
+        result
+    }
+
+    fn format_data(data: &[u8]) -> String {
+        String::from_utf8_lossy(data).to_string()
+    }
+}
+"#;
+        let result = extract_symbols(src, Language::Rust, Path::new("src/lib.rs"));
+        // Rust extractor pushes refs for identifiers > 1 char within a parent symbol
+        assert!(
+            !result.refs.is_empty(),
+            "expected refs to be non-empty for Rust source with nested symbols"
+        );
+    }
 }

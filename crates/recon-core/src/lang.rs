@@ -134,4 +134,33 @@ mod tests {
         let back: Language = serde_json::from_str(&json).unwrap();
         assert_eq!(back, lang);
     }
+
+    #[test]
+    fn extension_roundtrip() {
+        assert_eq!(Language::Rust.extension(), "rs");
+        assert_eq!(Language::Python.extension(), "py");
+        assert_eq!(Language::TypeScript.extension(), "ts");
+        assert_eq!(Language::Tsx.extension(), "tsx");
+        assert_eq!(Language::JavaScript.extension(), "js");
+        assert_eq!(Language::Go.extension(), "go");
+        assert_eq!(Language::Java.extension(), "java");
+        assert_eq!(Language::C.extension(), "c");
+        assert_eq!(Language::Cpp.extension(), "cpp");
+        assert_eq!(Language::Unknown.extension(), "");
+    }
+
+    #[test]
+    fn name_returns_human_readable() {
+        assert_eq!(Language::Rust.name(), "Rust");
+        assert_eq!(Language::Cpp.name(), "C++");
+        assert_eq!(Language::Tsx.name(), "TSX");
+        assert_eq!(Language::Unknown.name(), "Unknown");
+    }
+
+    #[test]
+    fn display_delegates_to_name() {
+        assert_eq!(Language::Go.to_string(), "Go");
+        assert_eq!(Language::Cpp.to_string(), "C++");
+        assert_eq!(Language::Unknown.to_string(), "Unknown");
+    }
 }

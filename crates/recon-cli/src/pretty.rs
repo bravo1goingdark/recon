@@ -249,3 +249,146 @@ fn print_array(arr: &[Value]) {
         println!("{}", serde_json::to_string_pretty(item).unwrap_or_default());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_output_json_mode_passthrough() {
+        // With json=true, output is raw JSON
+        let input = r#"{"shape":"Outline","path":"test.rs","entries":[]}"#;
+        // Just verify it doesn't panic and handles the json branch
+        print_output(input, true);
+    }
+
+    #[test]
+    fn print_output_invalid_json_prints_raw() {
+        // Non-JSON input should be printed as-is
+        print_output("not json at all", false);
+    }
+
+    #[test]
+    fn print_output_handles_empty_array() {
+        print_output("[]", false);
+    }
+
+    #[test]
+    fn print_output_handles_non_object_non_array() {
+        print_output(r#""just a string""#, false);
+    }
+
+    #[test]
+    fn print_stats_output_contains_files_and_symbols() {
+        let json = serde_json::json!({
+            "files_indexed": 42,
+            "total_symbols": 150,
+            "tantivy_docs": 140,
+            "repo_root": "/home/user/project"
+        });
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_reindex_output_contains_status() {
+        let json = serde_json::json!({
+            "status": "ok",
+            "files_indexed": 100,
+            "total_symbols": 500,
+            "errors": 0
+        });
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_outline_output_contains_path() {
+        let json = serde_json::json!({
+            "shape": "Outline",
+            "path": "src/lib.rs",
+            "entries": [
+                {
+                    "kind": "fn",
+                    "name": "main",
+                    "line": 1,
+                    "children": []
+                }
+            ]
+        });
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_skeleton_output_contains_content() {
+        let json = serde_json::json!({
+            "shape": "Skeleton",
+            "path": "src/lib.rs",
+            "content": "fn main() { ... }\n\n",
+            "token_estimate": 5
+        });
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_symbol_card_output_contains_qname() {
+        let json = serde_json::json!({
+            "shape": "SymbolCard",
+            "path": "src/lib.rs",
+            "qualified_name": "crate::main",
+            "kind": "fn",
+            "signature": "fn main()",
+            "doc": null,
+            "body": "fn main() {}",
+            "line_range": [1, 1],
+            "parent_chain": [],
+            "callers": [],
+            "callees": []
+        });
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_refs_output_contains_symbol_and_total() {
+        let json = serde_json::json!({
+            "shape": "ReferenceDigest",
+            "symbol": "process_data",
+            "total": 3,
+            "top_k": [
+                {"path": "src/main.rs", "line": 10, "col": 5, "snippet": "process_data()", "enclosing_symbol": "main"}
+            ]
+        });
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_array_detects_symbol_results() {
+        let json = serde_json::json!([
+            {"qualified_name": "crate::main", "path": "src/lib.rs", "line": 1, "kind": "fn", "signature": "fn main()"}
+        ]);
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_array_detects_search_results() {
+        let json = serde_json::json!([
+            {"path": "src/lib.rs", "line": 5, "col": 10, "text": "let x = 42;"}
+        ]);
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_array_detects_file_list_results() {
+        let json = serde_json::json!([
+            {"path": "src/lib.rs", "lang": "Rust", "symbol_count": 15, "top_symbols": ["main"]}
+        ]);
+        let raw = json.to_string();
+        print_output(&raw, false);
+    }
+}

@@ -128,3 +128,80 @@ pub struct ReindexParams {
 /// Parameters for `code_stats`.
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct StatsParams {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outline_params_deserialize() {
+        let p: OutlineParams = serde_json::from_str(r#"{"path":"src/lib.rs"}"#).unwrap();
+        assert_eq!(p.path, "src/lib.rs");
+    }
+
+    #[test]
+    fn skeleton_params_default_depth() {
+        let p: SkeletonParams = serde_json::from_str(r#"{"path":"src/lib.rs"}"#).unwrap();
+        assert_eq!(p.depth, 2);
+    }
+
+    #[test]
+    fn skeleton_params_custom_depth() {
+        let p: SkeletonParams = serde_json::from_str(r#"{"path":"src/lib.rs","depth":5}"#).unwrap();
+        assert_eq!(p.depth, 5);
+    }
+
+    #[test]
+    fn search_params_default_mode() {
+        let p: SearchParams = serde_json::from_str(r#"{"query":"foo"}"#).unwrap();
+        assert_eq!(p.mode, "exact");
+    }
+
+    #[test]
+    fn search_params_regex_mode() {
+        let p: SearchParams = serde_json::from_str(r#"{"query":"foo.*","mode":"regex"}"#).unwrap();
+        assert_eq!(p.mode, "regex");
+    }
+
+    #[test]
+    fn repo_map_params_default_budget() {
+        let p: RepoMapParams = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(p.token_budget, 2000);
+    }
+
+    #[test]
+    fn repo_map_params_custom_budget() {
+        let p: RepoMapParams = serde_json::from_str(r#"{"token_budget":500}"#).unwrap();
+        assert_eq!(p.token_budget, 500);
+    }
+
+    #[test]
+    fn find_strings_params_default_kind() {
+        let p: FindStringsParams = serde_json::from_str(r#"{"pattern":"TODO"}"#).unwrap();
+        assert_eq!(p.kind, "both");
+    }
+
+    #[test]
+    fn reindex_params_default_force() {
+        let p: ReindexParams = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(!p.force);
+    }
+
+    #[test]
+    fn reindex_params_force_true() {
+        let p: ReindexParams = serde_json::from_str(r#"{"force":true}"#).unwrap();
+        assert!(p.force);
+    }
+
+    #[test]
+    fn multi_find_params_with_patterns() {
+        let p: MultiFindParams = serde_json::from_str(r#"{"patterns":["foo","bar"]}"#).unwrap();
+        assert_eq!(p.patterns, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn stats_params_empty() {
+        let p: StatsParams = serde_json::from_str(r#"{}"#).unwrap();
+        let _ = p;
+    }
+}

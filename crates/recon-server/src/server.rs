@@ -747,6 +747,37 @@ impl ReconServer {
             })
             .collect();
 
+        // Build parent chain: walk up parent_id to root
+        let mut parent_chain: Vec<String> = Vec::new();
+        let mut current_parent = sym.parent_id;
+        while let Some(parent_id) = current_parent {
+            if let Some(parent) = symbols.iter().find(|s| s.id == parent_id) {
+                parent_chain.push(format!(
+                    "{}:{} {}",
+                    parent.kind.label(),
+                    parent.line_range.start(),
+                    parent.qualified_name
+                ));
+                current_parent = parent.parent_id;
+            } else {
+                break;
+            }
+        }
+        parent_chain.reverse();
+
+        // Build callees: symbols this symbol references
+        let callees: Vec<RefEntry> = refs
+            .iter()
+            .filter(|r| r.src_symbol_id == sym.id)
+            .map(|r| RefEntry {
+                path: (*r.src_path).clone(),
+                line: 0,
+                col: None,
+                snippet: r.ident.clone(),
+                enclosing_symbol: None,
+            })
+            .collect();
+
         let view = ToolOutput::SymbolCard(SymbolCardView {
             path: rel_path,
             qualified_name: sym.qualified_name.to_string(),
@@ -755,9 +786,9 @@ impl ReconServer {
             doc: sym.doc.as_deref().map(str::to_owned),
             body,
             line_range: (*sym.line_range.start(), *sym.line_range.end()),
-            parent_chain: vec![],
+            parent_chain,
             callers,
-            callees: vec![],
+            callees,
         });
         redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
@@ -839,15 +870,34 @@ impl ReconServer {
             .refs_for_ident(&params.0.symbol)
             .unwrap_or_default();
 
+        // Build a lookup of symbol_id -> (path, line) for resolving ref locations
+        let all_symbols = self.read_pool.all_symbols().unwrap_or_default();
+        let sym_location: std::collections::HashMap<u64, (Arc<PathBuf>, u32)> = all_symbols
+            .iter()
+            .map(|s| (s.id, (Arc::clone(&s.path), *s.line_range.start())))
+            .collect();
+
         let top_k: Vec<RefEntry> = refs
             .iter()
             .take(20)
-            .map(|r| RefEntry {
-                path: (*r.src_path).clone(),
-                line: 0,
-                col: None,
-                snippet: r.ident.clone(),
-                enclosing_symbol: None,
+            .map(|r| {
+                let (line, enclosing_symbol) = sym_location
+                    .get(&r.src_symbol_id)
+                    .map(|(_path, line)| {
+                        let enclosing = all_symbols
+                            .iter()
+                            .find(|s| s.id == r.src_symbol_id)
+                            .map(|s| s.qualified_name.clone());
+                        (*line, enclosing)
+                    })
+                    .unwrap_or((0, None));
+                RefEntry {
+                    path: (*r.src_path).clone(),
+                    line,
+                    col: None,
+                    snippet: r.ident.clone(),
+                    enclosing_symbol,
+                }
             })
             .collect();
 
@@ -1207,7 +1257,9 @@ impl ReconServer {
         name = "code_reindex",
         description = "Trigger a full re-index of the repository. Use when you suspect the index is stale or after major file changes outside the editor."
     )]
-    async fn code_reindex(&self, _params: Parameters<ReindexParams>) -> String {
+    async fn code_reindex(&self, params: Parameters<ReindexParams>) -> String {
+        let force = params.0.force;
+
         // Clear cache under short write lock
         {
             let store = self.write_store.lock();
@@ -1223,6 +1275,23 @@ impl ReconServer {
         let result = tokio::task::spawn_blocking(move || {
             use recon_indexer::indexer;
             use recon_indexer::walker;
+
+            if force {
+                // Full reindex: clear existing data first
+                info!("force reindex: clearing existing data");
+                {
+                    let store = write_store.lock();
+                    // Delete all symbols and files
+                    let all_paths = store.all_file_paths().unwrap_or_default();
+                    for path in &all_paths {
+                        let _ = store.delete_file_cascade(path);
+                    }
+                    // Clear Tantivy by recreating the index
+                    if let Some(ref mut writer) = tantivy_writer.lock().as_mut() {
+                        let _ = tantivy.commit(writer);
+                    }
+                }
+            }
 
             // Phase 1: Walk + parse (NO locks held)
             let paths = walker::walk_repo(&repo_root);
@@ -1288,6 +1357,7 @@ impl ReconServer {
                 "files_indexed": files_indexed,
                 "total_symbols": total_symbols,
                 "errors": errors,
+                "force": force,
             })
         })
         .await;
@@ -1316,14 +1386,16 @@ impl ReconServer {
             .unwrap_or(None)
             .unwrap_or_default();
 
-        serde_json::to_string(&serde_json::json!({
-            "files_indexed": file_count,
-            "total_symbols": symbol_count,
-            "tantivy_docs": tantivy_docs,
-            "schema_version": schema_version,
-            "repo_root": self.repo_root.to_string_lossy(),
-        }))
-        .unwrap_or_else(|e| format!("Error: {e}"))
+        redact_response(
+            serde_json::to_string(&serde_json::json!({
+                "files_indexed": file_count,
+                "total_symbols": symbol_count,
+                "tantivy_docs": tantivy_docs,
+                "schema_version": schema_version,
+                "repo_root": self.repo_root.to_string_lossy(),
+            }))
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        )
     }
 }
 
