@@ -6,19 +6,100 @@
 
 use crate::search_trait::{TextHit, TextQuery, TextSearcher};
 use crate::utils::regex_escape;
+use ahash::AHashMap;
+use aho_corasick::AhoCorasick;
+use arc_swap::ArcSwap;
 use grep_regex::RegexMatcher;
+use rayon::prelude::*;
 use recon_core::error::Error;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+/// Maximum number of entries in the mmap cache.
+const MAX_CACHE_ENTRIES: usize = 1024;
 
 /// fff-grep backed text search.
 ///
 /// Memory-maps each file and delegates search to `fff_grep::Searcher::search_slice`.
-pub struct FffBackend;
+/// Caches mmaps in an `ArcSwap<AHashMap>` for lock-free reads, with a `Mutex` for
+/// write-side mutations. Cache is bounded to `MAX_CACHE_ENTRIES` entries.
+pub struct FffBackend {
+    /// Lock-free mmap cache for hot files.
+    cache: ArcSwap<AHashMap<PathBuf, Arc<memmap2::Mmap>>>,
+    /// Mutex for cache mutations (write side).
+    cache_lock: Mutex<()>,
+}
 
 impl FffBackend {
     /// Create a new `FffBackend`.
     pub fn new() -> Self {
-        Self
+        Self {
+            cache: ArcSwap::new(Arc::new(AHashMap::new())),
+            cache_lock: Mutex::new(()),
+        }
+    }
+
+    /// Look up or create an mmap for the given path.
+    fn get_mmap(&self, path: &std::path::Path) -> Option<Arc<memmap2::Mmap>> {
+        let map = self.cache.load();
+        if let Some(mmap) = map.get(path) {
+            return Some(Arc::clone(mmap));
+        }
+
+        // Not in cache — mmap and insert.
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!(?path, "get_mmap: cannot open file: {e}");
+                return None;
+            }
+        };
+        let meta = match file.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(?path, "get_mmap: cannot stat file: {e}");
+                return None;
+            }
+        };
+        if meta.len() == 0 {
+            return None;
+        }
+
+        // SAFETY: file is open and non-empty; we only read during the search.
+        let mmap = match unsafe { memmap2::Mmap::map(&file) } {
+            Ok(m) => Arc::new(m),
+            Err(e) => {
+                tracing::debug!(?path, "get_mmap: cannot mmap file: {e}");
+                return None;
+            }
+        };
+
+        // Insert into cache under the write lock — double-check pattern avoids
+        // cloning the entire map on every miss.
+        let _guard = match self.cache_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        // Re-check under lock — another thread may have inserted it.
+        let current = self.cache.load();
+        if let Some(mmap) = current.get(path) {
+            return Some(Arc::clone(mmap));
+        }
+
+        // Build new map incrementally — only clone if we must evict.
+        let mut new_map = if current.len() >= MAX_CACHE_ENTRIES {
+            // Cache full — clear entirely (simple and effective for file-watcher scenarios).
+            AHashMap::with_capacity(MAX_CACHE_ENTRIES)
+        } else {
+            // Clone only when adding a new entry (amortized O(1) per miss, not per query).
+            (**current).clone()
+        };
+        new_map.insert(path.to_path_buf(), Arc::clone(&mmap));
+        self.cache.store(Arc::new(new_map));
+
+        Some(mmap)
     }
 }
 
@@ -101,29 +182,59 @@ impl<'a> fff_grep::Sink for CollectSink<'a> {
     }
 }
 
+// ── Helper functions for aho-corasick line extraction ──────────────────────────
+
+/// Build a sorted list of newline byte offsets for binary-search line resolution.
+/// O(M) one-time cost per file, then O(log M) per match.
+fn build_line_index(data: &[u8]) -> Vec<usize> {
+    let mut newlines = Vec::with_capacity(data.len() / 64); // heuristic: ~1 line per 64 bytes
+    for (i, &b) in data.iter().enumerate() {
+        if b == b'\n' {
+            newlines.push(i);
+        }
+    }
+    newlines
+}
+
+/// Resolve byte offset to (line_number, line_start, line_end) using binary search.
+/// line_number is 1-based.
+#[inline]
+fn resolve_line(line_index: &[usize], data_len: usize, offset: usize) -> (u32, usize, usize) {
+    // Binary search: find first newline >= offset
+    let idx = line_index.partition_point(|&nl| nl < offset);
+    let line_num = (idx + 1) as u32;
+    let line_start = if idx == 0 { 0 } else { line_index[idx - 1] + 1 };
+    let line_end = if idx < line_index.len() {
+        line_index[idx]
+    } else {
+        data_len
+    };
+    (line_num, line_start, line_end)
+}
+
+/// Extract line text from byte range, decoded lossily.
+#[inline]
+fn extract_line_text(data: &[u8], start: usize, end: usize) -> String {
+    String::from_utf8_lossy(&data[start..end])
+        .trim_end()
+        .to_string()
+}
+
 // ── Core search logic ──────────────────────────────────────────────────────────
 
 /// Search a single memory-mapped file slice with fff-grep.
-fn search_slice_in_file(
+fn search_slice_with_mmap(
     matcher: &FffMatcher,
+    mmap: &memmap2::Mmap,
     path: &std::path::Path,
     hits: &mut Vec<TextHit>,
     max: usize,
 ) -> Result<(), Error> {
-    let file = std::fs::File::open(path)?;
-    let meta = file.metadata()?;
-    if meta.len() == 0 {
-        return Ok(());
-    }
-
-    // SAFETY: file is open and non-empty; we only read during the search.
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
-
     let searcher = fff_grep::SearcherBuilder::new().line_number(true).build();
 
     let mut sink = CollectSink { path, hits, max };
     searcher
-        .search_slice(matcher, &mmap, &mut sink)
+        .search_slice(matcher, mmap, &mut sink)
         .map_err(|e| Error::Search(format!("fff-grep: {e}")))?;
 
     Ok(())
@@ -151,7 +262,12 @@ impl TextSearcher for FffBackend {
             if hits.len() >= q.max_results {
                 break;
             }
-            if let Err(e) = search_slice_in_file(&matcher, path, &mut hits, q.max_results) {
+            let Some(mmap) = self.get_mmap(path) else {
+                tracing::debug!(?path, "fff search: no mmap available");
+                continue;
+            };
+            if let Err(e) = search_slice_with_mmap(&matcher, &mmap, path, &mut hits, q.max_results)
+            {
                 tracing::debug!(?path, "fff search error: {e}");
             }
         }
@@ -164,22 +280,105 @@ impl TextSearcher for FffBackend {
         scope: &[PathBuf],
         max_per_pattern: usize,
     ) -> Result<Vec<(String, Vec<TextHit>)>, Error> {
-        let mut results = Vec::with_capacity(patterns.len());
-        for &pat in patterns {
-            let q = TextQuery {
-                pattern: pat.to_string(),
-                is_regex: false,
-                max_results: max_per_pattern,
-                scope: scope.to_vec(),
-            };
-            let hits = self.search(&q)?;
-            results.push((pat.to_string(), hits));
+        // Filter out empty patterns — aho-corasick rejects them.
+        let non_empty: Vec<&str> = patterns.iter().copied().filter(|p| !p.is_empty()).collect();
+        if non_empty.is_empty() {
+            return Ok(patterns
+                .iter()
+                .map(|p| (p.to_string(), Vec::new()))
+                .collect());
         }
-        Ok(results)
+
+        let ac = AhoCorasick::builder()
+            .build(&non_empty)
+            .map_err(|e| Error::Search(format!("aho-corasick build error: {e}")))?;
+
+        // Parallel scan across all files — rayon distributes work across CPU cores.
+        // Each thread builds local buckets, then we merge them lock-free.
+        let n_patterns = non_empty.len();
+        let results: Vec<Vec<TextHit>> = scope
+            .par_iter()
+            .map(|path: &PathBuf| {
+                let mut local_buckets: Vec<Vec<TextHit>> =
+                    (0..n_patterns).map(|_| Vec::with_capacity(8)).collect();
+
+                let Some(mmap) = self.get_mmap(path) else {
+                    return local_buckets;
+                };
+
+                // Build newline index once per file: O(M)
+                let line_index = build_line_index(&mmap);
+                let data_len = mmap.len();
+
+                // Single-pass aho-corasick scan: O(N log M) for N matches
+                for mat in ac.find_iter(&*mmap) {
+                    let pat_idx = mat.pattern().as_usize();
+                    if local_buckets[pat_idx].len() >= max_per_pattern {
+                        continue;
+                    }
+                    let start = mat.start();
+                    let (line_num, line_start, line_end) =
+                        resolve_line(&line_index, data_len, start);
+                    let line_text = extract_line_text(&mmap, line_start, line_end);
+                    let col = (start - line_start) as u32 + 1;
+                    local_buckets[pat_idx].push(TextHit {
+                        path: path.clone(),
+                        line: line_num,
+                        col: Some(col),
+                        line_text,
+                    });
+                }
+                local_buckets
+            })
+            .reduce(
+                || (0..n_patterns).map(|_| Vec::new()).collect(),
+                |mut acc, buckets| {
+                    for (i, b) in buckets.into_iter().enumerate() {
+                        acc[i].extend(b);
+                    }
+                    acc
+                },
+            );
+
+        // Build results preserving original pattern order.
+        let mut final_results = Vec::with_capacity(patterns.len());
+        let mut non_empty_idx = 0;
+        for &pat in patterns {
+            if pat.is_empty() {
+                final_results.push((pat.to_string(), Vec::new()));
+            } else {
+                let mut hits = std::mem::take(&mut results[non_empty_idx].clone());
+                hits.truncate(max_per_pattern);
+                final_results.push((pat.to_string(), hits));
+                non_empty_idx += 1;
+            }
+        }
+        Ok(final_results)
     }
 
-    fn refresh(&self, _changed_paths: &[PathBuf]) -> Result<(), Error> {
-        // FffBackend mmaps files on each query — nothing to invalidate.
+    fn refresh(&self, changed_paths: &[PathBuf]) -> Result<(), Error> {
+        let _guard = match self.cache_lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let current = self.cache.load();
+        if current.is_empty() {
+            return Ok(());
+        }
+
+        let mut new_map = (**current).clone();
+
+        // If changed paths are a significant fraction of cache, clear entirely.
+        if changed_paths.len() >= new_map.len() / 2 {
+            new_map.clear();
+        } else {
+            for path in changed_paths {
+                new_map.remove(path);
+            }
+        }
+
+        self.cache.store(Arc::new(new_map));
         Ok(())
     }
 }
@@ -325,5 +524,66 @@ mod tests {
         let backend = FffBackend::new();
         let results = backend.multi_search(&[], &[file], 10).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn fff_refresh_invalidates_cache() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}").unwrap();
+
+        let backend = FffBackend::new();
+        let q = TextQuery {
+            pattern: "fn ".into(),
+            is_regex: false,
+            max_results: 10,
+            scope: vec![file.clone()],
+        };
+        let hits = backend.search(&q).unwrap();
+        assert_eq!(hits.len(), 1);
+
+        // Refresh should invalidate the cache for this file.
+        backend.refresh(std::slice::from_ref(&file)).unwrap();
+
+        // Modify the file on disk.
+        std::fs::write(&file, "fn hello() {}\nfn world() {}").unwrap();
+
+        // Next search should pick up the new content.
+        let hits = backend.search(&q).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn fff_refresh_clears_on_many_changes() {
+        let dir = tempdir().unwrap();
+        let files: Vec<_> = (0..5)
+            .map(|i| {
+                let f = dir.path().join(format!("file_{i}.rs"));
+                std::fs::write(&f, format!("fn func_{i}() {{}}")).unwrap();
+                f
+            })
+            .collect();
+
+        let backend = FffBackend::new();
+
+        // Search all files to populate cache.
+        for f in &files {
+            let q = TextQuery {
+                pattern: format!("func_{}", files.iter().position(|x| x == f).unwrap()),
+                is_regex: false,
+                max_results: 10,
+                scope: vec![f.clone()],
+            };
+            let hits = backend.search(&q).unwrap();
+            assert_eq!(hits.len(), 1);
+        }
+
+        // Refresh with >= half the cached entries — should clear entirely.
+        let changed: Vec<_> = files.iter().take(3).cloned().collect();
+        backend.refresh(&changed).unwrap();
+
+        // Cache should now be empty.
+        let cache = backend.cache.load();
+        assert!(cache.is_empty());
     }
 }

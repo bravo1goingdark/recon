@@ -24,10 +24,15 @@ fff-grep = { workspace = true }
 fff-query-parser = { workspace = true }
 globset = { workspace = true }
 memmap2 = { workspace = true }
+aho-corasick = { workspace = true }
+arc-swap = { workspace = true }
+smallvec = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
+filetime = { workspace = true }
 
 [[bench]]
 name = "search_bench"
