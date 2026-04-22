@@ -12,6 +12,8 @@ use recon_storage::store::Store;
 use rmcp::ServiceExt;
 use std::path::{Path, PathBuf};
 use tracing::info;
+#[cfg(feature = "embed")]
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]

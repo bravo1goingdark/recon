@@ -13,7 +13,44 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 use tracing::{info, warn};
+
+/// Router-level errors.
+#[derive(Debug, Error)]
+pub enum RouterError {
+    /// Subscription has expired.
+    #[error("subscription expired — renew to continue using Pro features")]
+    Expired,
+
+    /// Failed to canonicalize a path.
+    #[error("canonicalize: {0}")]
+    Canonicalize(#[source] std::io::Error),
+
+    /// Repo limit reached for the current tier.
+    #[error("repo limit reached ({0} max for {1} tier)")]
+    RepoLimit(usize, String),
+
+    /// Repository has too many source files.
+    #[error("Repository has {0} source files — exceeds the {1} tier limit of {2} files. Upgrade to a higher tier for larger repositories.")]
+    FileLimit(usize, String, usize),
+
+    /// Repository has too many lines of code.
+    #[error("Repository has approximately {0}K lines of code — exceeds the {1} tier limit of {2}K LOC. Upgrade to a higher tier for larger repositories.")]
+    LocLimit(usize, String, usize),
+
+    /// Storage backend error.
+    #[error("storage: {0}")]
+    Storage(String),
+
+    /// Search backend error.
+    #[error("search: {0}")]
+    Search(String),
+
+    /// Core library error.
+    #[error("core: {0}")]
+    Core(#[from] recon_core::error::Error),
+}
 
 /// Global monotonic counter for access ordering.
 static ACCESS_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -282,23 +319,20 @@ impl RepoRouter {
     /// Returns an error if:
     /// - Subscription has expired
     /// - Repo limit reached for the current tier
-    pub fn get_or_load(&self, repo_path: &Path) -> Result<ReconServer, anyhow::Error> {
+    pub fn get_or_load(&self, repo_path: &Path) -> Result<ReconServer, RouterError> {
         if self.is_expired() {
-            return Err(anyhow::anyhow!(
-                "subscription expired — renew to continue using Pro features"
-            ));
+            return Err(RouterError::Expired);
         }
 
         let repo_path = repo_path
             .canonicalize()
-            .map_err(|e| anyhow::anyhow!("canonicalize: {e}"))?;
+            .map_err(RouterError::Canonicalize)?;
 
         // Check tier limit before loading
         if !self.repos.contains_key(&repo_path) && self.repos.len() >= self.tier.max_repos() {
-            return Err(anyhow::anyhow!(
-                "repo limit reached ({} max for {} tier)",
+            return Err(RouterError::RepoLimit(
                 self.tier.max_repos(),
-                self.tier,
+                self.tier.name().to_string(),
             ));
         }
 
@@ -370,7 +404,7 @@ impl RepoRouter {
     ///
     /// Walks the repo first to count files and estimate LOC. If the repo
     /// exceeds the tier limit, returns a clear error with upgrade guidance.
-    fn load_repo(repo_path: &Path, tier: Tier) -> Result<ReconServer, anyhow::Error> {
+    fn load_repo(repo_path: &Path, tier: Tier) -> Result<ReconServer, RouterError> {
         let limits = tier.limits();
         let tier_name = tier.name();
 
@@ -379,11 +413,9 @@ impl RepoRouter {
         let file_count = paths.len();
 
         if file_count > limits.max_files {
-            return Err(anyhow::anyhow!(
-                "Repository has {} source files — exceeds the {} tier limit of {} files. \
-                 Upgrade to a higher tier for larger repositories.",
+            return Err(RouterError::FileLimit(
                 file_count,
-                tier_name,
+                tier_name.to_string(),
                 limits.max_files,
             ));
         }
@@ -400,11 +432,9 @@ impl RepoRouter {
                 (sample_loc as f64 / sample_size as f64 * file_count as f64) as usize;
 
             if estimated_loc > limits.max_loc {
-                return Err(anyhow::anyhow!(
-                    "Repository has approximately {}K lines of code — exceeds the {} tier \
-                     limit of {}K LOC. Upgrade to a higher tier for larger repositories.",
+                return Err(RouterError::LocLimit(
                     estimated_loc / 1000,
-                    tier_name,
+                    tier_name.to_string(),
                     limits.max_loc / 1000,
                 ));
             }
@@ -419,11 +449,12 @@ impl RepoRouter {
         }
 
         let store_dir = repo_path.join(".recon");
-        std::fs::create_dir_all(&store_dir)?;
+        std::fs::create_dir_all(&store_dir).map_err(|e| RouterError::Storage(e.to_string()))?;
 
-        let store = Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let tantivy =
-            TantivyBackend::open(&store_dir.join("tantivy")).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let store = Store::open(&store_dir.join("index.db"))
+            .map_err(|e| RouterError::Storage(e.to_string()))?;
+        let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
+            .map_err(|e| RouterError::Search(e.to_string()))?;
 
         let mut writer = tantivy.writer(50_000_000).ok();
         match indexer::index_repo_incremental(&store, Some(&tantivy), repo_path, writer.as_mut()) {

@@ -9,7 +9,7 @@ description = "MCP server handler and tool implementations for recon"
 [dependencies]
 recon-core = { workspace = true }
 recon-storage = { workspace = true }
-anyhow = { workspace = true }
+thiserror = { workspace = true }
 dashmap = { workspace = true }
 recon-search = { workspace = true }
 recon-indexer = { workspace = true }

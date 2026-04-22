@@ -92,8 +92,10 @@ impl RankGraph {
         // Phase 2: Build CSR offsets from counts
         let mut offsets = Vec::with_capacity(n + 1);
         offsets.push(0);
+        let mut running = 0usize;
         for &count in &edge_counts {
-            offsets.push(offsets.last().unwrap() + count);
+            running += count;
+            offsets.push(running);
         }
 
         // Phase 3: Fill CSR edges (reuse edge_counts as write cursors)

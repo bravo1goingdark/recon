@@ -4210,7 +4210,6 @@ name = "recon-server"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "anyhow",
  "compact_str",
  "dashmap",
  "dirs",
@@ -4231,6 +4230,7 @@ dependencies = [
  "smallvec",
  "tantivy",
  "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
  "ureq",

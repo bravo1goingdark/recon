@@ -27,6 +27,14 @@ use tracing::{debug, info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Create an HMAC-SHA256 instance from the compile-time key.
+///
+/// Returns `None` only if the key is empty, which cannot happen with the
+/// current `HMAC_KEY` definition (always at least the dev placeholder).
+fn new_mac() -> Option<HmacSha256> {
+    HmacSha256::new_from_slice(HMAC_KEY).ok()
+}
+
 /// How long a cached license is valid without phoning home (24 hours).
 const CACHE_TTL_SECS: u64 = 86_400;
 
@@ -229,7 +237,7 @@ pub fn compute_signature(resp: &LicenseResponse) -> String {
         resp.limits.max_loc,
         resp.expires_at
     );
-    let mut mac = HmacSha256::new_from_slice(HMAC_KEY).expect("HMAC accepts any key length");
+    let mut mac = new_mac().expect("HMAC key is always non-empty");
     mac.update(payload.as_bytes());
     mac.finalize()
         .into_bytes()
@@ -305,7 +313,10 @@ fn verify_signature(resp: &LicenseResponse) -> bool {
         resp.limits.max_loc,
         resp.expires_at
     );
-    let mut mac = HmacSha256::new_from_slice(HMAC_KEY).expect("HMAC accepts any key length");
+    let mut mac = match new_mac() {
+        Some(m) => m,
+        None => return false,
+    };
     mac.update(payload.as_bytes());
     mac.verify_slice(&sig_bytes).is_ok()
 }

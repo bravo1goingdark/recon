@@ -5,15 +5,20 @@
 
 use std::sync::OnceLock;
 
-static BPE: OnceLock<tiktoken_rs::CoreBPE> = OnceLock::new();
+static BPE: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
 
-fn bpe() -> &'static tiktoken_rs::CoreBPE {
-    BPE.get_or_init(|| tiktoken_rs::cl100k_base().expect("cl100k_base BPE data"))
+fn bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
+    BPE.get_or_init(|| tiktoken_rs::cl100k_base().ok()).as_ref()
 }
 
 /// Count tokens in `text` using the cl100k_base encoding.
+///
+/// Returns a heuristic estimate if the BPE model fails to load.
 pub fn count_tokens(text: &str) -> usize {
-    bpe().encode_ordinary(text).len()
+    match bpe() {
+        Some(bpe) => bpe.encode_ordinary(text).len(),
+        None => estimate_tokens(text),
+    }
 }
 
 /// Fast heuristic token estimate (~4 chars per token for code).
