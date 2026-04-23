@@ -21,7 +21,7 @@ export interface TierConfig {
 /** Must match TierLimits::FREE in router.rs */
 const FREE: TierConfig = {
   name: "Free",
-  limits: { max_repos: 1, max_files: 250, max_loc: 5_000 },
+  limits: { max_repos: 1, max_files: 250, max_loc: 10_000 },
   price_cents: 0,
   price_display: "Free",
 };

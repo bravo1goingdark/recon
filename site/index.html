@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>recon — 35x fewer tokens for AI coding agents | Hosted MCP Server</title>
-<meta name="description" content="recon is a hosted MCP server that replaces Read, Grep, and Glob with 12 symbol-aware tools. 15-30x token reduction on code exploration. 8ms symbol lookup on 320K symbols. Rust, Python, TypeScript, Go, Java, C, C++." />
+<title>recon — 35× fewer tokens for AI coding agents | Local-first MCP server</title>
+<meta name="description" content="Local-first MCP server for AI coding agents. A 24 MB Rust binary that replaces Read, Grep, and Glob with 12 symbol-aware tools — 15–30× token reduction, 8 ms queries on 320K symbols. Your code never leaves your machine." />
 <meta name="keywords" content="MCP server, code intelligence, AI coding, token reduction, Claude Code, symbol search, tree-sitter, PageRank, code exploration, developer tools" />
 <meta name="author" content="bravo1goingdark" />
 <link rel="canonical" href="https://mcprecon.pages.dev/" />
 
 <!-- Open Graph -->
 <meta property="og:type" content="website" />
-<meta property="og:title" content="recon — 35x fewer tokens for AI coding agents" />
-<meta property="og:description" content="Hosted MCP server with 12 symbol-aware tools. 8ms queries on 320K symbols. Replaces Read/Grep/Glob." />
+<meta property="og:title" content="recon — 35× fewer tokens for AI coding agents" />
+<meta property="og:description" content="Local-first MCP server. 24 MB Rust binary. 12 symbol-aware tools. 8 ms queries. Your code stays on your machine." />
 <meta property="og:url" content="https://mcprecon.pages.dev/" />
 <meta property="og:site_name" content="recon" />
 <meta property="og:image" content="https://mcprecon.pages.dev/og.png" />
@@ -21,8 +21,8 @@
 
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="recon — 35x fewer tokens for AI coding agents" />
-<meta name="twitter:description" content="Hosted MCP server. 12 tools. 8ms queries. 15-30x token reduction." />
+<meta name="twitter:title" content="recon — 35× fewer tokens for AI coding agents" />
+<meta name="twitter:description" content="Local-first MCP server. 24 MB Rust binary. 12 tools. 8 ms queries. Code never leaves your machine." />
 <meta name="twitter:image" content="https://mcprecon.pages.dev/og.png" />
 
 <!-- Favicon — light/dark via media query -->
@@ -34,9 +34,9 @@
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "recon",
-  "description": "Token-lean code intelligence MCP server for AI coding agents. 15-30x token reduction.",
+  "description": "Local-first code intelligence MCP server for AI coding agents. 24 MB Rust binary. 15–30× token reduction. Code never leaves your machine.",
   "applicationCategory": "DeveloperApplication",
-  "operatingSystem": "Linux, macOS",
+  "operatingSystem": "Linux, macOS, Windows",
   "offers": {
     "@type": "Offer",
     "price": "0",
@@ -321,7 +321,8 @@
     <li><a href="#tools">Tools</a></li>
     <li><a href="#how">How it works</a></li>
     <li><a href="#benchmarks">Benchmarks</a></li>
-    <li><a href="#install">Connect</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#faq">FAQ</a></li>
     <li><a href="./Docs.html">Docs</a></li>
     <li><a href="/pricing" style="font-weight:500">Pricing</a></li>
   </ul>
@@ -343,16 +344,16 @@
   <div class="wrap">
     <div class="grid">
       <div>
-        <div class="eyebrow"><span class="line"></span> MCP server · hosted · zero-install for agents</div>
+        <div class="eyebrow"><span class="line"></span> MCP server · local-first · signed binary</div>
         <h1 class="display">Read <em>less,</em><br/>understand <em>more.</em></h1>
         <p class="lede">
-          <b>recon</b> is a token-lean code intelligence <b>MCP server</b> for AI coding agents.
-          It replaces <i>Read</i>, <i>Grep</i>, and <i>Glob</i> with symbol-aware tools that
-          deliver a <b>15–30× token reduction</b> on typical exploration tasks — without losing
-          a single useful detail.
+          <b>recon</b> is a local-first code intelligence <b>MCP server</b> for AI coding agents.
+          A <b>24 MB Rust binary</b> that replaces <i>Read</i>, <i>Grep</i>, and <i>Glob</i>
+          with symbol-aware tools — <b>15–30× fewer tokens</b> on typical exploration,
+          and your code never leaves your machine.
         </p>
         <div class="cta">
-          <a class="btn primary" href="#install">Connect your agent <span class="arr">→</span></a>
+          <a class="btn primary" href="#install">Install recon <span class="arr">→</span></a>
           <a class="btn ghost" href="#tools">Browse the 12 tools</a>
         </div>
       </div>
@@ -658,8 +659,8 @@
 <section id="install">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>05</em> &nbsp;— &nbsp;Connect</div>
-      <h2>A hosted MCP server. No <em>install,</em> no binary.</h2>
+      <div class="no"><em>05</em> &nbsp;— &nbsp;Install</div>
+      <h2>One <em>signed</em> binary. Your code stays <em>local.</em></h2>
     </div>
 
     <div class="install-grid">
@@ -672,14 +673,18 @@
 
       <div class="step">
         <div class="n">Step 02</div>
-        <h3>Add your key to the CLI</h3>
-        <p>One command. Your code never leaves your machine — only the key is validated.</p>
-<pre><span class="c"># install recon</span>
+        <h3>Install the binary</h3>
+        <p>Signed with SHA256 + cosign. Verified end-to-end before it lands in <code>~/.local/bin</code>. Only the license key touches the network — never your code.</p>
+<pre><span class="c"># Linux · macOS (cosign-verified, 24 MB)</span>
 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
-<span class="c"># set up your repo</span>
+<span class="c"># Windows (PowerShell)</span>
+iwr https://mcprecon.pages.dev/install.ps1 | iex
+
+<span class="c"># point it at your repo</span>
 cd your-project
-<span class="h">RECON_KEY</span>=sk-recon-xxx recon init</pre>
+recon login <span class="h">sk-recon-xxx</span>
+recon init --mcp cc   <span class="c"># cc · cursor · windsurf · oc</span></pre>
       </div>
 
       <div class="step">
@@ -702,14 +707,57 @@ Read/Grep/Glob when exploring code.</pre>
   </div>
 </section>
 
+<!-- FAQ -->
+<section id="faq">
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>06</em> &nbsp;— &nbsp;Questions</div>
+      <h2>Things <em>security-minded</em> buyers ask us first.</h2>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:48px 64px">
+      <div>
+        <h3 style="font-family:var(--serif);font-size:26px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.15">Does recon see any of my code?</h3>
+        <p style="color:var(--ink-2);max-width:480px">No. Indexing, search, and every tool response runs on your machine. The only outbound call is a short HTTPS check to validate your license key — no paths, no queries, no source, no metadata.</p>
+      </div>
+
+      <div>
+        <h3 style="font-family:var(--serif);font-size:26px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.15">Can I run it offline or air-gapped?</h3>
+        <p style="color:var(--ink-2);max-width:480px">Yes, once activated. <code>recon login</code> caches a signed license locally; after that, the CLI runs with no network at all. Enterprise keys can be issued offline end-to-end.</p>
+      </div>
+
+      <div>
+        <h3 style="font-family:var(--serif);font-size:26px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.15">How do I verify the binary is the one you built?</h3>
+        <p style="color:var(--ink-2);max-width:480px">Every release ships a <code>SHA256SUMS.txt</code> signed with cosign keyless sigstore, attested by our GitHub Actions release workflow. The installer verifies digest + signature before extracting. You can re-verify by hand with <code>cosign verify-blob</code>.</p>
+      </div>
+
+      <div>
+        <h3 style="font-family:var(--serif);font-size:26px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.15">Which IDEs and agents work with recon?</h3>
+        <p style="color:var(--ink-2);max-width:480px">Any MCP-compatible client. <code>recon init</code> writes config for Claude Code, Cursor, Windsurf, and OpenCode out of the box. Anything that speaks the MCP stdio spec will work too.</p>
+      </div>
+
+      <div>
+        <h3 style="font-family:var(--serif);font-size:26px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.15">What happens when my subscription ends?</h3>
+        <p style="color:var(--ink-2);max-width:480px">Your on-disk indexes stay. The CLI declines new tool calls until you renew — nothing is uploaded, nothing is deleted. You can keep the binary; you just can't run it against a licensed tier until you re-login.</p>
+      </div>
+
+      <div>
+        <h3 style="font-family:var(--serif);font-size:26px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.15">Do you store anything server-side?</h3>
+        <p style="color:var(--ink-2);max-width:480px">Only what's needed to issue and bill a license: your GitHub email, your tier, and a hashed key prefix. No repo names, no file paths, no symbols. Our worker is open to inspection on request for enterprise accounts.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- QUOTE -->
 <section class="quote" style="border-bottom:1px solid var(--rule-soft)">
   <div class="wrap">
     <blockquote>
       “The agent should spend its tokens <em>thinking,</em> not reading. recon gives back
-      the context window — and most of the wall-clock — that Read and Grep quietly took.”
+      the context window — and most of the wall-clock — that Read and Grep quietly took.
+      And it does it without ever sending a line of your code over the wire.”
     </blockquote>
-    <div class="byline">— design note, recon-core · v0.4</div>
+    <div class="byline">— design note, recon-core · v0.1.0</div>
   </div>
 </section>
 
@@ -729,7 +777,8 @@ Read/Grep/Glob when exploring code.</pre>
         <ul>
           <li><a href="#tools">Tools</a></li>
           <li><a href="#how">How it works</a></li>
-          <li><a href="#install">Connect</a></li>
+          <li><a href="#install">Install</a></li>
+          <li><a href="/pricing">Pricing</a></li>
         </ul>
       </div>
       <div>
@@ -751,8 +800,8 @@ Read/Grep/Glob when exploring code.</pre>
       </div>
     </div>
     <div class="bottom wrap" style="padding-left:0;padding-right:0">
-      <div>© 2026 recon · crafted in Rust</div>
-      <div>p99 &lt; 36 ms · 147 tests · 25 MB binary</div>
+      <div>© 2026 recon · crafted in Rust · code stays local</div>
+      <div>p99 &lt; 36 ms · 389 tests · 24 MB signed binary</div>
     </div>
   </div>
 </footer>

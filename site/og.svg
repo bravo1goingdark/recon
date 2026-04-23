@@ -9,7 +9,7 @@
   <circle cx="1060" cy="155" r="5" fill="#b07040" opacity="0.8"/>
   <!-- Text -->
   <text x="72" y="200" font-family="Georgia, serif" font-size="96" font-style="italic" fill="#f5f3ef" letter-spacing="-2">recon<tspan fill="#b07040" font-style="normal">.</tspan></text>
-  <text x="72" y="280" font-family="system-ui, sans-serif" font-size="32" fill="#a09888" font-weight="300">Hosted MCP server for AI coding agents</text>
+  <text x="72" y="280" font-family="system-ui, sans-serif" font-size="32" fill="#a09888" font-weight="300">Local-first MCP server for AI coding agents</text>
   <text x="72" y="360" font-family="monospace" font-size="120" fill="#b07040" letter-spacing="-4" font-weight="400">35×</text>
   <text x="370" y="340" font-family="system-ui, sans-serif" font-size="28" fill="#a09888" font-weight="300">fewer tokens.</text>
   <text x="370" y="375" font-family="system-ui, sans-serif" font-size="28" fill="#706050" font-weight="300" font-style="italic">same answer.</text>
