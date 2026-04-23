@@ -96,22 +96,36 @@ dashboardRoutes.post("/keys", async (c) => {
   });
 });
 
-/** DELETE /v1/dashboard/keys/:id — revoke a key. */
+/**
+ * DELETE /v1/dashboard/keys/:id — revoke (hard-delete) a key.
+ *
+ * Historically this was a soft-delete (`UPDATE revoked_at = …`) on the
+ * theory that we'd want an audit trail. In practice the row just sat in
+ * the dashboard with a grey "revoked" label that users read as "it
+ * didn't work" and clicked again. The key_hash stops validating the
+ * instant the row's marker is set anyway, so there's no correctness
+ * benefit to keeping the row.
+ *
+ * Hard-delete now: the row vanishes from /keys, the license-validate
+ * endpoint will 401 on any cached instance, and the dashboard UX
+ * matches user expectation (click revoke → key gone).
+ *
+ * Scoped by user_id to prevent id-spoofing between accounts. If the
+ * caller's user_id does not own this key (including already-deleted
+ * ones), we return 404 without leaking existence info.
+ */
 dashboardRoutes.delete("/keys/:id", async (c) => {
   const user = c.get("user");
   const db = c.env.RECON_DB;
   const keyId = c.req.param("id");
 
   const result = await db
-    .prepare(
-      `UPDATE api_keys SET revoked_at = datetime('now')
-       WHERE id = ? AND user_id = ? AND revoked_at IS NULL`,
-    )
+    .prepare("DELETE FROM api_keys WHERE id = ? AND user_id = ?")
     .bind(keyId, user.id)
     .run();
 
   if (!result.meta.changes || result.meta.changes === 0) {
-    return c.json({ error: "Key not found or already revoked" }, 404);
+    return c.json({ error: "Key not found" }, 404);
   }
 
   return c.json({ ok: true });
