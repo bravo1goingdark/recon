@@ -335,11 +335,7 @@ fn init_server(repo: PathBuf) -> Result<(ReconServer, PathBuf)> {
 
 /// Open an existing index for read-only CLI queries (no re-index on startup).
 fn read_server(repo: PathBuf) -> Result<ReconServer> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(EnvFilter::new("warn"))
-        .init();
-
+    init_tracing("warn");
     let (server, _) = init_server(repo)?;
     Ok(server)
 }
@@ -415,6 +411,44 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
 
     tasks.shutdown().await;
     Ok(())
+}
+
+// ── Tracing init ───────────────────────────────────────────────────────────────
+
+/// Initialize the global tracing subscriber.
+///
+/// Honors two environment variables:
+/// - `RECON_LOG` / `RUST_LOG` — standard `EnvFilter` directive
+///   (defaults to `default_filter` if unset).
+/// - `RECON_LOG_FORMAT` — `json` for structured JSON-per-line output,
+///   anything else (default) for the human-friendly text format.
+///
+/// Always writes to stderr. Never writes to stdout — the MCP stdio
+/// transport would corrupt on stdout log lines.
+///
+/// Idempotent in the sense that an already-installed subscriber means
+/// subsequent calls silently no-op (they return `Err` from `try_init`).
+fn init_tracing(default_filter: &str) {
+    let env_filter = EnvFilter::try_from_env("RECON_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+
+    let json = std::env::var("RECON_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    if json {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_writer(std::io::stderr)
+            .with_env_filter(env_filter)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(env_filter)
+            .try_init();
+    }
 }
 
 // ── Shutdown signal ────────────────────────────────────────────────────────────
@@ -552,10 +586,7 @@ async fn main() -> Result<()> {
 
         // ── Indexing + IDE setup ──────────────────────────────────────────────
         Command::Init { mcp } => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .with_env_filter(EnvFilter::new("info"))
-                .init();
+            init_tracing("info");
 
             let repo = repo.canonicalize()?;
 
@@ -672,10 +703,7 @@ async fn main() -> Result<()> {
 
         // ── MCP server ────────────────────────────────────────────────────────
         Command::Serve { log, port, host } => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .with_env_filter(EnvFilter::new(&log))
-                .init();
+            init_tracing(&log);
 
             // Try to migrate a per-repo license before validating.
             let canon_repo = repo.canonicalize().unwrap_or_else(|e| {
@@ -778,10 +806,7 @@ async fn main() -> Result<()> {
 
         // ── Indexing only ─────────────────────────────────────────────────────
         Command::Index => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .with_env_filter(EnvFilter::new("info"))
-                .init();
+            init_tracing("info");
 
             validate_license_or_die()?;
 

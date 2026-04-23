@@ -646,9 +646,19 @@ async fn e2e_path_traversal_denied() {
     let result = server
         .query_tool("code_outline", r#"{"path": "../../../etc/passwd"}"#)
         .await;
+    let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(
+        err["shape"], "Error",
+        "should be structured error: {result}"
+    );
+    // The path doesn't exist → canonicalize fails → NotFound (-32002).
+    // A path that DID exist and escaped the repo would return PathTraversal
+    // (-32007). Either is a valid denial — assert the numeric code is one of
+    // the two security-relevant codes, not a success.
+    let code = err["code"].as_i64().unwrap();
     assert!(
-        result.contains("Error:"),
-        "path traversal should be denied: {result}"
+        code == -32002 || code == -32007,
+        "path traversal attempt should yield NotFound or PathTraversal, got code={code}: {result}"
     );
 }
 

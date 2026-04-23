@@ -3,8 +3,10 @@
 use crate::tools::*;
 use ahash::AHashMap;
 use arc_swap::ArcSwap;
+use compact_str::CompactString;
 use parking_lot::Mutex;
 use rayon::prelude::*;
+use recon_core::error::ReconErrorCode;
 use recon_core::lang::Language;
 use recon_core::redact;
 use recon_core::shapes::*;
@@ -27,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 /// The recon MCP server.
 #[derive(Clone)]
@@ -74,6 +76,81 @@ fn redact_response(response: String) -> String {
 /// Maximum file size for `read_to_string` calls (2 MB).
 /// Prevents OOM on accidentally large files (e.g. minified bundles, lock files).
 const MAX_READ_FILE_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Per-request deadline. Queries longer than this return `ToolOutput::Error`
+/// with `ReconErrorCode::Timeout` rather than hanging the client.
+/// Override with `RECON_REQUEST_TIMEOUT_SECS`.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+tokio::task_local! {
+    /// Per-tool-call request ID (ULID). Set by [`ReconServer::query_tool`] so
+    /// error responses and log spans carry the same correlation handle.
+    pub static REQUEST_ID: CompactString;
+}
+
+/// Return the active request ID, or `"-"` if we're called outside a scoped
+/// request (e.g. direct rmcp dispatch). Never panics.
+pub(crate) fn current_request_id() -> CompactString {
+    REQUEST_ID
+        .try_with(|id| id.clone())
+        .unwrap_or_else(|_| CompactString::new("-"))
+}
+
+/// Read the per-request timeout from `RECON_REQUEST_TIMEOUT_SECS` once per
+/// call. Bounded to `[1, 600]` seconds so a typo in env never wedges the
+/// server or disables the guard.
+fn request_timeout() -> std::time::Duration {
+    let secs = std::env::var("RECON_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
+        .clamp(1, 600);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Build a structured `ToolOutput::Error` and serialize it for the wire.
+///
+/// Uses the currently-scoped request ID (falls back to `"-"` for direct
+/// rmcp dispatch). `data` is free-form JSON the client can inspect for
+/// the failing path, size, identifier, etc.
+pub(crate) fn tool_error(
+    code: ReconErrorCode,
+    message: impl Into<String>,
+    data: Option<serde_json::Value>,
+) -> String {
+    let view = ToolOutput::Error(ToolErrorView {
+        code: code.code(),
+        kind: CompactString::new(code.kind()),
+        message: message.into(),
+        data,
+        request_id: current_request_id(),
+    });
+    serde_json::to_string(&view).unwrap_or_else(|e| {
+        // Absolute fallback — serde_json on a pure-Serialize value almost never
+        // fails, but if it does we must still produce SOME parseable response.
+        format!(
+            r#"{{"shape":"Error","code":{},"kind":"{}","message":"serialize failed: {}","request_id":"-"}}"#,
+            code.code(),
+            code.kind(),
+            e
+        )
+    })
+}
+
+/// Convenience for the common case: map a `recon_core::error::Error` through
+/// its `rpc_code` and render. The error's `Display` is used for the message.
+pub(crate) fn tool_error_from(err: &recon_core::error::Error) -> String {
+    tool_error(err.rpc_code(), err.to_string(), None)
+}
+
+/// Tool-error specifically for invalid JSON args.
+pub(crate) fn tool_error_invalid_args(err: &serde_json::Error) -> String {
+    tool_error(
+        ReconErrorCode::InvalidParams,
+        format!("invalid tool arguments: {err}"),
+        None,
+    )
+}
 
 impl ReconServer {
     /// Create a new server for the given repo root.
@@ -306,56 +383,107 @@ impl ReconServer {
     ///
     /// Returns the tool's JSON response string, or an error message.
     pub async fn query_tool(&self, tool_name: &str, args_json: &str) -> String {
+        // Generate a ULID per call and scope it into task-local state so any
+        // `tool_error*` helper invoked downstream carries the same handle.
+        // The `tracing` span attaches the same ID so a client-side request_id
+        // can be grepped back to server logs.
+        let request_id = CompactString::new(ulid::Ulid::new().to_string());
+        let tool_name_owned = tool_name.to_string();
+        let args_owned = args_json.to_string();
+        let timeout = request_timeout();
+        let span = tracing::info_span!(
+            "query_tool",
+            tool = tool_name,
+            request_id = %request_id,
+        );
+
+        REQUEST_ID
+            .scope(request_id.clone(), async move {
+                let fut = self.dispatch_tool(&tool_name_owned, &args_owned);
+                match tokio::time::timeout(timeout, fut).await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        tracing::warn!(
+                            tool = %tool_name_owned,
+                            %request_id,
+                            timeout_secs = timeout.as_secs(),
+                            "tool call exceeded deadline",
+                        );
+                        tool_error(
+                            ReconErrorCode::Timeout,
+                            format!(
+                                "tool {tool_name_owned} exceeded {}s deadline",
+                                timeout.as_secs()
+                            ),
+                            Some(serde_json::json!({
+                                "tool": tool_name_owned,
+                                "timeout_secs": timeout.as_secs(),
+                            })),
+                        )
+                    }
+                }
+            })
+            .instrument(span)
+            .await
+    }
+
+    /// Inner dispatch. Separated from [`query_tool`] so the latter can wrap
+    /// it in `task_local::scope` + `tokio::time::timeout`.
+    async fn dispatch_tool(&self, tool_name: &str, args_json: &str) -> String {
         match tool_name {
             "code_outline" => match serde_json::from_str::<OutlineParams>(args_json) {
                 Ok(p) => self.code_outline(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_skeleton" => match serde_json::from_str::<SkeletonParams>(args_json) {
                 Ok(p) => self.code_skeleton(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_read_symbol" => match serde_json::from_str::<ReadSymbolParams>(args_json) {
                 Ok(p) => self.code_read_symbol(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_find_symbol" => match serde_json::from_str::<FindSymbolParams>(args_json) {
                 Ok(p) => self.code_find_symbol(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_find_refs" => match serde_json::from_str::<FindRefsParams>(args_json) {
                 Ok(p) => self.code_find_refs(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_search" => match serde_json::from_str::<SearchParams>(args_json) {
                 Ok(p) => self.code_search(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_list" => match serde_json::from_str::<ListParams>(args_json) {
                 Ok(p) => self.code_list(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_repo_map" => match serde_json::from_str::<RepoMapParams>(args_json) {
                 Ok(p) => self.code_repo_map(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_find_strings" => match serde_json::from_str::<FindStringsParams>(args_json) {
                 Ok(p) => self.code_find_strings(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_multi_find" => match serde_json::from_str::<MultiFindParams>(args_json) {
                 Ok(p) => self.code_multi_find(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_reindex" => match serde_json::from_str::<ReindexParams>(args_json) {
                 Ok(p) => self.code_reindex(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_stats" => match serde_json::from_str::<StatsParams>(args_json) {
                 Ok(p) => self.code_stats(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
-            _ => format!("unknown tool: {tool_name}"),
+            other => tool_error(
+                ReconErrorCode::NotFound,
+                format!("unknown tool: {other}"),
+                Some(serde_json::json!({ "tool": other })),
+            ),
         }
     }
 
@@ -730,17 +858,30 @@ impl ReconServer {
         info!("shutdown: complete");
     }
 
-    fn resolve_path(&self, rel: &str) -> Result<PathBuf, String> {
+    /// Resolve a repo-relative path to its canonical absolute form.
+    ///
+    /// Returns `Err((code, message))` so callers can forward the exact
+    /// `ReconErrorCode` into their `tool_error` response.
+    fn resolve_path(&self, rel: &str) -> Result<PathBuf, (ReconErrorCode, String)> {
         if redact::is_blocked_path(std::path::Path::new(rel)) {
-            return Err(format!("access denied: sensitive file: {rel}"));
+            return Err((
+                ReconErrorCode::PermissionDenied,
+                format!("access denied: sensitive file: {rel}"),
+            ));
         }
         let path = self.repo_root.join(rel);
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| format!("path not found: {rel}: {e}"))?;
+        let canonical = path.canonicalize().map_err(|e| {
+            (
+                ReconErrorCode::NotFound,
+                format!("path not found: {rel}: {e}"),
+            )
+        })?;
         // repo_root is already canonicalized at construction time
         if !canonical.starts_with(&self.repo_root) {
-            return Err(format!("path traversal denied: {rel}"));
+            return Err((
+                ReconErrorCode::PathTraversal,
+                format!("path traversal denied: {rel}"),
+            ));
         }
         Ok(canonical)
     }
@@ -787,14 +928,18 @@ impl ReconServer {
     )]
     async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
         // Validate path doesn't escape repo root
-        if let Err(e) = self.resolve_path(&params.0.path) {
-            return format!("Error: {e}");
+        if let Err((code, msg)) = self.resolve_path(&params.0.path) {
+            return tool_error(
+                code,
+                msg,
+                Some(serde_json::json!({ "path": params.0.path })),
+            );
         }
         let symbols = {
             let rel_path = PathBuf::from(&params.0.path);
             match self.read_pool.symbols_for_path(&rel_path) {
                 Ok(s) => s,
-                Err(e) => return format!("Error: {e}"),
+                Err(e) => return tool_error_from(&e),
             }
         };
 
@@ -874,23 +1019,49 @@ impl ReconServer {
         if skeleton.is_empty() {
             let abs_path = match self.resolve_path(&params.0.path) {
                 Ok(p) => p,
-                Err(e) => return format!("Error: {e}"),
+                Err((code, msg)) => {
+                    return tool_error(
+                        code,
+                        msg,
+                        Some(serde_json::json!({ "path": params.0.path })),
+                    );
+                }
             };
             // Size cap to prevent OOM on large files (minified bundles, lock files, etc.)
             match tokio::fs::metadata(&abs_path).await {
                 Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
-                    return format!(
-                        "Error: file too large ({} MB, max {} MB)",
-                        m.len() / (1024 * 1024),
-                        MAX_READ_FILE_SIZE / (1024 * 1024)
+                    return tool_error(
+                        ReconErrorCode::FileTooLarge,
+                        format!(
+                            "file too large ({} MB, max {} MB)",
+                            m.len() / (1024 * 1024),
+                            MAX_READ_FILE_SIZE / (1024 * 1024)
+                        ),
+                        Some(serde_json::json!({
+                            "path": params.0.path,
+                            "size_bytes": m.len(),
+                            "max_bytes": MAX_READ_FILE_SIZE,
+                        })),
                     );
                 }
-                Err(e) => return format!("Error reading file metadata: {e}"),
+                Err(e) => {
+                    return tool_error(
+                        ReconErrorCode::Io,
+                        format!("reading file metadata: {e}"),
+                        Some(serde_json::json!({ "path": params.0.path })),
+                    );
+                }
                 _ => {}
             }
             let content = match tokio::fs::read_to_string(&abs_path).await {
                 Ok(c) => c,
-                Err(e) => return format!("Error reading file: {e}"),
+                Err(e) => {
+                    return tool_error(
+                        ReconErrorCode::Io,
+                        format!("reading file: {e}"),
+                        Some(serde_json::json!({ "path": params.0.path })),
+                    );
+                }
             };
             skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
         }
@@ -911,23 +1082,49 @@ impl ReconServer {
     async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
         let abs_path = match self.resolve_path(&params.0.path) {
             Ok(p) => p,
-            Err(e) => return format!("Error: {e}"),
+            Err((code, msg)) => {
+                return tool_error(
+                    code,
+                    msg,
+                    Some(serde_json::json!({ "path": params.0.path })),
+                );
+            }
         };
         // Size cap to prevent OOM on large files.
         match tokio::fs::metadata(&abs_path).await {
             Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
-                return format!(
-                    "Error: file too large ({} MB, max {} MB)",
-                    m.len() / (1024 * 1024),
-                    MAX_READ_FILE_SIZE / (1024 * 1024)
+                return tool_error(
+                    ReconErrorCode::FileTooLarge,
+                    format!(
+                        "file too large ({} MB, max {} MB)",
+                        m.len() / (1024 * 1024),
+                        MAX_READ_FILE_SIZE / (1024 * 1024)
+                    ),
+                    Some(serde_json::json!({
+                        "path": params.0.path,
+                        "size_bytes": m.len(),
+                        "max_bytes": MAX_READ_FILE_SIZE,
+                    })),
                 );
             }
-            Err(e) => return format!("Error reading file metadata: {e}"),
+            Err(e) => {
+                return tool_error(
+                    ReconErrorCode::Io,
+                    format!("reading file metadata: {e}"),
+                    Some(serde_json::json!({ "path": params.0.path })),
+                );
+            }
             _ => {}
         }
         let content = match tokio::fs::read_to_string(&abs_path).await {
             Ok(c) => c,
-            Err(e) => return format!("Error: {e}"),
+            Err(e) => {
+                return tool_error(
+                    ReconErrorCode::Io,
+                    format!("reading file: {e}"),
+                    Some(serde_json::json!({ "path": params.0.path })),
+                );
+            }
         };
 
         let rel_path = PathBuf::from(&params.0.path);
@@ -946,7 +1143,16 @@ impl ReconServer {
 
         let sym = match target {
             Some(s) => s,
-            None => return format!("Symbol not found: {}", params.0.symbol_or_line),
+            None => {
+                return tool_error(
+                    ReconErrorCode::NotFound,
+                    format!("symbol not found: {}", params.0.symbol_or_line),
+                    Some(serde_json::json!({
+                        "path": params.0.path,
+                        "symbol_or_line": params.0.symbol_or_line,
+                    })),
+                );
+            }
         };
 
         let body = content
@@ -1986,10 +2192,11 @@ mod tests {
             symbol_or_line: "nonexistent_symbol_xyz".into(),
         });
         let result = server.code_read_symbol(params).await;
-        assert!(
-            result.contains("Symbol not found"),
-            "should report symbol not found: {result}"
-        );
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], -32002, "should be NotFound: {result}");
+        assert_eq!(err["kind"], "not_found");
+        assert_eq!(err["data"]["symbol_or_line"], "nonexistent_symbol_xyz");
     }
 
     #[tokio::test]
@@ -2270,25 +2477,81 @@ mod tests {
     async fn query_tool_dispatch() {
         let (server, _tmp) = make_indexed_server().await;
 
-        // Test dispatch to code_stats
+        // Successful dispatch — should NOT be an error shape.
         let result = server.query_tool("code_stats", "{}").await;
         assert!(
-            !result.starts_with("Error:") && !result.starts_with("unknown tool"),
-            "query_tool should dispatch code_stats: {result}"
+            !result.contains(r#""shape":"Error""#),
+            "query_tool should dispatch code_stats successfully: {result}"
         );
 
-        // Test unknown tool
+        // Unknown tool — structured NotFound (-32002).
         let result = server.query_tool("unknown_tool", "{}").await;
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], -32002);
+        assert_eq!(err["kind"], "not_found");
         assert!(
-            result.contains("unknown tool"),
-            "should report unknown tool: {result}"
+            err["message"].as_str().unwrap().contains("unknown tool"),
+            "unknown-tool message: {result}"
+        );
+        assert!(
+            err["request_id"].as_str().unwrap().len() >= 20,
+            "request_id must be a real ULID, got {result}"
         );
 
-        // Test invalid args
+        // Invalid JSON args — structured InvalidParams (-32001).
         let result = server.query_tool("code_outline", "{invalid json").await;
-        assert!(
-            result.contains("invalid args"),
-            "should report invalid args: {result}"
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], -32001);
+        assert_eq!(err["kind"], "invalid_params");
+    }
+
+    #[tokio::test]
+    async fn query_tool_structured_errors_carry_request_id() {
+        let (server, _tmp) = make_indexed_server().await;
+
+        // Two back-to-back calls must produce distinct ULIDs — correlation is
+        // the whole point of the request_id field.
+        let a = server.query_tool("unknown_tool", "{}").await;
+        let b = server.query_tool("unknown_tool", "{}").await;
+        let a: serde_json::Value = serde_json::from_str(&a).unwrap();
+        let b: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_ne!(
+            a["request_id"], b["request_id"],
+            "each query_tool call must get its own ULID"
         );
+    }
+
+    #[test]
+    fn tool_error_produces_valid_structured_shape() {
+        // Directly verify the Timeout error shape — the wrapper that fires it
+        // lives inside tokio::time::timeout and is exercised in production
+        // paths; this checks the wire contract it produces.
+        let out = super::tool_error(
+            ReconErrorCode::Timeout,
+            "deadline exceeded",
+            Some(serde_json::json!({ "tool": "foo", "timeout_secs": 30 })),
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["shape"], "Error");
+        assert_eq!(v["code"], -32003);
+        assert_eq!(v["kind"], "timeout");
+        assert_eq!(v["message"], "deadline exceeded");
+        assert_eq!(v["data"]["tool"], "foo");
+        assert_eq!(v["data"]["timeout_secs"], 30);
+        assert!(v["request_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn query_tool_returns_structured_not_found_on_missing_file() {
+        let (server, _tmp) = make_indexed_server().await;
+        let result = server
+            .query_tool("code_outline", r#"{"path":"does/not/exist.rs"}"#)
+            .await;
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], -32002); // NotFound
+        assert_eq!(err["data"]["path"], "does/not/exist.rs");
     }
 }
