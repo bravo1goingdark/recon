@@ -23,8 +23,10 @@ use rmcp::model::{Implementation, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use smallvec::SmallVec;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 /// The recon MCP server.
@@ -59,6 +61,10 @@ pub struct ReconServer {
     /// Write handle — taken by `start_watcher`, None afterwards.
     #[cfg(feature = "embed")]
     vec_writer: Arc<Mutex<Option<recon_embed::VectorStore>>>,
+    /// Cooperative shutdown flag — watcher loop polls this between batches.
+    shutdown_flag: Arc<AtomicBool>,
+    /// Handle to the spawned watcher task so `shutdown()` can await its exit.
+    watcher_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 fn redact_response(response: String) -> String {
@@ -112,6 +118,8 @@ impl ReconServer {
             cached_file_count: Arc::new(AtomicU64::new(0)),
             cached_symbols: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             cached_refs: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            watcher_handle: Arc::new(Mutex::new(None)),
             #[cfg(feature = "embed")]
             embed_service: Arc::new(Mutex::new(None)),
             #[cfg(feature = "embed")]
@@ -366,6 +374,7 @@ impl ReconServer {
         let cached_file_count = self.cached_file_count.clone();
         let cached_symbols = self.cached_symbols.clone();
         let cached_refs = self.cached_refs.clone();
+        let shutdown_flag = self.shutdown_flag.clone();
         // Clone the Arc handles once; the hot path inside the loop needs no locks.
         #[cfg(feature = "embed")]
         let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.lock().clone();
@@ -375,7 +384,7 @@ impl ReconServer {
         #[cfg(feature = "embed")]
         let vec_writer: Option<recon_embed::VectorStore> = self.vec_writer.lock().take();
 
-        tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             let watcher = match Watcher::new(&repo_root) {
                 Ok(w) => w,
                 Err(e) => {
@@ -476,7 +485,19 @@ impl ReconServer {
                 }
             }
 
-            while let Some(changed_paths) = watcher.recv() {
+            loop {
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    debug!("watcher: shutdown flag set, exiting loop");
+                    break;
+                }
+                let changed_paths = match watcher.recv_timeout(Duration::from_millis(500)) {
+                    Ok(paths) => paths,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        debug!("watcher: channel disconnected, exiting loop");
+                        break;
+                    }
+                };
                 // catch_unwind: a panic in one batch must not kill the watcher
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // Phase 1: Filter to files that actually changed (lock-free via ReadPool)
@@ -664,7 +685,49 @@ impl ReconServer {
                     warn!("watcher batch panicked — recovering for next batch");
                 }
             }
+            info!("file watcher stopped");
         });
+
+        *self.watcher_handle.lock() = Some(handle);
+    }
+
+    /// Graceful shutdown: stop the watcher, flush the Tantivy writer, and run
+    /// `incremental_vacuum` on SQLite. Safe to call more than once.
+    ///
+    /// The watcher loop polls `shutdown_flag` every ~500 ms, so the worst-case
+    /// latency is one poll interval plus the current batch's processing time.
+    /// A final `PRAGMA optimize` still runs from `Store::drop`.
+    pub async fn shutdown(&self) {
+        info!("shutdown: requested");
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+
+        // Wait for the watcher task to exit. Bounded so a wedged batch cannot
+        // block shutdown forever.
+        let handle_opt = self.watcher_handle.lock().take();
+        if let Some(handle) = handle_opt {
+            match tokio::time::timeout(Duration::from_secs(10), handle).await {
+                Ok(Ok(())) => debug!("shutdown: watcher joined cleanly"),
+                Ok(Err(e)) => warn!("shutdown: watcher task error: {e}"),
+                Err(_) => warn!("shutdown: watcher did not exit within 10 s — proceeding"),
+            }
+        }
+
+        // Final Tantivy commit — ensures any uncommitted segments are flushed.
+        if let Some(ref mut writer) = *self.tantivy_writer.lock() {
+            if let Err(e) = self.tantivy.commit(writer) {
+                warn!("shutdown: tantivy commit failed: {e}");
+            } else {
+                debug!("shutdown: tantivy committed");
+            }
+        }
+
+        // Reclaim free pages. `PRAGMA optimize` runs from `Store::drop`.
+        match self.write_store.lock().incremental_vacuum() {
+            Ok(_) => debug!("shutdown: sqlite incremental_vacuum ok"),
+            Err(e) => warn!("shutdown: sqlite incremental_vacuum failed: {e}"),
+        }
+
+        info!("shutdown: complete");
     }
 
     fn resolve_path(&self, rel: &str) -> Result<PathBuf, String> {

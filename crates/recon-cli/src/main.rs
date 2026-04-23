@@ -405,8 +405,8 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
                     }
                 });
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("shutting down");
+            _ = wait_for_shutdown_signal() => {
+                info!("http server shutting down");
                 cancel.cancel();
                 break;
             }
@@ -417,10 +417,73 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
+// ── Shutdown signal ────────────────────────────────────────────────────────────
+
+/// Wait for either SIGINT (Ctrl-C) or, on Unix, SIGTERM.
+///
+/// Systemd / docker / kubernetes send SIGTERM to request graceful stop.
+/// Without this, the MCP server would exit only on Ctrl-C and get SIGKILLed
+/// in production after the kill-grace window.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("could not install SIGTERM handler: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("received SIGINT");
+            }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("received Ctrl-C");
+    }
+}
+
+// ── Panic hook ─────────────────────────────────────────────────────────────────
+
+/// Install a panic hook that writes a structured one-line record plus backtrace
+/// to stderr. Writes to stderr only — stdio-transport MCP would corrupt on a
+/// panic to stdout. Captures a backtrace when `RUST_BACKTRACE` is set.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
+        let backtrace = std::backtrace::Backtrace::capture();
+        eprintln!("\n[recon] panic at {location} in thread {thread:?}: {msg}\n{backtrace}");
+    }));
+}
+
 // ── main ───────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_panic_hook();
+
     let cli = Cli::parse();
     let repo = cli.repo;
     let raw_json = cli.json;
@@ -683,11 +746,15 @@ async fn main() -> Result<()> {
             server.start_watcher();
 
             if let Some(port) = port {
-                serve_http(server, &host, port).await
+                // serve_http already drives its own shutdown via ctrl_c + cancel.
+                let result = serve_http(server.clone(), &host, port).await;
+                server.shutdown().await;
+                result
             } else {
                 let (stdin, stdout) = rmcp::transport::io::stdio();
-                let _service = server.serve((stdin, stdout)).await?;
-                tokio::signal::ctrl_c().await?;
+                let _service = server.clone().serve((stdin, stdout)).await?;
+                wait_for_shutdown_signal().await;
+                server.shutdown().await;
                 Ok(())
             }
         }
