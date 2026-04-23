@@ -1,0 +1,54 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "worker/**"
+
+jobs:
+  deploy-worker:
+    name: Deploy Worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
+
+  deploy-site:
+    name: Deploy Pages site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      # Keep installers in sync on every site push, same as release.yml.
+      # Prevents the dashboard/worker path from drifting behind a stale
+      # site/install.ps1 or site/install.sh.
+      - name: Sync installers into site/
+        run: |
+          install -m 0755 scripts/install.sh  site/install.sh
+          install -m 0644 scripts/install.ps1 site/install.ps1
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd site && wrangler pages deploy . \
+            --project-name mcprecon \
+            --commit-message "${{ github.sha }}"
