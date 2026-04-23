@@ -105,16 +105,18 @@ authRoutes.get("/github/callback", async (c) => {
       .run();
   }
 
-  // Create session
+  // Create session and hand the token to the browser via an HttpOnly,
+  // Secure, SameSite=Lax cookie. JS cannot read it → immune to XSS token
+  // exfiltration. `__Host-` prefix enforces Secure + Path=/ + no Domain.
+  // SameSite=Lax allows the cookie on GitHub's top-level redirect back to
+  // us but blocks cross-site POSTs (CSRF protection).
   const token = await createSession(db, userId);
-
-  // Redirect to dashboard with token in URL fragment (not query param — fragments
-  // are never sent to the server, so the token stays client-side only).
   const frontendUrl = c.env.FRONTEND_URL || "https://mcprecon.pages.dev";
   return new Response(null, {
     status: 302,
     headers: {
-      Location: `${frontendUrl}/dashboard#token=${token}`,
+      Location: `${frontendUrl}/dashboard`,
+      "Set-Cookie": sessionCookie(token),
     },
   });
 });
@@ -127,12 +129,25 @@ authRoutes.get("/me", requireAuth, (c) => {
 
 /** POST /v1/auth/logout — destroy session. */
 authRoutes.post("/logout", requireAuth, async (c) => {
-  // The token comes via Authorization header (from auth.js localStorage)
+  // The token arrives via either the __Host-session cookie (browser) or a
+  // Bearer header (legacy callers). Destroy whichever we find, and always
+  // emit a clearing Set-Cookie so the browser drops the HttpOnly cookie.
   const authHeader = c.req.header("Authorization");
+  let token: string | undefined;
   if (authHeader?.startsWith("Bearer ")) {
-    const token = authHeader.slice(7).trim();
+    token = authHeader.slice(7).trim();
+  } else {
+    token = getCookie(c, "__Host-session");
+  }
+  if (token) {
     await destroySession(c.env.RECON_DB, token);
   }
 
-  return c.json({ ok: true });
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Set-Cookie": clearSessionCookie(),
+    },
+  });
 });

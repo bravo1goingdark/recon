@@ -1,7 +1,30 @@
 /*
+  # Baseline security headers applied to every asset.
+  #
+  # X-Frame-Options + CSP frame-ancestors: clickjacking defence. `DENY`
+  # forbids embedding the site in any iframe, anywhere. We don't expose
+  # anything that should be embeddable.
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
+  # Block legacy features the landing/dashboard never use. Short list
+  # keeps the header readable and avoids the noise of exhaustive `=()`.
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()
+  # HSTS 2 years + includeSubDomains + preload-eligible. Once preload is
+  # submitted, browsers refuse plain-HTTP for mcprecon.pages.dev forever.
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  # Isolate our origin from other-window references (Spectre-class +
+  # share-target abuse mitigation).
+  Cross-Origin-Opener-Policy: same-origin
+  # Content Security Policy. `'unsafe-inline'` on style-src is required
+  # because the dashboard and landing still inline small style blocks;
+  # script-src stays strict (no unsafe-inline, no unsafe-eval) — all JS
+  # lives under /js/ same-origin. form-action allows the GitHub OAuth
+  # redirect target; everything else POSTs same-origin.
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://mcprecon.pages.dev; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com
 
 /dashboard
+  Cache-Control: no-store
+
+/login
   Cache-Control: no-store

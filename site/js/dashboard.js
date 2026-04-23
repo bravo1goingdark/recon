@@ -57,6 +57,7 @@ function renderQuickstart(keys) {
   if (!el) return;
   var active = keys.filter(function (k) { return !k.revoked; });
   if (active.length > 0 && keyEl) {
+    // Show prefix with ellipsis — full key was shown once at generation time
     keyEl.textContent = active[0].key_prefix + "...";
     el.style.display = "block";
   }
@@ -135,8 +136,10 @@ async function revokeKey(id) {
 function showKeyModal(key) {
   var modal = document.getElementById("key-modal");
   var keyEl = document.getElementById("new-key-value");
+  var loginCmdEl = document.getElementById("login-cmd");
   if (modal && keyEl) {
     keyEl.textContent = key;
+    if (loginCmdEl) loginCmdEl.textContent = "recon login " + key;
     modal.style.display = "flex";
   }
 }
@@ -153,7 +156,19 @@ function copyKey() {
     var btn = document.getElementById("copy-btn");
     if (btn) {
       btn.textContent = "Copied!";
-      setTimeout(function () { btn.textContent = "Copy to clipboard"; }, 2000);
+      setTimeout(function () { btn.textContent = "Copy key"; }, 2000);
+    }
+  }
+}
+
+function copyLoginCmd() {
+  var el = document.getElementById("login-cmd");
+  if (el) {
+    navigator.clipboard.writeText(el.textContent || "");
+    var btn = document.getElementById("copy-login-btn");
+    if (btn) {
+      btn.textContent = "Copied!";
+      setTimeout(function () { btn.textContent = "Copy command"; }, 2000);
     }
   }
 }

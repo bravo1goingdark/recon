@@ -1,0 +1,9 @@
+name = "mcprecon"
+pages_build_output_dir = "."
+compatibility_date = "2025-04-01"
+
+# R2 binding for serving release binaries and latest.json via Pages Functions.
+# Bucket must be created first: wrangler r2 bucket create recon-releases
+[[r2_buckets]]
+binding = "RELEASE_BUCKET"
+bucket_name = "recon-releases"

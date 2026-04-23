@@ -551,46 +551,8 @@ allow_sensitive = <span class="h">false</span></pre>
   </aside>
 </div>
 
-<script>
-  // Active TOC + sidebar highlight on scroll
-  const ids = ['introduction','install','configuration','shapes','tiers','incremental','filter-dsl','tools','security','performance','adrs','changelog','license'];
-  const links = ids.map(id => ({
-    id,
-    toc:  document.querySelector(`aside.toc a[href="#${id}"]`),
-    side: document.querySelector(`aside.side a[href="#${id}"]`)
-  }));
-  const io = new IntersectionObserver(entries => {
-    entries.forEach(e => {
-      if (!e.isIntersecting) return;
-      links.forEach(l => { l.toc?.classList.remove('on'); l.side?.classList.remove('on'); });
-      const active = links.find(l => l.id === e.target.id);
-      active?.toc?.classList.add('on');
-      active?.side?.classList.add('on');
-    });
-  }, { rootMargin: '-96px 0px -70% 0px', threshold: 0 });
-  ids.forEach(id => { const el = document.getElementById(id); if (el) io.observe(el); });
-</script>
-
-<script>
-(function(){
-  const btn = document.getElementById('theme-toggle');
-  const icon = document.getElementById('theme-icon');
-  const html = document.documentElement;
-  function getTheme(){
-    return localStorage.getItem('theme') ||
-      (matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
-  }
-  function apply(t){
-    html.setAttribute('data-theme', t);
-    icon.textContent = t === 'dark' ? '☀' : '◑';
-    localStorage.setItem('theme', t);
-  }
-  apply(getTheme());
-  btn.addEventListener('click', function(){ apply(getTheme() === 'dark' ? 'light' : 'dark'); });
-  btn.addEventListener('mouseenter', function(){ btn.style.borderColor = 'var(--ink-2)'; btn.style.color = 'var(--ink)'; });
-  btn.addEventListener('mouseleave', function(){ btn.style.borderColor = 'var(--rule)'; btn.style.color = 'var(--ink-3)'; });
-})();
-</script>
+<script src="/js/docs-toc.js"></script>
+<script src="/js/theme.js"></script>
 
 </body>
 </html>

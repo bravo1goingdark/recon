@@ -99,10 +99,16 @@
   <!-- Quickstart (shown only if user has keys) -->
   <div class="quickstart" id="quickstart" style="display:none">
     <h3>Get started</h3>
-    <pre><strong>curl -fsSL https://mcprecon.pages.dev/install.sh | bash</strong>
+    <pre><strong># 1. Install</strong>
+curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+
+<strong># 2. Authenticate (run once, stored globally)</strong>
+recon login <span id="qs-key">sk-recon-...</span>
+
+<strong># 3. Index your project + wire up your IDE</strong>
 cd your-project
-<strong>RECON_KEY=<span id="qs-key">sk-recon-xxx</span> recon init</strong></pre>
-    <div class="note">Your code stays local. Only the key is validated.</div>
+recon init --mcp cc</pre>
+    <div class="note">Your code stays local. Only the key is validated against the server.</div>
   </div>
 
   <!-- API Keys -->
@@ -122,11 +128,18 @@ cd your-project
 <div class="modal-overlay" id="key-modal">
   <div class="modal">
     <h3>Your new API key</h3>
-    <p>Copy this key now — you won't see it again.<br>Add it to your environment: <code style="display:inline;padding:2px 6px;margin:0">export RECON_KEY=&lt;key&gt;</code></p>
+    <p>Save this key — it won't be shown again.</p>
     <code id="new-key-value"></code>
     <div class="modal-actions">
-      <button id="copy-btn" onclick="copyKey()" class="btn primary sm">Copy to clipboard</button>
-      <button onclick="closeKeyModal()" class="btn ghost sm">Done</button>
+      <button id="copy-btn" onclick="copyKey()" class="btn ghost sm">Copy key</button>
+      <button onclick="closeKeyModal()" class="btn ghost sm">Close</button>
+    </div>
+    <div style="margin-top:20px;border-top:1px solid var(--rule);padding-top:16px">
+      <p style="font-size:12px;color:var(--ink-2);margin-bottom:10px">Run this to authenticate, then index your project:</p>
+      <code id="login-cmd" style="display:block;padding:10px 14px;margin-bottom:10px;word-break:break-all"></code>
+      <pre style="font-family:var(--mono);font-size:11px;color:var(--ink-2);background:var(--paper-2);border:1px solid var(--rule);border-radius:2px;padding:10px 14px;margin-bottom:12px">cd your-project
+recon init --mcp cc</pre>
+      <button id="copy-login-btn" onclick="copyLoginCmd()" class="btn primary sm">Copy login command</button>
     </div>
   </div>
 </div>

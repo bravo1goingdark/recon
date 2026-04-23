@@ -757,33 +757,7 @@ Read/Grep/Glob when exploring code.</pre>
   </div>
 </footer>
 
-<script>
-(function(){
-  const btn = document.getElementById('theme-toggle');
-  const icon = document.getElementById('theme-icon');
-  const html = document.documentElement;
-
-  function getTheme(){
-    return localStorage.getItem('theme') ||
-      (matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
-  }
-
-  function apply(t){
-    html.setAttribute('data-theme', t);
-    icon.textContent = t === 'dark' ? '☀' : '◑';
-    localStorage.setItem('theme', t);
-  }
-
-  apply(getTheme());
-
-  btn.addEventListener('click', function(){
-    apply(getTheme() === 'dark' ? 'light' : 'dark');
-  });
-
-  btn.addEventListener('mouseenter', function(){ btn.style.borderColor = 'var(--ink-2)'; btn.style.color = 'var(--ink)'; });
-  btn.addEventListener('mouseleave', function(){ btn.style.borderColor = 'var(--rule)'; btn.style.color = 'var(--ink-3)'; });
-})();
-</script>
+<script src="/js/theme.js"></script>
 <script src="/js/auth.js"></script>
 </body>
 </html>

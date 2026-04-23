@@ -1,50 +1,30 @@
 /**
  * Shared auth state — loaded on every page.
- * Stores session token in localStorage, sends via Authorization header.
- * On OAuth callback, the token arrives in the URL fragment (#token=xxx).
+ *
+ * The session token is an HttpOnly + Secure + SameSite=Lax cookie
+ * (__Host-session) set by the Worker on OAuth callback. JS cannot read
+ * it and cannot write it — which is exactly the point: XSS that steals
+ * a DOM variable cannot steal the cookie. Every fetch uses
+ * `credentials: "include"` so the cookie rides along automatically.
  */
 
-const API = "https://recon-api.kumarashutosh34169.workers.dev/api";
-const TOKEN_KEY = "recon_session";
+const API = "/api";
 
-/** Extract token from URL fragment on OAuth callback redirect. */
-function captureTokenFromFragment() {
-  var hash = window.location.hash;
-  if (hash && hash.indexOf("token=") !== -1) {
-    var token = hash.split("token=")[1].split("&")[0];
-    if (token) {
-      localStorage.setItem(TOKEN_KEY, token);
-      // Clean the URL fragment so the token isn't visible/bookmarkable
-      history.replaceState(null, "", window.location.pathname);
-    }
-  }
-}
-
-/** Get stored session token. */
-function getToken() {
-  return localStorage.getItem(TOKEN_KEY);
-}
-
-/** Make an authenticated fetch to the API. */
+/** Make a same-origin authenticated fetch to the API. */
 function authFetch(path, opts) {
   opts = opts || {};
   opts.headers = opts.headers || {};
-  var token = getToken();
-  if (token) {
-    opts.headers["Authorization"] = "Bearer " + token;
-  }
+  // Browser sends __Host-session automatically; we just need to ensure
+  // credentials travel cross-subpath (same-origin Pages Function calls).
+  opts.credentials = "include";
   return fetch(API + path, opts);
 }
 
 /** Check auth state — returns user object or null. */
 async function checkAuth() {
-  var token = getToken();
-  if (!token) return null;
   try {
     var resp = await authFetch("/v1/auth/me");
     if (resp.ok) return await resp.json();
-    // Token invalid/expired — clear it
-    localStorage.removeItem(TOKEN_KEY);
   } catch {
     // Network error
   }
@@ -70,14 +50,9 @@ async function updateNav() {
   }
 }
 
-/** Logout — clear token and redirect. */
+/** Logout — tell the server to destroy the session; it clears the cookie. */
 async function logout() {
-  var token = getToken();
-  if (token) {
-    // Tell server to destroy the session
-    await authFetch("/v1/auth/logout", { method: "POST" }).catch(function () {});
-  }
-  localStorage.removeItem(TOKEN_KEY);
+  await authFetch("/v1/auth/logout", { method: "POST" }).catch(function () {});
   window.location.href = "/";
 }
 
@@ -87,6 +62,11 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
-// Run on every page load
-captureTokenFromFragment();
+// Clean up any legacy localStorage token left behind by older builds.
+// Safe to run unconditionally; value was never load-bearing for the auth
+// decision after this migration (the Worker ignores Bearer if the cookie
+// is present).
+try { localStorage.removeItem("recon_session"); } catch (e) { /* ignore */ }
+
+// Run on every page load.
 document.addEventListener("DOMContentLoaded", updateNav);
