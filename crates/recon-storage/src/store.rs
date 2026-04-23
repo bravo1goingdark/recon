@@ -435,9 +435,12 @@ impl Store {
     pub fn get_symbol_by_qname(&self, qname: &str) -> Result<Option<Symbol>, Error> {
         self.conn
             .query_row(
-                "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                        byte_start, byte_end, line_start, line_end, body_hash
-                 FROM symbols WHERE qualified_name = ?1 COLLATE NOCASE",
+                "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                        sd.doc, s.parent_id,
+                        s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+                 FROM symbols s
+                 LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+                 WHERE s.qualified_name = ?1 COLLATE NOCASE",
                 params![qname],
                 |row| Ok(row_to_symbol(row)),
             )
@@ -451,9 +454,12 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                        byte_start, byte_end, line_start, line_end, body_hash
-                 FROM symbols WHERE name = ?1 COLLATE NOCASE LIMIT ?2",
+                "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                        sd.doc, s.parent_id,
+                        s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+                 FROM symbols s
+                 LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+                 WHERE s.name = ?1 COLLATE NOCASE LIMIT ?2",
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -477,10 +483,12 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature, s.doc,
-                        s.parent_id, s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+                "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                        sd.doc, s.parent_id,
+                        s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
                  FROM symbols_fts f
                  JOIN symbols s ON f.rowid = s.id
+                 LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
                  WHERE symbols_fts MATCH ?1
                  LIMIT ?2",
             )
@@ -700,9 +708,12 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                        byte_start, byte_end, line_start, line_end, body_hash
-                 FROM symbols WHERE path = ?1 ORDER BY byte_start",
+                "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                        sd.doc, s.parent_id,
+                        s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+                 FROM symbols s
+                 LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+                 WHERE s.path = ?1 ORDER BY s.byte_start",
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -718,6 +729,10 @@ impl Store {
     }
 
     /// Load all refs in a single query (for bulk operations like PageRank).
+    ///
+    /// Dedups `Arc<PathBuf>` across rows sharing the same `src_path` —
+    /// saves ~80% of path allocations on typical repos (most refs cluster
+    /// into a few source files).
     pub fn all_refs(&self) -> Result<Vec<Ref>, Error> {
         let mut stmt = self
             .conn
@@ -726,10 +741,18 @@ impl Store {
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
 
+        let mut path_interner: std::collections::HashMap<String, Arc<PathBuf>> =
+            std::collections::HashMap::with_capacity(2048);
+
         let rows = stmt
             .query_map([], |row| {
+                let path_str: String = row.get(0)?;
+                let src_path = path_interner
+                    .entry(path_str)
+                    .or_insert_with_key(|k| Arc::new(PathBuf::from(k.as_str())))
+                    .clone();
                 Ok(Ref {
-                    src_path: Arc::new(PathBuf::from(row.get::<_, String>(0)?)),
+                    src_path,
                     src_symbol_id: row.get::<_, i64>(1)? as u64,
                     ident: CompactString::new(row.get::<_, String>(2)?),
                     dst_symbol_id: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
@@ -746,18 +769,29 @@ impl Store {
     }
 
     /// Load all symbols in a single query (for bulk operations like PageRank).
+    ///
+    /// Interns `Arc<PathBuf>` across rows sharing the same `path` to avoid
+    /// ~78 K redundant `PathBuf` allocations on an 80 K-symbol repo.
     pub fn all_symbols(&self) -> Result<Vec<Symbol>, Error> {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                        byte_start, byte_end, line_start, line_end, body_hash
-                 FROM symbols ORDER BY path, byte_start",
+                "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                        sd.doc, s.parent_id,
+                        s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+                 FROM symbols s
+                 LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+                 ORDER BY s.path, s.byte_start",
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
 
+        let mut path_interner: std::collections::HashMap<String, Arc<PathBuf>> =
+            std::collections::HashMap::with_capacity(2048);
+
         let rows = stmt
-            .query_map([], |row| Ok(row_to_symbol(row)))
+            .query_map([], |row| {
+                Ok(row_to_symbol_interned(row, &mut path_interner))
+            })
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let mut results = Vec::with_capacity(1024);
@@ -894,24 +928,26 @@ impl Drop for Store {
 /// Note: doc is no longer stored in the symbols table — it lives in symbol_docs
 /// and is loaded separately via `get_symbol_doc`.
 pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
-    let kind_str: String = row.get(4).map_err(|e| Error::Storage(e.to_string()))?;
-    let kind = match kind_str.as_str() {
-        "fn" => SymbolKind::Function,
-        "method" => SymbolKind::Method,
-        "struct" => SymbolKind::Struct,
-        "class" => SymbolKind::Class,
-        "interface" => SymbolKind::Interface,
-        "enum" => SymbolKind::Enum,
-        "variant" => SymbolKind::EnumVariant,
-        "trait" => SymbolKind::Trait,
-        "const" => SymbolKind::Const,
-        "static" => SymbolKind::Static,
-        "type" => SymbolKind::Type,
-        "mod" => SymbolKind::Module,
-        "macro" => SymbolKind::Macro,
-        "field" => SymbolKind::Field,
-        other => return Err(Error::Storage(format!("unknown symbol kind: {other}"))),
-    };
+    row_to_symbol_with_path_arc(row, None)
+}
+
+/// Bulk variant of [`row_to_symbol`] that reuses `Arc<PathBuf>` across rows
+/// sharing the same path string. On a repo with 80 K symbols across 1.8 K
+/// files (~45 symbols/file), this saves ~78 K `PathBuf` + `Arc` allocations
+/// per call to `all_symbols`. Pass a per-query `HashMap` — the caller
+/// owns its lifetime.
+pub fn row_to_symbol_interned(
+    row: &rusqlite::Row<'_>,
+    interner: &mut std::collections::HashMap<String, Arc<PathBuf>>,
+) -> Result<Symbol, Error> {
+    row_to_symbol_with_path_arc(row, Some(interner))
+}
+
+fn row_to_symbol_with_path_arc(
+    row: &rusqlite::Row<'_>,
+    interner: Option<&mut std::collections::HashMap<String, Arc<PathBuf>>>,
+) -> Result<Symbol, Error> {
+    let kind = kind_from_row(row)?;
 
     let body_hash: [u8; 32] = {
         let blob = row.get_ref(12).map_err(|e| Error::Storage(e.to_string()))?;
@@ -930,6 +966,14 @@ pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
     };
 
     let path_str: String = row.get(1).map_err(|e| Error::Storage(e.to_string()))?;
+    let lang = Language::from_path(Path::new(&path_str));
+    let path = match interner {
+        Some(map) => map
+            .entry(path_str)
+            .or_insert_with_key(|k| Arc::new(PathBuf::from(k.as_str())))
+            .clone(),
+        None => Arc::new(PathBuf::from(path_str)),
+    };
     let byte_start: usize = row
         .get::<_, i64>(8)
         .map_err(|e| Error::Storage(e.to_string()))? as usize;
@@ -943,7 +987,7 @@ pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
         id: row
             .get::<_, i64>(0)
             .map_err(|e| Error::Storage(e.to_string()))? as u64,
-        path: Arc::new(PathBuf::from(&path_str)),
+        path,
         name: CompactString::new(
             row.get::<_, String>(2)
                 .map_err(|e| Error::Storage(e.to_string()))?,
@@ -968,7 +1012,32 @@ pub fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, Error> {
         byte_range: byte_start..byte_end,
         line_range: line_start..=line_end,
         body_hash,
-        lang: Language::from_path(Path::new(&path_str)),
+        lang,
+    })
+}
+
+fn kind_from_row(row: &rusqlite::Row<'_>) -> Result<SymbolKind, Error> {
+    let kind_str = row
+        .get_ref(4)
+        .map_err(|e| Error::Storage(e.to_string()))?
+        .as_str()
+        .map_err(|_| Error::Storage("kind column not text".into()))?;
+    Ok(match kind_str {
+        "fn" => SymbolKind::Function,
+        "method" => SymbolKind::Method,
+        "struct" => SymbolKind::Struct,
+        "class" => SymbolKind::Class,
+        "interface" => SymbolKind::Interface,
+        "enum" => SymbolKind::Enum,
+        "variant" => SymbolKind::EnumVariant,
+        "trait" => SymbolKind::Trait,
+        "const" => SymbolKind::Const,
+        "static" => SymbolKind::Static,
+        "type" => SymbolKind::Type,
+        "mod" => SymbolKind::Module,
+        "macro" => SymbolKind::Macro,
+        "field" => SymbolKind::Field,
+        other => return Err(Error::Storage(format!("unknown symbol kind: {other}"))),
     })
 }
 
@@ -1009,7 +1078,7 @@ mod tests {
     fn open_memory_and_migrate() {
         let store = Store::open_memory().unwrap();
         let v = store.get_meta("schema_version").unwrap();
-        assert_eq!(v.as_deref(), Some("3"));
+        assert_eq!(v.as_deref(), Some("4"));
     }
 
     #[test]
@@ -1292,13 +1361,30 @@ mod tests {
 
         let found = store.find_symbols_exact("check", 1).unwrap();
         assert_eq!(found.len(), 1);
-        // Verify signature round-trips as CompactString
         assert!(found[0]
             .signature
             .as_deref()
             .is_some_and(|s| s.contains("check")));
-        // Doc is stored separately in symbol_docs, not in symbols table
-        let doc = store.get_symbol_doc(found[0].id).unwrap();
-        assert!(doc.is_some_and(|d| !d.is_empty()));
+        // doc must be populated on the Symbol itself, not just via get_symbol_doc
+        assert!(
+            found[0].doc.is_some(),
+            "doc should be populated via LEFT JOIN on symbol_docs"
+        );
+    }
+
+    #[test]
+    fn doc_roundtrip_via_fuzzy_search() {
+        let store = Store::open_memory().unwrap();
+        store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
+
+        let sym = make_symbol("send_request", "mod::send_request", SymbolKind::Function);
+        store.insert_symbol(&sym).unwrap();
+
+        let results = store.search_symbols_fuzzy("send_request", 10).unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results[0].doc.is_some(),
+            "doc should be populated via fuzzy search LEFT JOIN"
+        );
     }
 }

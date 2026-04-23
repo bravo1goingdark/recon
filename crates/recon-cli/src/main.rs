@@ -435,19 +435,22 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let limits = license.tier.limits();
             eprintln!(
-                "{} tier: {} repos, {} files, {}K LOC",
+                "✓ Authenticated — {} tier ({} repos, {} files, {}K LOC)",
                 license.tier.name(),
                 limits.max_repos,
                 limits.max_files,
                 limits.max_loc / 1_000,
             );
             if !license.message.is_empty() {
-                eprintln!("{}", license.message);
+                eprintln!("  {}", license.message);
             }
-            eprintln!(
-                "License cached at {}",
-                config_dir.join("license.json").display()
-            );
+            eprintln!();
+            eprintln!("Next steps:");
+            eprintln!("  cd your-project");
+            eprintln!("  recon init --mcp cc      # Claude Code");
+            eprintln!("  recon init --mcp cursor  # Cursor");
+            eprintln!("  recon init --mcp windsurf  # Windsurf");
+            eprintln!("  recon init --mcp oc      # OpenCode");
             Ok(())
         }
 

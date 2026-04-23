@@ -206,8 +206,16 @@ impl ReconServer {
     #[cfg(feature = "embed")]
     pub async fn init_embed(&self) -> Result<(), recon_core::error::Error> {
         let vec_dir = self.repo_root.join(".recon").join("vectors");
-        let embedder = recon_embed::Embedder::new()
-            .map_err(|e| recon_core::error::Error::Search(format!("embed init: {e}")))?;
+
+        let embedder = if let Ok(dir) = std::env::var("RECON_EMBED_DIR") {
+            let model_dir = std::path::Path::new(&dir);
+            info!(dir = %dir, "using local embedding model");
+            recon_embed::Embedder::from_local_model(model_dir)
+                .map_err(|e| recon_core::error::Error::Search(format!("local embed init: {e}")))?
+        } else {
+            recon_embed::Embedder::new()
+                .map_err(|e| recon_core::error::Error::Search(format!("embed init: {e}")))?
+        };
         let svc =
             Arc::new(recon_embed::EmbedService::spawn(embedder).map_err(|e| {
                 recon_core::error::Error::Search(format!("embed thread spawn: {e}"))

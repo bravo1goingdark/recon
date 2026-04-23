@@ -11,16 +11,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::store::row_to_symbol;
+use crate::store::{row_to_symbol, row_to_symbol_interned};
 
 /// List all symbols for a path, ordered by byte offset.
 pub fn symbols_for_path(conn: &Connection, path: &Path) -> Result<Vec<Symbol>, Error> {
     let path_str = path.to_str().unwrap_or("");
     let mut stmt = conn
         .prepare_cached(
-            "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                    byte_start, byte_end, line_start, line_end, body_hash
-             FROM symbols WHERE path = ?1 ORDER BY byte_start",
+            "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                    sd.doc, s.parent_id,
+                    s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+             FROM symbols s
+             LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+             WHERE s.path = ?1 ORDER BY s.byte_start",
         )
         .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -43,9 +46,12 @@ pub fn find_symbols_exact(
 ) -> Result<Vec<Symbol>, Error> {
     let mut stmt = conn
         .prepare_cached(
-            "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                    byte_start, byte_end, line_start, line_end, body_hash
-             FROM symbols WHERE name = ?1 COLLATE NOCASE LIMIT ?2",
+            "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                    sd.doc, s.parent_id,
+                    s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+             FROM symbols s
+             LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+             WHERE s.name = ?1 COLLATE NOCASE LIMIT ?2",
         )
         .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -72,10 +78,12 @@ pub fn search_symbols_fuzzy(
 
     let mut stmt = conn
         .prepare_cached(
-            "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature, s.doc,
-                    s.parent_id, s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+            "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                    sd.doc, s.parent_id,
+                    s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
              FROM symbols_fts f
              JOIN symbols s ON f.rowid = s.id
+             LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
              WHERE symbols_fts MATCH ?1
              LIMIT ?2",
         )
@@ -95,9 +103,12 @@ pub fn search_symbols_fuzzy(
 /// Look up a symbol by qualified name.
 pub fn get_symbol_by_qname(conn: &Connection, qname: &str) -> Result<Option<Symbol>, Error> {
     conn.query_row(
-        "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                byte_start, byte_end, line_start, line_end, body_hash
-         FROM symbols WHERE qualified_name = ?1 COLLATE NOCASE",
+        "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                sd.doc, s.parent_id,
+                s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+         FROM symbols s
+         LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+         WHERE s.qualified_name = ?1 COLLATE NOCASE",
         params![qname],
         |row| Ok(row_to_symbol(row)),
     )
@@ -109,9 +120,12 @@ pub fn get_symbol_by_qname(conn: &Connection, qname: &str) -> Result<Option<Symb
 /// Look up a symbol by its numeric ID.
 pub fn symbol_by_id(conn: &Connection, id: u64) -> Result<Option<Symbol>, Error> {
     conn.query_row(
-        "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                byte_start, byte_end, line_start, line_end, body_hash
-         FROM symbols WHERE id = ?1",
+        "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                sd.doc, s.parent_id,
+                s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+         FROM symbols s
+         LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+         WHERE s.id = ?1",
         params![id as i64],
         |row| Ok(row_to_symbol(row)),
     )
@@ -274,16 +288,24 @@ pub fn file_symbol_summaries(
     Ok(results)
 }
 
-/// Load all refs.
+/// Load all refs. Interns `Arc<PathBuf>` across rows sharing the same `src_path`.
 pub fn all_refs(conn: &Connection) -> Result<Vec<Ref>, Error> {
     let mut stmt = conn
         .prepare_cached("SELECT src_path, src_symbol_id, ident, dst_symbol_id, weight FROM refs")
         .map_err(|e| Error::Storage(e.to_string()))?;
 
+    let mut path_interner: std::collections::HashMap<String, Arc<PathBuf>> =
+        std::collections::HashMap::with_capacity(2048);
+
     let rows = stmt
         .query_map([], |row| {
+            let path_str: String = row.get(0)?;
+            let src_path = path_interner
+                .entry(path_str)
+                .or_insert_with_key(|k| Arc::new(PathBuf::from(k.as_str())))
+                .clone();
             Ok(Ref {
-                src_path: Arc::new(PathBuf::from(row.get::<_, String>(0)?)),
+                src_path,
                 src_symbol_id: row.get::<_, i64>(1)? as u64,
                 ident: CompactString::new(row.get::<_, String>(2)?),
                 dst_symbol_id: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
@@ -299,18 +321,26 @@ pub fn all_refs(conn: &Connection) -> Result<Vec<Ref>, Error> {
     Ok(results)
 }
 
-/// Load all symbols.
+/// Load all symbols. Interns `Arc<PathBuf>` across rows sharing the same path.
 pub fn all_symbols(conn: &Connection) -> Result<Vec<Symbol>, Error> {
     let mut stmt = conn
         .prepare_cached(
-            "SELECT id, path, name, qualified_name, kind, signature, doc, parent_id,
-                    byte_start, byte_end, line_start, line_end, body_hash
-             FROM symbols ORDER BY path, byte_start",
+            "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
+                    sd.doc, s.parent_id,
+                    s.byte_start, s.byte_end, s.line_start, s.line_end, s.body_hash
+             FROM symbols s
+             LEFT JOIN symbol_docs sd ON sd.symbol_id = s.id
+             ORDER BY s.path, s.byte_start",
         )
         .map_err(|e| Error::Storage(e.to_string()))?;
 
+    let mut path_interner: std::collections::HashMap<String, Arc<PathBuf>> =
+        std::collections::HashMap::with_capacity(2048);
+
     let rows = stmt
-        .query_map([], |row| Ok(row_to_symbol(row)))
+        .query_map([], |row| {
+            Ok(row_to_symbol_interned(row, &mut path_interner))
+        })
         .map_err(|e| Error::Storage(e.to_string()))?;
 
     let mut results = Vec::with_capacity(1024);

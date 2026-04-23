@@ -45,6 +45,10 @@ struct Fields {
     lang: Field,
 }
 
+/// Schema version — bump this whenever `build_schema` changes field options.
+/// On mismatch the old index directory is wiped and rebuilt from scratch.
+const TANTIVY_SCHEMA_VERSION: u32 = 2;
+
 /// Tantivy-backed symbol search engine.
 pub struct TantivyBackend {
     index: Index,
@@ -56,11 +60,40 @@ pub struct TantivyBackend {
     schema: Schema,
 }
 
+fn schema_version_path(index_dir: &Path) -> std::path::PathBuf {
+    index_dir.join("SCHEMA_VERSION")
+}
+
+fn read_schema_version(index_dir: &Path) -> u32 {
+    std::fs::read_to_string(schema_version_path(index_dir))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn write_schema_version(index_dir: &Path) -> Result<(), Error> {
+    std::fs::write(
+        schema_version_path(index_dir),
+        TANTIVY_SCHEMA_VERSION.to_string(),
+    )
+    .map_err(|e| Error::Search(format!("write schema version: {e}")))
+}
+
 impl TantivyBackend {
     /// Create or open a Tantivy index at the given directory.
+    ///
+    /// If the on-disk schema version does not match `TANTIVY_SCHEMA_VERSION`,
+    /// the directory is wiped and the index is rebuilt from scratch (the caller
+    /// must re-index all symbols after receiving this fresh backend).
     pub fn open(index_dir: &Path) -> Result<Self, Error> {
         std::fs::create_dir_all(index_dir)
             .map_err(|e| Error::Search(format!("create index dir: {e}")))?;
+
+        if read_schema_version(index_dir) != TANTIVY_SCHEMA_VERSION {
+            let _ = std::fs::remove_dir_all(index_dir);
+            std::fs::create_dir_all(index_dir)
+                .map_err(|e| Error::Search(format!("recreate index dir after schema wipe: {e}")))?;
+        }
 
         let (schema, fields) = Self::build_schema();
 
@@ -88,6 +121,8 @@ impl TantivyBackend {
                 fields.doc,
             ],
         );
+
+        write_schema_version(index_dir)?;
 
         Ok(Self {
             index,
@@ -133,7 +168,7 @@ impl TantivyBackend {
     fn build_schema() -> (Schema, Fields) {
         let mut builder = Schema::builder();
 
-        let symbol_id = builder.add_u64_field("symbol_id", STORED | INDEXED);
+        let symbol_id = builder.add_u64_field("symbol_id", STORED);
         let path = builder.add_text_field("path", STRING | STORED);
         let name = builder.add_text_field(
             "name",
@@ -141,7 +176,7 @@ impl TantivyBackend {
                 .set_indexing_options(
                     TextFieldIndexing::default()
                         .set_tokenizer("code")
-                        .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                        .set_index_option(IndexRecordOption::WithFreqs),
                 )
                 .set_stored(),
         );
@@ -151,7 +186,7 @@ impl TantivyBackend {
                 .set_indexing_options(
                     TextFieldIndexing::default()
                         .set_tokenizer("code")
-                        .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                        .set_index_option(IndexRecordOption::WithFreqs),
                 )
                 .set_stored(),
         );

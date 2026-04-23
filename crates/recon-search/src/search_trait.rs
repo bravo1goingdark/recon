@@ -3,6 +3,7 @@
 //! Implementations: [`GrepBackend`](crate::text::GrepBackend) (ripgrep crates),
 //! [`FffBackend`](crate::fff_backend::FffBackend) (fff-grep).
 
+use compact_str::CompactString;
 use recon_core::error::Error;
 use std::path::PathBuf;
 
@@ -28,8 +29,9 @@ pub struct TextHit {
     pub line: u32,
     /// 1-based column, if available.
     pub col: Option<u32>,
-    /// The matched line text.
-    pub line_text: String,
+    /// The matched line text. `CompactString` inlines short lines on the
+    /// stack (≤24 bytes on 64-bit) and serializes identically to `String`.
+    pub line_text: CompactString,
 }
 
 /// Backend-agnostic text search interface.

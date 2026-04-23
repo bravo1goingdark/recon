@@ -3,6 +3,7 @@
 use crate::search_trait::{TextHit, TextQuery, TextSearcher};
 use crate::utils::regex_escape;
 use aho_corasick::AhoCorasick;
+use compact_str::CompactString;
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
@@ -59,10 +60,9 @@ fn resolve_line(line_index: &[usize], data_len: usize, offset: usize) -> (u32, u
 
 /// Extract line text from byte range, decoded lossily.
 #[inline]
-fn extract_line_text(data: &[u8], start: usize, end: usize) -> String {
-    String::from_utf8_lossy(&data[start..end])
-        .trim_end()
-        .to_string()
+fn extract_line_text(data: &[u8], start: usize, end: usize) -> CompactString {
+    let trimmed = String::from_utf8_lossy(&data[start..end]);
+    CompactString::new(trimmed.trim_end())
 }
 
 impl TextSearcher for GrepBackend {
@@ -197,7 +197,7 @@ pub fn search_files(
                     path: (*shared_path).clone(),
                     line: line_num as u32,
                     col,
-                    line_text: line_text.trim_end().to_string(),
+                    line_text: CompactString::new(line_text.trim_end()),
                 });
                 Ok(true)
             }),
