@@ -167,6 +167,15 @@ impl ReconServer {
         store: Store,
         tantivy: TantivyBackend,
     ) -> Result<Self, recon_core::error::Error> {
+        // Canonicalize once at construction so `resolve_path`'s
+        // `canonical.starts_with(&self.repo_root)` check works on platforms
+        // where the input path differs from its canonical form (notably
+        // macOS `/var` → `/private/var`, symlinked parent directories).
+        // Fall back to the raw path if the root doesn't exist yet —
+        // construction-time failure would regress behavior for callers
+        // that create the root lazily.
+        let repo_root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
+
         let writer = tantivy.writer(50_000_000).ok();
         if writer.is_none() {
             warn!("tantivy writer creation failed at startup");

@@ -24,8 +24,13 @@ no-default-features = false
 # we won't get a fix for the next issue.
 yanked = "deny"
 ignore = [
-  # Empty today. Any advisory temporarily ignored goes here with a
-  # comment linking to the upstream issue and a deadline.
+  # paste 1.0.15 — unmaintained (author archived the repo). Pulled in
+  # transitively by tokenizers/rav1e via fastembed (optional `embed`
+  # feature) and by image. No drop-in replacement available in our
+  # dependency graph; pastey is a fork but tokenizers hasn't switched.
+  # Revisit when tokenizers or fastembed adopt pastey/with_builtin_macros.
+  # https://rustsec.org/advisories/RUSTSEC-2024-0436
+  "RUSTSEC-2024-0436",
 ]
 
 [licenses]

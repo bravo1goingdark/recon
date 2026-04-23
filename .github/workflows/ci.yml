@@ -78,7 +78,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
-      - run: cargo audit --deny warnings
+      # RUSTSEC-2024-0436: paste 1.0.15 unmaintained — tracked in deny.toml
+      # with the same rationale; no drop-in replacement in our dep graph yet.
+      - run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
 
   deny:
     name: cargo-deny (licenses, bans, sources)

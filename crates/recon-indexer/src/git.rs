@@ -4,8 +4,6 @@
 //! for ColdStart optimization and notify overflow fallback.
 
 use recon_core::error::Error;
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// Paths changed in the working tree.
@@ -21,9 +19,23 @@ pub fn open_repo(repo_root: &Path) -> Result<gix::Repository, Error> {
     gix::open(repo_root).map_err(|e| Error::Storage(format!("gix open: {e}")))
 }
 
-/// Convert a `&BStr` path to a `PathBuf` without an intermediate String allocation.
+/// Convert a `&BStr` path to a `PathBuf`.
+///
+/// On Unix, the bytes are the native `OsStr` encoding — zero-copy conversion.
+/// On Windows, gix paths are UTF-8 by convention (git itself stores paths as
+/// bytes; Windows ports decode as UTF-8). Lossy conversion is safe because
+/// any non-UTF-8 byte would already be unrepresentable as a Windows path.
 fn bstr_to_path(b: &gix::bstr::BStr) -> PathBuf {
-    PathBuf::from(OsStr::from_bytes(b.as_ref()))
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(OsStr::from_bytes(b.as_ref()))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(b.as_ref()).into_owned())
+    }
 }
 
 /// Get the HEAD commit SHA for a repo root.
