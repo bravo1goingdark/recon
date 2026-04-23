@@ -18,10 +18,13 @@
   Cross-Origin-Opener-Policy: same-origin
   # Content Security Policy. `'unsafe-inline'` on style-src is required
   # because the dashboard and landing still inline small style blocks;
-  # script-src stays strict (no unsafe-inline, no unsafe-eval) — all JS
-  # lives under /js/ same-origin. form-action allows the GitHub OAuth
-  # redirect target; everything else POSTs same-origin.
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://mcprecon.pages.dev; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com
+  # script-src stays strict (no unsafe-inline, no unsafe-eval) — all
+  # first-party JS lives under /js/ same-origin. Razorpay's checkout
+  # SDK and iframe are explicitly allowed under their own domains so
+  # pricing.js can load the widget without opening the door to
+  # arbitrary third-party scripts. form-action allows the GitHub OAuth
+  # top-level redirect target; everything else POSTs same-origin.
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://checkout.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://mcprecon.pages.dev https://api.razorpay.com https://lumberjack.razorpay.com; frame-src https://api.razorpay.com https://checkout.razorpay.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com https://api.razorpay.com
 
 /dashboard
   Cache-Control: no-store

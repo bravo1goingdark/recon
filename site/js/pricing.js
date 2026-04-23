@@ -75,4 +75,21 @@ async function upgradeTier(tierName) {
   }
 }
 
-document.addEventListener("DOMContentLoaded", initPricing);
+/**
+ * Bind upgrade buttons. Inline `onclick=` would trip CSP under the
+ * site's strict script-src — one delegated listener on the document
+ * dispatches to upgradeTier() based on the button's data attribute.
+ */
+function wireUpgradeButtons() {
+  document.querySelectorAll("[data-upgrade-tier]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var tier = btn.getAttribute("data-upgrade-tier");
+      if (tier) upgradeTier(tier);
+    });
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  wireUpgradeButtons();
+  initPricing();
+});

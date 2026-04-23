@@ -72,7 +72,7 @@
     <li><a href="/pricing">Pricing</a></li>
   </ul>
   <div class="right">
-    <a href="#" onclick="logout()" style="font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:.02em">sign out</a>
+    <a href="#" id="logout-link" style="font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:.02em">sign out</a>
     <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme"><span id="theme-icon">◑</span></button>
   </div>
 </nav>
@@ -115,7 +115,7 @@ recon init --mcp cc</pre>
   <div class="section-label">API Keys</div>
   <div id="keys"><p class="empty">loading...</p></div>
   <div class="actions">
-    <button onclick="generateKey()" class="btn primary sm">Generate new key →</button>
+    <button id="generate-key-btn" class="btn primary sm">Generate new key →</button>
   </div>
 
   <!-- Billing -->
@@ -131,15 +131,15 @@ recon init --mcp cc</pre>
     <p>Save this key — it won't be shown again.</p>
     <code id="new-key-value"></code>
     <div class="modal-actions">
-      <button id="copy-btn" onclick="copyKey()" class="btn ghost sm">Copy key</button>
-      <button onclick="closeKeyModal()" class="btn ghost sm">Close</button>
+      <button id="copy-btn" class="btn ghost sm">Copy key</button>
+      <button id="close-key-modal-btn" class="btn ghost sm">Close</button>
     </div>
     <div style="margin-top:20px;border-top:1px solid var(--rule);padding-top:16px">
       <p style="font-size:12px;color:var(--ink-2);margin-bottom:10px">Run this to authenticate, then index your project:</p>
       <code id="login-cmd" style="display:block;padding:10px 14px;margin-bottom:10px;word-break:break-all"></code>
       <pre style="font-family:var(--mono);font-size:11px;color:var(--ink-2);background:var(--paper-2);border:1px solid var(--rule);border-radius:2px;padding:10px 14px;margin-bottom:12px">cd your-project
 recon init --mcp cc</pre>
-      <button id="copy-login-btn" onclick="copyLoginCmd()" class="btn primary sm">Copy login command</button>
+      <button id="copy-login-btn" class="btn primary sm">Copy login command</button>
     </div>
   </div>
 </div>
