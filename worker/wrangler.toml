@@ -13,6 +13,45 @@ database_name = "recon-production"
 database_id = "ac8c7180-57b5-4121-9941-e28a8a745f54"
 migrations_dir = "migrations"
 
+# ── Rate-limit bindings ────────────────────────────────────────────────────────
+# Each one is a named bucket; limits are per `key` passed to .limit({key}).
+# Keyed by user-id for authenticated routes, source IP for webhooks, API-key
+# hash for /v1/license. Periods map to the `retryAfter` argument passed in
+# `src/middleware/ratelimit.ts`.
+
+# /v1/billing/checkout — 5 per hour per user. Humans click "Upgrade" twice
+# a day at most; this stops anyone brute-forcing tier mismatches.
+[[unsafe.bindings]]
+name = "RL_CHECKOUT"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 5, period = 3600 }
+
+# /v1/billing/webhook — 100 per minute per IP. Razorpay's actual traffic
+# sits well under 1/s; this only kicks in on spoofed or retry storms.
+[[unsafe.bindings]]
+name = "RL_WEBHOOK"
+type = "ratelimit"
+namespace_id = "1002"
+simple = { limit = 100, period = 60 }
+
+# /v1/license — 60 per minute per API-key prefix. The CLI re-validates on
+# every cold start and caches for 24h, so legitimate load is low. Guards
+# against brute-forcing random keys.
+[[unsafe.bindings]]
+name = "RL_LICENSE"
+type = "ratelimit"
+namespace_id = "1003"
+simple = { limit = 60, period = 60 }
+
+# /v1/dashboard/* — 120 per minute per user. Dashboard polling is bursty
+# but bounded; no legitimate client hits this ceiling.
+[[unsafe.bindings]]
+name = "RL_DASHBOARD"
+type = "ratelimit"
+namespace_id = "1004"
+simple = { limit = 120, period = 60 }
+
 # Secrets (set via `wrangler secret put`):
 # GITHUB_CLIENT_ID
 # GITHUB_CLIENT_SECRET

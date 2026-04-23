@@ -1,3 +1,12 @@
+/**
+ * The slice of Cloudflare's Rate-Limit API we use. The official binding type
+ * lives under `@cloudflare/workers-types/experimental` and has drifted across
+ * versions; inlining our minimal shape keeps us stable across upgrades.
+ */
+export interface RateLimitBinding {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+}
+
 /** Cloudflare Worker environment bindings. */
 export interface Env {
   RECON_DB: D1Database;
@@ -11,6 +20,12 @@ export interface Env {
   FRONTEND_URL: string;
   /** HMAC-SHA256 key used to sign license responses. Set via `wrangler secret put LICENSE_HMAC_SECRET`. */
   LICENSE_HMAC_SECRET: string;
+  // Rate-limit bindings — see worker/wrangler.toml for period/limit config.
+  // All optional so local dev and tests don't need the bindings provisioned.
+  RL_CHECKOUT?: RateLimitBinding;
+  RL_WEBHOOK?: RateLimitBinding;
+  RL_LICENSE?: RateLimitBinding;
+  RL_DASHBOARD?: RateLimitBinding;
 }
 
 /** D1 row: users table. */

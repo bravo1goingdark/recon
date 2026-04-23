@@ -12,9 +12,9 @@ export interface TierLimits {
 export interface TierConfig {
   name: string;
   limits: TierLimits;
-  /** Monthly price in paise (INR). 0 = free, -1 = contact sales. */
-  price_paise: number;
-  /** Display price string. */
+  /** Monthly price in USD cents. 0 = free, -1 = contact sales. */
+  price_cents: number;
+  /** Display price string shown in UI. */
   price_display: string;
 }
 
@@ -22,7 +22,7 @@ export interface TierConfig {
 const FREE: TierConfig = {
   name: "Free",
   limits: { max_repos: 1, max_files: 250, max_loc: 5_000 },
-  price_paise: 0,
+  price_cents: 0,
   price_display: "Free",
 };
 
@@ -30,7 +30,7 @@ const FREE: TierConfig = {
 const PRO: TierConfig = {
   name: "Pro",
   limits: { max_repos: 10, max_files: 5_000, max_loc: 200_000 },
-  price_paise: 300, // $3 USD in cents
+  price_cents: 300, // $3.00 USD
   price_display: "$3/mo",
 };
 
@@ -38,7 +38,7 @@ const PRO: TierConfig = {
 const TEAM: TierConfig = {
   name: "Team",
   limits: { max_repos: 25, max_files: 50_000, max_loc: 4_000_000 },
-  price_paise: 700, // $7 USD in cents
+  price_cents: 700, // $7.00 USD
   price_display: "$7/mo",
 };
 
@@ -50,7 +50,7 @@ const ENTERPRISE: TierConfig = {
     max_files: Number.MAX_SAFE_INTEGER,
     max_loc: Number.MAX_SAFE_INTEGER,
   },
-  price_paise: -1,
+  price_cents: -1,
   price_display: "Contact us",
 };
 
@@ -70,5 +70,5 @@ export function getTierConfig(name: string): TierConfig {
 
 /** All purchasable tiers (excludes Free and Enterprise/contact-sales). */
 export function purchasableTiers(): TierConfig[] {
-  return Object.values(TIERS).filter((t) => t.price_paise > 0);
+  return Object.values(TIERS).filter((t) => t.price_cents > 0);
 }

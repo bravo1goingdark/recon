@@ -2,15 +2,24 @@ import { Hono } from "hono";
 import { sha256Hex, generateApiKey } from "../lib/crypto";
 import { getTierConfig } from "../lib/tiers";
 import { requireAuth } from "../middleware/auth";
+import { clientIp, rateLimit } from "../middleware/ratelimit";
+import { KeyCreateBody, parseBody } from "../schemas";
 import type { AuthUser, Env } from "../types";
 
-export const dashboardRoutes = new Hono<{
-  Bindings: Env;
-  Variables: { user: AuthUser };
-}>();
+type AuthedEnv = { Bindings: Env; Variables: { user: AuthUser } };
 
-// All dashboard routes require auth
+export const dashboardRoutes = new Hono<AuthedEnv>();
+
+// All dashboard routes require auth + are rate-limited per authenticated user.
 dashboardRoutes.use("*", requireAuth);
+dashboardRoutes.use(
+  "*",
+  rateLimit<AuthedEnv>(
+    "RL_DASHBOARD",
+    (c) => c.get("user")?.id ?? clientIp(c),
+    60,
+  ),
+);
 
 /** GET /v1/dashboard/keys — list user's API keys. */
 dashboardRoutes.get("/keys", async (c) => {
@@ -44,12 +53,16 @@ dashboardRoutes.post("/keys", async (c) => {
   const user = c.get("user");
   const db = c.env.RECON_DB;
 
+  // Name is optional in the product UX but when provided must match the
+  // Zod-constrained charset (letters/digits/space/_./-). Empty body → default.
   let name = "Default";
   try {
-    const body = await c.req.json<{ name?: string }>();
-    if (body.name) name = body.name.slice(0, 64);
+    const raw = await c.req.json();
+    const parsed = parseBody(KeyCreateBody, raw);
+    if (!parsed.ok) return c.json(parsed.error, 400);
+    name = parsed.value.name;
   } catch {
-    // Body optional
+    // Body was empty — keep default name.
   }
 
   const key = generateApiKey();

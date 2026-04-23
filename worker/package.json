@@ -7,14 +7,21 @@
     "deploy:staging": "wrangler deploy --env staging",
     "migrate": "wrangler d1 migrations apply RECON_DB",
     "migrate:local": "wrangler d1 migrations apply RECON_DB --local",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "hono": "^4.7.0"
+    "hono": "^4.7.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.5.40",
     "@cloudflare/workers-types": "^4.20250410.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "typescript": "^5.8.0",
+    "vitest": "^2.1.9",
     "wrangler": "^4.14.0"
   }
 }
