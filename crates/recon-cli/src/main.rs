@@ -751,9 +751,26 @@ async fn main() -> Result<()> {
                 server.shutdown().await;
                 result
             } else {
+                // Stdio MCP: the IDE (Claude Code, Cursor, Windsurf, OpenCode)
+                // spawns us as a subprocess. When the IDE exits it closes our
+                // stdio pipes; we must notice that as a shutdown trigger, not
+                // just SIGINT/SIGTERM. So select on both: signal *or* the
+                // MCP service loop terminating on its own.
                 let (stdin, stdout) = rmcp::transport::io::stdio();
-                let _service = server.clone().serve((stdin, stdout)).await?;
-                wait_for_shutdown_signal().await;
+                let service = server.clone().serve((stdin, stdout)).await?;
+                let mut waiter = Box::pin(service.waiting());
+                tokio::select! {
+                    _ = wait_for_shutdown_signal() => {
+                        info!("shutdown requested");
+                    }
+                    res = &mut waiter => match res {
+                        Ok(reason) => info!(?reason, "MCP transport closed"),
+                        Err(e) => tracing::warn!("MCP service join error: {e}"),
+                    },
+                }
+                // Drop the pinned waiter: its DropGuard cancels the service
+                // task and its owned transport, releasing stdin/stdout.
+                drop(waiter);
                 server.shutdown().await;
                 Ok(())
             }
