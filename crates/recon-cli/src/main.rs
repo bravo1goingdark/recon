@@ -969,6 +969,14 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    // Env vars are process-global, so any test that mutates
+    // `RECON_WINDSURF_CONFIG_PATH` must hold this mutex for the whole
+    // duration of its set/use/remove critical section. Without it, cargo
+    // test's parallel scheduler races the three write_mcp_config_windsurf_*
+    // tests with the two ide_config_path_windsurf tests and the loser
+    // writes to the real home dir.
+    static WINDSURF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // ── Ide::config_abs_path ──────────────────────────────────────────────────
 
     #[test]
@@ -1000,6 +1008,7 @@ mod tests {
 
     #[test]
     fn ide_config_path_windsurf_is_global_not_in_repo() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         let override_path = global.path().join("mcp_config.json");
@@ -1016,6 +1025,7 @@ mod tests {
 
     #[test]
     fn all_ide_config_paths_are_distinct() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         std::env::set_var(
@@ -1223,6 +1233,7 @@ mod tests {
 
     #[test]
     fn write_mcp_config_windsurf_writes_to_global_path() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         let config_path = global.path().join("mcp_config.json");
@@ -1241,6 +1252,7 @@ mod tests {
 
     #[test]
     fn write_mcp_config_windsurf_uses_mcp_servers_key() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         let config_path = global.path().join("mcp_config.json");
@@ -1254,6 +1266,7 @@ mod tests {
 
     #[test]
     fn write_mcp_config_windsurf_merges_with_existing() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         let config_path = global.path().join("mcp_config.json");

@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use recon_core::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::instrument;
 
 /// Maximum number of entries in the mmap cache.
 const MAX_CACHE_ENTRIES: usize = 1024;
@@ -247,6 +248,15 @@ fn build_matcher(pattern: &str, is_regex: bool) -> Result<FffMatcher, Error> {
 // ── TextSearcher impl ──────────────────────────────────────────────────────────
 
 impl TextSearcher for FffBackend {
+    #[instrument(
+        skip(self, q),
+        fields(
+            pattern_len = q.pattern.len(),
+            is_regex = q.is_regex,
+            scope_files = q.scope.len(),
+            max_results = q.max_results,
+        ),
+    )]
     fn search(&self, q: &TextQuery) -> Result<Vec<TextHit>, Error> {
         let matcher = build_matcher(&q.pattern, q.is_regex)?;
         let mut hits = Vec::with_capacity(q.max_results.min(64));
@@ -267,6 +277,14 @@ impl TextSearcher for FffBackend {
         Ok(hits)
     }
 
+    #[instrument(
+        skip(self, patterns, scope),
+        fields(
+            patterns = patterns.len(),
+            scope_files = scope.len(),
+            max_per_pattern,
+        ),
+    )]
     fn multi_search(
         &self,
         patterns: &[&str],

@@ -12,7 +12,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 /// A structured search hit from Tantivy.
 #[derive(Debug, Clone)]
@@ -284,6 +284,7 @@ impl TantivyBackend {
     }
 
     /// Search for symbols matching a query string. BM25-ranked.
+    #[instrument(skip(self), fields(query_len = query_str.len(), limit))]
     pub fn search(&self, query_str: &str, limit: usize) -> Result<Vec<StructuredHit>, Error> {
         if query_str.is_empty() {
             return Ok(Vec::new());

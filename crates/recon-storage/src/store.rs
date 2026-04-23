@@ -8,6 +8,7 @@ use recon_core::symbol::{FileMeta, Ref, Symbol, SymbolKind};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::instrument;
 
 /// The main storage handle (single-writer).
 pub struct Store {
@@ -733,6 +734,7 @@ impl Store {
     /// Dedups `Arc<PathBuf>` across rows sharing the same `src_path` —
     /// saves ~80% of path allocations on typical repos (most refs cluster
     /// into a few source files).
+    #[instrument(skip(self))]
     pub fn all_refs(&self) -> Result<Vec<Ref>, Error> {
         let mut stmt = self
             .conn
@@ -772,6 +774,7 @@ impl Store {
     ///
     /// Interns `Arc<PathBuf>` across rows sharing the same `path` to avoid
     /// ~78 K redundant `PathBuf` allocations on an 80 K-symbol repo.
+    #[instrument(skip(self))]
     pub fn all_symbols(&self) -> Result<Vec<Symbol>, Error> {
         let mut stmt = self
             .conn

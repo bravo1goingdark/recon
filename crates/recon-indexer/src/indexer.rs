@@ -14,7 +14,7 @@ use recon_storage::store::Store;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Result of parsing a single file (before storing).
 pub struct ParsedFile {
@@ -423,6 +423,7 @@ pub fn index_repo(
 /// If `shared_writer` is provided, uses it for Tantivy writes instead of
 /// creating a new writer (prevents LockBusy).
 #[allow(clippy::needless_option_as_deref)]
+#[instrument(skip(store, tantivy, shared_writer), fields(repo = %repo_root.display()))]
 pub fn index_repo_incremental(
     store: &Store,
     tantivy: Option<&TantivyBackend>,

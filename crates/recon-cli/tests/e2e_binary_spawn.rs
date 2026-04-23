@@ -70,8 +70,7 @@ fn binary_spawn_initialize_call_tool_shutdown() {
     // Seed a signed dev license so `recon serve` doesn't die on
     // `validate_license_or_die()`. The seed uses the built-in dev HMAC
     // key baked in by build.rs when RECON_LICENSE_HMAC_KEY is unset.
-    recon_server::license::seed_dev_cache(config.path())
-        .expect("seed_dev_cache");
+    recon_server::license::seed_dev_cache(config.path()).expect("seed_dev_cache");
 
     // CARGO_BIN_EXE_recon is set by Cargo for integration tests that
     // target a crate with a [[bin]]. This points to the binary that
@@ -131,7 +130,10 @@ fn binary_spawn_initialize_call_tool_shutdown() {
     let resp = read_response(&mut reader);
     assert_eq!(resp["id"], 1);
     assert!(
-        resp["result"]["serverInfo"]["name"].as_str().unwrap_or("").contains("recon"),
+        resp["result"]["serverInfo"]["name"]
+            .as_str()
+            .unwrap_or("")
+            .contains("recon"),
         "initialize response should name the server: {resp}"
     );
 
@@ -176,10 +178,12 @@ fn binary_spawn_initialize_call_tool_shutdown() {
     let resp = read_response(&mut reader);
     assert_eq!(resp["id"], 3);
     let content = &resp["result"]["content"];
-    assert!(content.is_array(), "tools/call result.content must be array: {resp}");
+    assert!(
+        content.is_array(),
+        "tools/call result.content must be array: {resp}"
+    );
     let text = content[0]["text"].as_str().expect("content text");
-    let stats: serde_json::Value =
-        serde_json::from_str(text).expect("code_stats body is JSON");
+    let stats: serde_json::Value = serde_json::from_str(text).expect("code_stats body is JSON");
     assert!(
         stats["files_indexed"].as_u64().unwrap_or(0) >= 1,
         "code_stats should report at least 1 indexed file on the test project: {text}"
