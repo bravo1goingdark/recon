@@ -22,7 +22,7 @@ billingRoutes.post(
   rateLimit<AuthedEnv>(
     "RL_CHECKOUT",
     (c) => c.get("user")?.id ?? clientIp(c),
-    3600,
+    60,
   ),
   async (c) => {
     const user = c.get("user");
