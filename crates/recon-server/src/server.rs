@@ -2663,6 +2663,7 @@ mod tests {
             expires_at: 1_000_000_000, // 2001 — long past
             source: crate::license::LicenseSource::Cache,
             message: "Pro plan active until 2001".into(),
+            revoked: false,
         }
     }
 
@@ -2672,6 +2673,17 @@ mod tests {
             expires_at: u64::MAX / 2, // far future
             source: crate::license::LicenseSource::Cache,
             message: "Pro plan active".into(),
+            revoked: false,
+        }
+    }
+
+    fn revoked_license() -> crate::license::ValidatedLicense {
+        crate::license::ValidatedLicense {
+            tier: crate::router::Tier::new("Pro", crate::router::TierLimits::PRO),
+            expires_at: u64::MAX / 2, // still in the future — revoke pre-empts
+            source: crate::license::LicenseSource::Cache,
+            message: "License revoked: worker rejected key".into(),
+            revoked: true,
         }
     }
 
@@ -2732,5 +2744,65 @@ mod tests {
         let ok = server.query_tool("code_stats", "{}").await;
         let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
         assert_ne!(v["shape"], "Error");
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_blocks_on_revoked_license() {
+        // The revoke flow: expires_at is still in the future (user paid through
+        // current period) but the worker has told us the key itself is dead.
+        // The gate must fire regardless of calendar time.
+        let (server, _tmp) = make_indexed_server().await;
+        server.set_license(revoked_license());
+
+        let result = server.query_tool("code_stats", "{}").await;
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], ReconErrorCode::LicenseExpired.code());
+        assert_eq!(err["kind"], "license_expired");
+        assert!(err["message"].as_str().unwrap().contains("recon login"));
+    }
+
+    #[test]
+    fn is_expired_true_when_revoked_flag_set() {
+        let mut lic = fresh_license();
+        assert!(!lic.is_expired(), "fresh license must not look expired");
+        lic.revoked = true;
+        assert!(
+            lic.is_expired(),
+            "revoked flag must trigger is_expired regardless of expires_at"
+        );
+    }
+
+    #[test]
+    fn credentials_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        assert!(
+            crate::license::read_credentials(dir).is_none(),
+            "empty directory must report no credentials"
+        );
+
+        crate::license::save_credentials(dir, "sk-recon-roundtrip")
+            .expect("save_credentials failed");
+        let got = crate::license::read_credentials(dir).expect("read after save must succeed");
+        assert_eq!(got, "sk-recon-roundtrip");
+
+        // chmod 0600 only meaningful on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = crate::license::credentials_path(dir);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "credentials file must be chmod 0600 on Unix");
+        }
+
+        crate::license::delete_credentials(dir).unwrap();
+        assert!(
+            crate::license::read_credentials(dir).is_none(),
+            "after delete the file must be gone"
+        );
+
+        // Delete is idempotent — a second call on a missing file is not an error.
+        crate::license::delete_credentials(dir).unwrap();
     }
 }

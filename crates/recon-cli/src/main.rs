@@ -530,6 +530,15 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&config_dir)?;
             let license = recon_server::license::validate_license(Some(&key), &config_dir)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            // Persist the raw key for the periodic re-validation task in
+            // `recon serve`. Without this we can only re-check the cache,
+            // and a revoke from the dashboard never propagates to a running
+            // server. Saved at chmod 0600 on Unix; `recon logout` wipes it.
+            if let Err(e) = recon_server::license::save_credentials(&config_dir, &key) {
+                tracing::warn!("failed to persist credentials: {e}");
+            }
+
             let limits = license.tier.limits();
             eprintln!(
                 "✓ Authenticated — {} tier ({} repos, {} files, {}K LOC)",
@@ -553,6 +562,9 @@ async fn main() -> Result<()> {
 
         Command::Logout => {
             let config_dir = recon_server::license::global_config_dir();
+            // Wipe both files so a follow-up `recon serve` can't keep
+            // re-validating with a stale credential.
+            let _ = recon_server::license::delete_credentials(&config_dir);
             let license_path = config_dir.join("license.json");
             if license_path.exists() {
                 std::fs::remove_file(&license_path)?;
@@ -779,14 +791,28 @@ async fn main() -> Result<()> {
 
             server.start_watcher();
 
-            // Periodic license re-validation. The on-disk cache has a 24 h
-            // TTL (see recon_server::license::CACHE_TTL_SECS); we poll every
-            // 6 h (override via RECON_LICENSE_REVALIDATE_SECS) so:
-            //   * a fresh `recon login` from another shell is picked up
-            //     without restarting `recon serve`;
-            //   * once the cache lapses past its TTL, the per-tool-call
-            //     expiry gate flips to blocking with a clear renewal message
-            //     — preventing indefinite use after sub cancellation.
+            // Periodic license re-validation.
+            //
+            // Polls every 15 min (override via RECON_LICENSE_REVALIDATE_SECS).
+            // When a credentials file is present (written by `recon login`),
+            // we hit the worker's /v1/license/validate with the raw key and
+            // distinguish three outcomes:
+            //   * Ok(new)            → swap the in-memory license, including
+            //                          updated tier/expires_at if the webhook
+            //                          or cron modified it since last login.
+            //   * Err(Rejected)      → dashboard revoked the key, or the sub
+            //                          hard-expired on the worker. Wipe the
+            //                          credentials + cache and mark the
+            //                          in-memory license `revoked = true` so
+            //                          the per-tool-call gate refuses the
+            //                          next call with a clear "run
+            //                          `recon login`" message.
+            //   * Err(Transient)     → network/DNS/5xx. Keep the current
+            //                          license; retry next tick.
+            //
+            // Without credentials (dev tests, seeded dev cache), fall back
+            // to the cache-only path and just surface warnings — there's no
+            // key to send upstream.
             //
             // The task holds a clone of ReconServer (Arc internally). When
             // the runtime shuts down at process exit, this sleep-loop is
@@ -796,31 +822,74 @@ async fn main() -> Result<()> {
                 let interval_secs = std::env::var("RECON_LICENSE_REVALIDATE_SECS")
                     .ok()
                     .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(21_600) // 6 hours
+                    .unwrap_or(900) // 15 minutes
                     .clamp(60, 86_400);
                 tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
                         let dir = recon_server::license::global_config_dir();
-                        match recon_server::license::validate_license(None, &dir) {
-                            Ok(new) => {
-                                info!(
-                                    tier = new.tier.name(),
-                                    source = %new.source,
-                                    expires_in_secs = new.expires_at.saturating_sub(
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0)
-                                    ),
-                                    "license re-validated",
-                                );
-                                server_rev.set_license(new);
+
+                        match recon_server::license::read_credentials(&dir) {
+                            Some(key) => {
+                                // Blocking HTTP — run on a dedicated thread so
+                                // we don't block the tokio runtime's worker.
+                                let result = tokio::task::spawn_blocking(move || {
+                                    recon_server::license::validate_remote_strict(&key)
+                                })
+                                .await;
+                                match result {
+                                    Ok(Ok(resp)) => {
+                                        // Refresh disk cache + in-memory license.
+                                        let _ =
+                                            recon_server::license::write_cache_public(&dir, &resp);
+                                        let lic = recon_server::license::response_to_validated(
+                                            resp,
+                                            recon_server::license::LicenseSource::Remote,
+                                        );
+                                        info!(
+                                            tier = lic.tier.name(),
+                                            "license re-validated remotely",
+                                        );
+                                        server_rev.set_license(lic);
+                                    }
+                                    Ok(Err(recon_server::license::RemoteError::Rejected(msg))) => {
+                                        tracing::warn!(
+                                            reason = %msg,
+                                            "license rejected by worker — marking revoked"
+                                        );
+                                        // Wipe local auth state so a fresh
+                                        // `recon serve` fails fast with
+                                        // "run `recon login`".
+                                        let _ = recon_server::license::delete_credentials(&dir);
+                                        let _ = recon_server::license::delete_cache(&dir);
+                                        if let Some(mut lic) = server_rev.current_license() {
+                                            lic.revoked = true;
+                                            lic.message = format!("License revoked: {msg}");
+                                            server_rev.set_license(lic);
+                                        }
+                                    }
+                                    Ok(Err(recon_server::license::RemoteError::Transient(msg))) => {
+                                        tracing::warn!(
+                                            reason = %msg,
+                                            "license re-validation transient error — keeping current"
+                                        );
+                                    }
+                                    Err(join_err) => {
+                                        tracing::warn!(
+                                            "license re-validation join error: {join_err}"
+                                        );
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!("license re-validation failed: {e}");
-                                // Keep the current license; the expiry gate
-                                // will eventually fire when it lapses.
+                            None => {
+                                // No credentials on disk — fall back to the
+                                // cache-only path (dev licenses, tests).
+                                match recon_server::license::validate_license(None, &dir) {
+                                    Ok(new) => server_rev.set_license(new),
+                                    Err(e) => tracing::debug!(
+                                        "cache-only re-validation (no credentials): {e}"
+                                    ),
+                                }
                             }
                         }
                     }
