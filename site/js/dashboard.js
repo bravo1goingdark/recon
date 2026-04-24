@@ -455,7 +455,35 @@ async function deleteAccount() {
   }
 }
 
+// ─── Tabs ────────────────────────────────────────────────────────────────
+// Three round-icon tabs at the top of the dashboard (Keys / Billing /
+// Danger). One-panel-visible-at-a-time so the dashboard fits one screen
+// instead of the old long vertical stack. Uses native `hidden` attribute
+// on the panels; the active button gets a clay border + `.active` class.
+
+function activateTab(name) {
+  document.querySelectorAll(".tab-icon").forEach(function (btn) {
+    var isActive = btn.getAttribute("data-tab") === name;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  document.querySelectorAll(".tab-panel").forEach(function (panel) {
+    panel.hidden = panel.id !== "panel-" + name;
+  });
+}
+
+function wireTabs() {
+  document.querySelectorAll(".tab-icon").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var name = btn.getAttribute("data-tab");
+      if (name) activateTab(name);
+    });
+  });
+}
+
 function wireControls() {
+  wireTabs();
+
   // API key buttons. Generate is visible when the user has zero active
   // keys; Rotate replaces it when a key exists. toggleKeyButtons (called
   // from loadDashboard) manages the display: toggle.
