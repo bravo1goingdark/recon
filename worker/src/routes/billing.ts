@@ -138,12 +138,23 @@ billingRoutes.post(
       );
     }
 
-    // Refuse to stack subscriptions. The user must cancel the current one
-    // before starting a new one — keeps Razorpay's billing state unambiguous.
+    // Refuse to stack subscriptions — except for rows where the user has
+    // already clicked Cancel. Those have `cancel_at_period_end = 1` which
+    // means "no further renewals"; the billing period still runs out, but
+    // from the user's POV they're free to start a new plan. Blocking that
+    // leaves them confused ("I cancelled — why is it telling me to cancel
+    // again?") which is the exact bug this guard previously caused.
+    //
+    // The old sub keeps its current period_end (honor-until-end still
+    // stands) and the webhook will transition it to `cancelled` when
+    // Razorpay's renewal attempt would have been.
     const existing = await db
       .prepare(
-        `SELECT id, razorpay_subscription_id, tier, status FROM subscriptions
-         WHERE user_id = ? AND status IN ('created','authenticated','active','pending','halted')
+        `SELECT id, razorpay_subscription_id, tier, status, cancel_at_period_end
+         FROM subscriptions
+         WHERE user_id = ?
+           AND status IN ('created','authenticated','active','pending','halted')
+           AND cancel_at_period_end = 0
          LIMIT 1`,
       )
       .bind(user.id)

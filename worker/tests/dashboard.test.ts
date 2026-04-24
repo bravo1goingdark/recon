@@ -327,3 +327,117 @@ describe("POST /v1/dashboard/keys — expires_at inheritance from active subscri
     expect(body.expires_at).toBeNull();
   });
 });
+
+describe("DELETE /v1/dashboard/account — cascade delete all user data", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it("401 when unauthenticated", async () => {
+    const res = await getJson("/v1/dashboard/account", { method: "DELETE" });
+    expect(res.status).toBe(401);
+  });
+
+  it("deletes user + cascades to api_keys, sessions, payments, subscriptions, payment_events", async () => {
+    // Seed a user with the whole messy state a real account accumulates.
+    const { sessionToken } = await seedUserWithKey({
+      userId: "user_doomed",
+      username: "doomed",
+      keyId: "key_doomed",
+      keyValue: "sk-recon-doomedkey1",
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+
+    // A payment (with no Razorpay sub — legacy one-time)
+    await db
+      .prepare(
+        `INSERT INTO payments (user_id, razorpay_order_id, amount_paise, currency, status, tier)
+         VALUES (?, 'order_doomed', 300, 'USD', 'captured', 'Pro')`,
+      )
+      .bind("user_doomed")
+      .run();
+
+    // A payment_event tied to that order_id (no FK — we clean it manually)
+    await db
+      .prepare(
+        `INSERT INTO payment_events (razorpay_payment_id, event_type, razorpay_order_id, processed_at)
+         VALUES ('pay_doomed', 'payment.captured', 'order_doomed', datetime('now'))`,
+      )
+      .run();
+
+    // A subscription with NULL razorpay_subscription_id (never completed
+    // Razorpay creation) — the delete handler must skip the Razorpay
+    // cancel call for these rather than crashing on a missing ID.
+    await db
+      .prepare(
+        `INSERT INTO subscriptions (user_id, tier, status, razorpay_subscription_id)
+         VALUES (?, 'Pro', 'created', NULL)`,
+      )
+      .bind("user_doomed")
+      .run();
+
+    const res = await getJson("/v1/dashboard/account", {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, user_id: "user_doomed" });
+
+    // Every row referencing this user should be gone.
+    for (const [table, col] of [
+      ["users", "id"],
+      ["api_keys", "user_id"],
+      ["sessions", "user_id"],
+      ["payments", "user_id"],
+      ["subscriptions", "user_id"],
+    ] as const) {
+      const row = await db
+        .prepare(`SELECT COUNT(*) as n FROM ${table} WHERE ${col} = ?`)
+        .bind("user_doomed")
+        .first<{ n: number }>();
+      expect(row?.n).toBe(0);
+    }
+
+    // payment_events cleaned by order_id join — no orphan idempotency rows.
+    const eventRow = await db
+      .prepare(
+        "SELECT COUNT(*) as n FROM payment_events WHERE razorpay_order_id = ?",
+      )
+      .bind("order_doomed")
+      .first<{ n: number }>();
+    expect(eventRow?.n).toBe(0);
+  });
+
+  it("does not touch other users' rows", async () => {
+    const { sessionToken: aliceToken } = await seedUserWithKey({
+      userId: "user_delete_me",
+      username: "alice_delete",
+      keyId: "key_alice_delete",
+      keyValue: "sk-recon-alicedelete",
+    });
+    await seedUserWithKey({
+      userId: "user_keep_me",
+      username: "bob_keep",
+      keyId: "key_bob_keep",
+      keyValue: "sk-recon-bobkeepkey",
+    });
+
+    const res = await getJson("/v1/dashboard/account", {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(res.status).toBe(200);
+
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const bob = await db
+      .prepare("SELECT id FROM users WHERE id = ?")
+      .bind("user_keep_me")
+      .first();
+    expect(bob).not.toBeNull();
+    const bobKey = await db
+      .prepare("SELECT id FROM api_keys WHERE id = ?")
+      .bind("key_bob_keep")
+      .first();
+    expect(bobKey).not.toBeNull();
+  });
+});

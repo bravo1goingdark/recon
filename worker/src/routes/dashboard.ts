@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { sha256Hex, generateApiKey } from "../lib/crypto";
+import { cancelSubscription } from "../lib/razorpay";
 import { getTierConfig } from "../lib/tiers";
 import { requireAuth } from "../middleware/auth";
 import { clientIp, rateLimit } from "../middleware/ratelimit";
@@ -154,4 +155,86 @@ dashboardRoutes.delete("/keys/:id", async (c) => {
   }
 
   return c.json({ ok: true });
+});
+
+/**
+ * DELETE /v1/dashboard/account — permanently delete the user's account and
+ * every row that references it.
+ *
+ * Rows affected per delete:
+ *   * users  — the row itself
+ *   * api_keys, sessions, payments, subscriptions — ON DELETE CASCADE from
+ *     users(id) in migration 0001, so one DELETE on users drops all four.
+ *   * payment_events — no FK (keyed by razorpay_payment_id). We clean
+ *     these up manually by joining on razorpay_order_id, so a deleted
+ *     user's webhook-delivery history doesn't leak the old payment IDs
+ *     into future idempotency checks.
+ *
+ * Before deleting we call Razorpay `cancelSubscription` with
+ * cancel_at_cycle_end=0 for every live subscription, so Razorpay itself
+ * stops charging the user. We swallow per-sub errors so a single stale
+ * Razorpay record (already cancelled, already terminated) doesn't block
+ * the whole account deletion — the delete has to succeed even if
+ * Razorpay's side is out of sync.
+ *
+ * Session cookie: the user's session row is cascaded away along with the
+ * user, so the next request with that cookie 401s naturally. We don't
+ * bother clearing the cookie here — the frontend is expected to
+ * window.location to /login immediately on 200 anyway.
+ */
+dashboardRoutes.delete("/account", async (c) => {
+  const user = c.get("user");
+  const db = c.env.RECON_DB;
+
+  // 1. Cancel any live Razorpay subscriptions immediately. No
+  // cancel_at_cycle_end for account deletion — we don't want the user to
+  // get one more charge after "delete my account".
+  const { results: liveSubs = [] } = await db
+    .prepare(
+      `SELECT razorpay_subscription_id
+       FROM subscriptions
+       WHERE user_id = ?
+         AND razorpay_subscription_id IS NOT NULL
+         AND status IN ('created','authenticated','active','pending','halted')`,
+    )
+    .bind(user.id)
+    .all<{ razorpay_subscription_id: string }>();
+
+  for (const row of liveSubs) {
+    try {
+      await cancelSubscription(
+        c.env.RAZORPAY_KEY_ID,
+        c.env.RAZORPAY_KEY_SECRET,
+        row.razorpay_subscription_id,
+        false, // immediate — not cycle-end
+      );
+    } catch (e) {
+      console.warn(
+        `account delete: Razorpay cancel failed for ${row.razorpay_subscription_id}:`,
+        e,
+      );
+      // continue — Razorpay might already have it cancelled; don't block delete
+    }
+  }
+
+  // 2. Wipe payment_events tied to this user's payments (no FK cascade).
+  // 3. Delete the user row — cascades everywhere else.
+  // One batch so the whole thing is atomic.
+  await db.batch([
+    db
+      .prepare(
+        `DELETE FROM payment_events
+         WHERE razorpay_order_id IN (
+           SELECT razorpay_order_id FROM payments WHERE user_id = ?
+         )`,
+      )
+      .bind(user.id),
+    db.prepare("DELETE FROM users WHERE id = ?").bind(user.id),
+  ]);
+
+  return c.json({
+    ok: true,
+    user_id: user.id,
+    subscriptions_cancelled: liveSubs.length,
+  });
 });

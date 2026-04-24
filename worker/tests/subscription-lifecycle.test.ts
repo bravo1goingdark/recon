@@ -346,6 +346,102 @@ describe("subscription webhook: subscription.cancelled / halted — honor until 
   });
 });
 
+describe("POST /v1/billing/subscribe — cancel-at-period-end unblocks new subscribe", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  /**
+   * Seed a user + session + active subscription with a specific
+   * cancel_at_period_end flag. Returns the session token for
+   * auth. No api_key needed — /subscribe doesn't require one.
+   */
+  async function seedUserWithSub(opts: {
+    userId: string;
+    sessionToken: string;
+    cancel_at_period_end: number;
+  }): Promise<void> {
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const tokenHash = await (async () => {
+      const enc = new TextEncoder();
+      const buf = await crypto.subtle.digest("SHA-256", enc.encode(opts.sessionToken));
+      return Array.from(new Uint8Array(buf))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    })();
+    const sessionExpiry = new Date(Date.now() + 86_400_000).toISOString();
+    await db
+      .prepare(
+        "INSERT INTO users (id, github_id, github_username, tier) VALUES (?, ?, ?, 'Pro')",
+      )
+      .bind(opts.userId, Math.floor(Math.random() * 1_000_000), `user_${opts.userId}`)
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
+      )
+      .bind(opts.userId, tokenHash, sessionExpiry)
+      .run();
+    const periodEnd = new Date(Date.now() + 20 * 86_400_000).toISOString();
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, status,
+            current_period_end, cancel_at_period_end)
+         VALUES (?, 'sub_block_test', 'Pro', 'active', ?, ?)`,
+      )
+      .bind(opts.userId, periodEnd, opts.cancel_at_period_end)
+      .run();
+  }
+
+  it("blocks new /subscribe when there's a not-yet-cancelled active sub (positive guard case)", async () => {
+    await seedUserWithSub({
+      userId: "user_still_paying",
+      sessionToken: "ses_still_paying",
+      cancel_at_period_end: 0,
+    });
+
+    const res = await getJson("/v1/billing/subscribe", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer ses_still_paying",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tier: "Team", currency: "USD" }),
+    });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      existing_tier: "Pro",
+      existing_status: "active",
+    });
+  });
+
+  it("passes the 409 guard when the existing sub has cancel_at_period_end=1", async () => {
+    // This is the bug the user hit: they cancelled Pro, then clicked
+    // Subscribe Team and got "cancel from dashboard" anyway. After the
+    // fix the 409 no longer matches cancelled-at-period-end rows, so the
+    // request reaches Razorpay. In this test env Razorpay isn't mocked,
+    // so the real createPlan/createSubscription call against the
+    // test-mode key will either succeed or 5xx — either way, the
+    // observable here is "status !== 409", which is the whole contract.
+    await seedUserWithSub({
+      userId: "user_cancelled",
+      sessionToken: "ses_cancelled",
+      cancel_at_period_end: 1,
+    });
+
+    const res = await getJson("/v1/billing/subscribe", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer ses_cancelled",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tier: "Team", currency: "USD" }),
+    });
+    expect(res.status).not.toBe(409);
+  });
+});
+
 describe("scheduled cron: downgradeExpired", () => {
   beforeEach(async () => {
     await resetDb();
