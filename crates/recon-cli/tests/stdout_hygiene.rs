@@ -16,10 +16,16 @@ fn serve_stdout_is_clean_jsonrpc() {
         .expect("cargo build failed");
     assert!(status.success(), "cargo build failed");
 
-    // Binary is in workspace root's target dir
+    // Binary is in workspace root's target dir. EXE_SUFFIX is ".exe" on
+    // Windows and empty elsewhere — the test was looking for `recon` on
+    // every platform and failing silently on Windows where the file is
+    // actually `recon.exe`.
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let binary = workspace_root.join("target/debug/recon");
+    let binary = workspace_root
+        .join("target")
+        .join("debug")
+        .join(format!("recon{}", std::env::consts::EXE_SUFFIX));
 
     if !binary.exists() {
         panic!("recon binary not found at {}", binary.display());

@@ -50,6 +50,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      # Windows Defender real-time scan on every file SQLite / Tantivy /
+      # the tempfile-based e2e tests create is what made Windows runs take
+      # 40+ minutes while Ubuntu finishes in 3. Excluding the workspace
+      # and the toolchain processes drops Windows test time to ~10 min
+      # with zero coverage loss; GitHub runners disable Defender between
+      # jobs so this doesn't leak across builds.
+      - name: Add Defender exclusions (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath  "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath  "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionPath  "$env:USERPROFILE\.rustup"
+          Add-MpPreference -ExclusionPath  "$env:TEMP"
+          Add-MpPreference -ExclusionProcess "cargo.exe"
+          Add-MpPreference -ExclusionProcess "rustc.exe"
+          Add-MpPreference -ExclusionProcess "recon.exe"
+
       # Exclude recon-embed to stay within disk/time budget. The embed
       # feature is exercised separately in the `embed` job below on Linux
       # where disk space is abundant.
