@@ -161,10 +161,7 @@ fn extract_binary(archive: &[u8], out_path: &Path) -> Result<()> {
         let mut tar = tar::Archive::new(gz);
         for entry in tar.entries().context("reading tarball entries")? {
             let mut entry = entry.context("reading tar entry")?;
-            let path = entry
-                .path()
-                .context("reading tar entry path")?
-                .into_owned();
+            let path = entry.path().context("reading tar entry path")?.into_owned();
             // The release tarball has a single top-level entry named
             // `recon`. Match by filename so a future CI change that
             // introduces a subdirectory doesn't silently miss it.
@@ -268,8 +265,8 @@ pub fn run(check: bool, force: bool) -> Result<()> {
         .with_context(|| format!("downloading {}", asset))?;
 
     eprintln!("Verifying SHA256...");
-    let manifest = http_get_string(&format!("{}/SHA256SUMS.txt", base))
-        .context("fetching SHA256SUMS.txt")?;
+    let manifest =
+        http_get_string(&format!("{}/SHA256SUMS.txt", base)).context("fetching SHA256SUMS.txt")?;
     let expected = sha256_for(&manifest, &asset)
         .ok_or_else(|| anyhow!("SHA256 for {} not found in published manifest", asset))?;
     let actual = sha256_hex(&archive_bytes);
