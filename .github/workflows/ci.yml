@@ -12,11 +12,18 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
-# Fast per-PR gates — all on a self-hosted Linux runner to avoid GitHub
-# Actions minute costs while the project is private. The runner lives
-# locally and is registered to this repo only. Heavy matrix (macOS,
-# Windows, embed) stays on GitHub-hosted runners in release.yml and
-# cross-platform.yml because those platforms are unreachable from here.
+# Fast per-PR gates — all on self-hosted Linux runners registered to this
+# repo only. Heavy matrix (macOS, Windows, embed) stays on GitHub-hosted
+# runners in release.yml and cross-platform.yml.
+#
+# Deliberately no GitHub-cloud cache actions (Swatinem/rust-cache,
+# actions/setup-node's `cache:` option). The self-hosted runners have
+# per-runner persistent disks with their own CARGO_HOME, RUSTUP_HOME,
+# and node_modules — re-using GitHub's cloud cache on top wastes
+# bandwidth and, for self-hosted specifically, fails auth intermittently
+# against the Actions cache service ("Server failed to authenticate the
+# request"), which hangs the setup-node action for 15+ minutes at a
+# stretch. Local disk caches are both faster and more reliable here.
 jobs:
   fmt:
     name: Format
@@ -36,7 +43,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
       # Exclude recon-embed (lancedb pulls 2000+ crates, fills CI disk).
       - run: cargo clippy --workspace --exclude recon-embed --all-targets -- -D warnings
 
@@ -51,7 +57,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       # Exclude recon-embed — covered in cross-platform.yml where the
       # flaky ort-sys download can be retried without blocking PRs.
       - run: cargo test --workspace --exclude recon-embed
@@ -65,10 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       # `cargo install --locked` is idempotent on the self-hosted runner;
-      # after the first run the binary is cached under ~/.cargo/bin and
-      # subsequent jobs finish in seconds.
+      # after the first run the binary is cached under the per-runner
+      # CARGO_HOME and subsequent jobs finish in seconds.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       # RUSTSEC-2024-0436: paste 1.0.15 unmaintained — tracked in deny.toml
@@ -78,15 +82,13 @@ jobs:
   # cargo-deny directly — the EmbarkStudios/cargo-deny-action@v2 runs
   # inside a Docker container, and our self-hosted runner's user isn't in
   # the docker group. Installing cargo-deny as a regular binary is
-  # equivalent, cacheable by Swatinem/rust-cache, and avoids the sudo
-  # dance of adding the runner to the docker group.
+  # equivalent and avoids the sudo dance of adding the runner to docker.
   deny:
     name: cargo-deny (licenses, bans, sources)
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       # Flag goes BEFORE the subcommand — `cargo deny check --all-features`
@@ -107,8 +109,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
+          # NOTE: deliberately no `cache: npm` here — it routes through
+          # GitHub's Actions cache service which fails auth on this
+          # self-hosted runner and hangs the step indefinitely. npm's
+          # own content cache lives on the persistent runner disk
+          # (~/.npm) and survives between jobs just fine.
       - run: npm ci
       - run: npm run typecheck
       - run: npm test -- --reporter=verbose
