@@ -2619,10 +2619,7 @@ mod tests {
 
     fn expired_license() -> crate::license::ValidatedLicense {
         crate::license::ValidatedLicense {
-            tier: crate::router::Tier::new(
-                "Pro",
-                crate::router::TierLimits::PRO,
-            ),
+            tier: crate::router::Tier::new("Pro", crate::router::TierLimits::PRO),
             expires_at: 1_000_000_000, // 2001 — long past
             source: crate::license::LicenseSource::Cache,
             message: "Pro plan active until 2001".into(),
@@ -2631,10 +2628,7 @@ mod tests {
 
     fn fresh_license() -> crate::license::ValidatedLicense {
         crate::license::ValidatedLicense {
-            tier: crate::router::Tier::new(
-                "Pro",
-                crate::router::TierLimits::PRO,
-            ),
+            tier: crate::router::Tier::new("Pro", crate::router::TierLimits::PRO),
             expires_at: u64::MAX / 2, // far future
             source: crate::license::LicenseSource::Cache,
             message: "Pro plan active".into(),

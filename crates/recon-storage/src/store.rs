@@ -10,6 +10,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::instrument;
 
+/// Canonical string form of a path for use as a DB key.
+///
+/// Always returns forward-slashes, regardless of the host OS. Without this,
+/// paths written on Windows end up with `\` separators in SQLite while tool
+/// callers query with `/` — every `WHERE path = ?` returns zero rows despite
+/// the symbol existing. Use this everywhere a `Path` meets the database.
+#[inline]
+pub fn path_key(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 /// The main storage handle (single-writer).
 pub struct Store {
     conn: Connection,
@@ -67,7 +83,7 @@ impl Store {
             )
             .map_err(|e| Error::Storage(e.to_string()))?
             .execute(params![
-                meta.path.to_str().unwrap_or(""),
+                path_key(&meta.path),
                 meta.lang.name(),
                 meta.size_bytes as i64,
                 meta.content_hash.as_slice(),
@@ -82,7 +98,7 @@ impl Store {
     ///
     /// Single transaction: delete refs (explicit), then file (FK cascades to symbols).
     pub fn delete_file_cascade(&self, path: &Path) -> Result<(), Error> {
-        let path_str = path.to_str().unwrap_or("");
+        let path_str = path_key(path);
         let tx = self
             .conn
             .unchecked_transaction()
@@ -110,7 +126,7 @@ impl Store {
             )
             .map_err(|e| Error::Storage(e.to_string()))?
             .execute(params![
-                sym.path.to_str().unwrap_or(""),
+                path_key(&sym.path),
                 sym.name.as_str(),
                 sym.qualified_name.as_str(),
                 sym.kind.label(),
@@ -168,7 +184,7 @@ impl Store {
 
             for sym in symbols {
                 stmt.execute(params![
-                    sym.path.to_str().unwrap_or(""),
+                    path_key(&sym.path),
                     sym.name.as_str(),
                     sym.qualified_name.as_str(),
                     sym.kind.label(),
@@ -206,7 +222,7 @@ impl Store {
             .unchecked_transaction()
             .map_err(|e| Error::Storage(e.to_string()))?;
         {
-            let path_str = meta.path.to_str().unwrap_or("");
+            let path_str = path_key(&meta.path);
 
             // Delete old refs + symbols in one transaction
             tx.execute(
@@ -255,7 +271,7 @@ impl Store {
                 for sym in symbols {
                     sym_stmt
                         .execute(params![
-                            sym.path.to_str().unwrap_or(""),
+                            path_key(&sym.path),
                             sym.name.as_str(),
                             sym.qualified_name.as_str(),
                             sym.kind.label(),
@@ -290,7 +306,7 @@ impl Store {
                 for r in refs {
                     ref_stmt
                         .execute(params![
-                            r.src_path.to_str().unwrap_or(""),
+                            path_key(&r.src_path),
                             r.src_symbol_id as i64,
                             r.ident.as_str(),
                             r.dst_symbol_id.map(|v| v as i64),
@@ -355,7 +371,7 @@ impl Store {
                 .map_err(|e| Error::Storage(e.to_string()))?;
 
             for &(meta, symbols, refs) in files {
-                let path_str = meta.path.to_str().unwrap_or("");
+                let path_str = path_key(&meta.path);
                 del_refs_stmt
                     .execute(params![path_str])
                     .map_err(|e| Error::Storage(e.to_string()))?;
@@ -375,7 +391,7 @@ impl Store {
                 for sym in symbols {
                     sym_stmt
                         .execute(params![
-                            sym.path.to_str().unwrap_or(""),
+                            path_key(&sym.path),
                             sym.name.as_str(),
                             sym.qualified_name.as_str(),
                             sym.kind.label(),
@@ -399,7 +415,7 @@ impl Store {
                 for r in refs {
                     ref_stmt
                         .execute(params![
-                            r.src_path.to_str().unwrap_or(""),
+                            path_key(&r.src_path),
                             r.src_symbol_id as i64,
                             r.ident.as_str(),
                             r.dst_symbol_id.map(|v| v as i64),
@@ -415,7 +431,7 @@ impl Store {
 
     /// Delete all symbols (and cascaded refs) for a given file path.
     pub fn delete_symbols_for_path(&self, path: &Path) -> Result<(), Error> {
-        let path_str = path.to_str().unwrap_or("");
+        let path_str = path_key(path);
         let tx = self
             .conn
             .unchecked_transaction()
@@ -525,7 +541,7 @@ impl Store {
 
             for r in refs {
                 stmt.execute(params![
-                    r.src_path.to_str().unwrap_or(""),
+                    path_key(&r.src_path),
                     r.src_symbol_id as i64,
                     r.ident.as_str(),
                     r.dst_symbol_id.map(|v| v as i64),
@@ -569,7 +585,7 @@ impl Store {
 
     /// Get file content hash (returns None if file not indexed).
     pub fn get_file_hash(&self, path: &Path) -> Result<Option<[u8; 32]>, Error> {
-        let path_str = path.to_str().unwrap_or("");
+        let path_str = path_key(path);
         self.conn
             .query_row(
                 "SELECT content_hash FROM files WHERE path = ?1",
@@ -705,7 +721,7 @@ impl Store {
 
     /// List all symbols for a path.
     pub fn symbols_for_path(&self, path: &Path) -> Result<Vec<Symbol>, Error> {
-        let path_str = path.to_str().unwrap_or("");
+        let path_str = path_key(path);
         let mut stmt = self
             .conn
             .prepare_cached(

@@ -11,11 +11,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::store::{row_to_symbol, row_to_symbol_interned};
+use crate::store::{path_key, row_to_symbol, row_to_symbol_interned};
 
 /// List all symbols for a path, ordered by byte offset.
 pub fn symbols_for_path(conn: &Connection, path: &Path) -> Result<Vec<Symbol>, Error> {
-    let path_str = path.to_str().unwrap_or("");
+    let path_str = path_key(path);
     let mut stmt = conn
         .prepare_cached(
             "SELECT s.id, s.path, s.name, s.qualified_name, s.kind, s.signature,
@@ -175,7 +175,7 @@ pub fn refs_for_ident(conn: &Connection, ident: &str) -> Result<Vec<Ref>, Error>
 
 /// Get file content hash (returns None if file not indexed).
 pub fn get_file_hash(conn: &Connection, path: &Path) -> Result<Option<[u8; 32]>, Error> {
-    let path_str = path.to_str().unwrap_or("");
+    let path_str = path_key(path);
     conn.query_row(
         "SELECT content_hash FROM files WHERE path = ?1",
         params![path_str],
