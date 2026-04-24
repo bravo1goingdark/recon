@@ -119,8 +119,13 @@ tokio-util = { version = "0.7.18", features = ["codec"] }
 # Allocator
 mimalloc = "0.1.49"
 
-# License validation (lightweight sync HTTP client)
-ureq = { version = "3.3.0", features = ["json"] }
+# License validation (lightweight sync HTTP client).
+# rustls instead of native-tls: ureq's default TLS pulls openssl-sys,
+# which doesn't cross-compile to aarch64-unknown-linux-gnu without an
+# arm64 libssl sysroot on the CI host. rustls is pure-Rust (ring crypto
+# backend), no C deps, same HTTPS behavior, and cross-compiles to every
+# target in release.yml's matrix without extra apt packages.
+ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
 
 # HMAC-SHA256 for license signing (RustCrypto)
 hmac = "0.12"
