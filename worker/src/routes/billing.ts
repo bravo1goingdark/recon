@@ -124,6 +124,23 @@ billingRoutes.post(
     // from Cloudflare's IP-geolocation header: IN → INR (so UPI AutoPay +
     // Net Banking eNACH work natively), everywhere else → USD. Tests and
     // local dev lack the cf.country field, so fall back to USD there too.
+    //
+    // PPP guard: INR prices are intentionally lower (purchasing-power
+    // parity for India). A non-Indian user claiming `currency: "INR"` in
+    // the POST body would effectively pay ~75% less than intended. Block
+    // that explicitly — the UI already hides the INR toggle for non-IN
+    // visitors, so this is the server-side backstop for curl/scripted
+    // requests. Missing `cf` (tests, local dev) is treated as non-IN.
+    const callerCountry = getCfCountry(c.req.raw);
+    if (parsed.value.currency === "INR" && callerCountry !== "IN") {
+      return c.json(
+        {
+          error:
+            "INR pricing is only available to subscribers in India. Please subscribe in USD.",
+        },
+        403,
+      );
+    }
     const currency: Currency =
       parsed.value.currency ?? resolveDefaultCurrency(c.req.raw);
 
@@ -673,12 +690,20 @@ async function ensurePlanForTier(
  * we default to USD (matches the pricing page's non-IN default).
  */
 function resolveDefaultCurrency(req: Request): Currency {
+  return getCfCountry(req) === "IN" ? "INR" : "USD";
+}
+
+/**
+ * Read Cloudflare's IP-geolocated country code off the request. Returns
+ * undefined when the `cf` object is absent (tests, local dev, non-CF
+ * proxies) — callers must treat undefined as "not India" for PPP gating
+ * so a missing header can't be used to claim INR eligibility.
+ */
+function getCfCountry(req: Request): string | undefined {
   // Cloudflare attaches a non-standard `cf` object to incoming Requests at
   // runtime. It's typed minimally by workers-types as `CfProperties`; we
   // reach for `country` specifically.
-  const cf = (req as unknown as { cf?: { country?: string } }).cf;
-  if (cf?.country === "IN") return "INR";
-  return "USD";
+  return (req as unknown as { cf?: { country?: string } }).cf?.country;
 }
 
 function isoFromUnix(unixSeconds: number): string {

@@ -30,7 +30,6 @@ async function loadDashboard() {
     var data = await keysResp.json();
     keys = data.keys || [];
     renderKeys(keys);
-    renderStats(user, keys);
     renderQuickstart(keys);
     toggleKeyButtons(keys);
   }
@@ -55,14 +54,6 @@ function renderProfile(user) {
     '</h1></div><span class="tier-badge" style="margin-left:auto">' +
     escapeHtml(user.tier) +
     "</span></div>";
-}
-
-function renderStats(user, keys) {
-  var tierEl = document.getElementById("stat-tier");
-  var keysEl = document.getElementById("stat-keys");
-  if (tierEl) tierEl.innerHTML = escapeHtml(user.tier);
-  var active = keys.filter(function (k) { return !k.revoked; }).length;
-  if (keysEl) keysEl.innerHTML = active + ' <span class="unit">active</span>';
 }
 
 // localStorage key for the dismiss-quickstart flag. Once set, the
