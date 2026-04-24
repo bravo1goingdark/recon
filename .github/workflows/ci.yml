@@ -12,10 +12,22 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Fast per-PR gates — all on self-hosted Linux runners registered to this
+# repo only. Heavy matrix (macOS, Windows, embed) stays on GitHub-hosted
+# runners in release.yml and cross-platform.yml.
+#
+# Deliberately no GitHub-cloud cache actions (Swatinem/rust-cache,
+# actions/setup-node's `cache:` option). The self-hosted runners have
+# per-runner persistent disks with their own CARGO_HOME, RUSTUP_HOME,
+# and node_modules — re-using GitHub's cloud cache on top wastes
+# bandwidth and, for self-hosted specifically, fails auth intermittently
+# against the Actions cache service ("Server failed to authenticate the
+# request"), which hangs the setup-node action for 15+ minutes at a
+# stretch. Local disk caches are both faster and more reliable here.
 jobs:
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -25,13 +37,12 @@ jobs:
 
   check:
     name: Check + Clippy
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
       # Exclude recon-embed (lancedb pulls 2000+ crates, fills CI disk).
       - run: cargo clippy --workspace --exclude recon-embed --all-targets -- -D warnings
 
@@ -41,12 +52,11 @@ jobs:
   # schedule so PRs don't wait 40+ min for a Windows runner or on a
   # flaky pyke.io CDN download of ort-sys prebuilts.
   test:
-    name: Test ubuntu-latest
-    runs-on: ubuntu-latest
+    name: Test self-hosted
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       # Exclude recon-embed — covered in cross-platform.yml where the
       # flaky ort-sys download can be retried without blocking PRs.
       - run: cargo test --workspace --exclude recon-embed
@@ -56,33 +66,41 @@ jobs:
   # a failing test does.
   audit:
     name: cargo-audit (RUSTSEC)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # `cargo install --locked` is idempotent on the self-hosted runner;
+      # after the first run the binary is cached under the per-runner
+      # CARGO_HOME and subsequent jobs finish in seconds.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       # RUSTSEC-2024-0436: paste 1.0.15 unmaintained — tracked in deny.toml
       # with the same rationale; no drop-in replacement in our dep graph yet.
       - run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
 
+  # cargo-deny directly — the EmbarkStudios/cargo-deny-action@v2 runs
+  # inside a Docker container, and our self-hosted runner's user isn't in
+  # the docker group. Installing cargo-deny as a regular binary is
+  # equivalent and avoids the sudo dance of adding the runner to docker.
   deny:
     name: cargo-deny (licenses, bans, sources)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      # Flag goes BEFORE the subcommand — `cargo deny check --all-features`
+      # fails with "unexpected argument" because `--all-features` applies to
+      # the top-level `deny` invocation, not to `check`.
+      - run: cargo deny --all-features check
 
   # Worker test suite (Vitest + @cloudflare/vitest-pool-workers).
   # Typecheck + unit tests on every PR.
   worker:
     name: Worker typecheck + tests
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     defaults:
       run:
         working-directory: worker
@@ -91,8 +109,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
+          # NOTE: deliberately no `cache: npm` here — it routes through
+          # GitHub's Actions cache service which fails auth on this
+          # self-hosted runner and hangs the step indefinitely. npm's
+          # own content cache lives on the persistent runner disk
+          # (~/.npm) and survives between jobs just fine.
       - run: npm ci
       - run: npm run typecheck
       - run: npm test -- --reporter=verbose
