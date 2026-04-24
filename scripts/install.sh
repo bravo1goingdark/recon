@@ -106,7 +106,7 @@ if [ "${SKIP_COSIGN:-}" != "1" ] && command -v cosign >/dev/null 2>&1; then
     if cosign verify-blob \
         --certificate "$TMPDIR/SHA256SUMS.txt.pem" \
         --signature "$TMPDIR/SHA256SUMS.txt.sig" \
-        --certificate-identity-regexp '^https://github\.com/bravo1goingdark/intel/\.github/workflows/release\.yml@.*' \
+        --certificate-identity-regexp '^https://github\.com/bravo1goingdark/recon/\.github/workflows/release\.yml@.*' \
         --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
         "$TMPDIR/SHA256SUMS.txt" >/dev/null 2>&1; then
       echo "  ok: cosign signature valid (GitHub Actions OIDC)"
