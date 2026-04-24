@@ -131,6 +131,20 @@ ureq = { version = "3.3.0", default-features = false, features = ["json", "rustl
 hmac = "0.12"
 sha2 = "0.10"
 
+# Self-update (`recon update`): fetch R2 release artifact, verify SHA256,
+# extract, replace the running binary in place.
+# - flate2+tar: Unix .tar.gz archives (default-features = false on flate2
+#   selects rust_backend over the default zlib C dep, keeping the graph
+#   openssl-free across every cross target).
+# - zip: Windows .zip archives. Minimal features: just deflate, no bzip2
+#   or zstd which we don't emit in the release pipeline.
+# - semver: string-compare on versions like "v0.1.10" < "v0.1.2" is
+#   wrong; parse properly.
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+semver = "1"
+
 # Misc
 tempfile = "3.27.0"
 filetime = "0.2"

@@ -30,6 +30,16 @@ hyper-util = { workspace = true }
 tower-service = { workspace = true }
 tokio-util = { workspace = true }
 
+# `recon update` self-upgrade
+ureq = { workspace = true }
+sha2 = { workspace = true }
+semver = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+zip = { workspace = true }
+
 [features]
 default = []
 embed = ["recon-server/embed"]
