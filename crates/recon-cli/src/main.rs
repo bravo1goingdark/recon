@@ -2,6 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod pretty;
+mod update;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -227,6 +228,24 @@ enum Command {
     Purge,
     /// Show version
     Version,
+    /// Upgrade recon to the latest published release.
+    ///
+    /// Fetches latest.json from the distribution origin, downloads the
+    /// matching target tarball, verifies the SHA256 against the
+    /// published manifest, and replaces the running binary in place.
+    /// Unix does this atomically via rename-over; Windows moves the
+    /// current .exe to recon.exe.old first (the OS won't let us
+    /// unlink a running executable).
+    Update {
+        /// Only report whether an update is available; don't download.
+        #[arg(long)]
+        check: bool,
+        /// Reinstall even if already on the latest version.
+        /// Useful when an HMAC secret rotated and you need a fresh
+        /// binary baked with the new key.
+        #[arg(long)]
+        force: bool,
+    },
     /// Raw tool query (JSON args)
     Query {
         /// Tool name (e.g. code_find_symbol)
@@ -1081,6 +1100,7 @@ async fn main() -> Result<()> {
             println!("recon {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        Command::Update { check, force } => update::run(check, force),
     }
 }
 
