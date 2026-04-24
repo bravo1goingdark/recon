@@ -191,6 +191,80 @@ describe("POST /v1/dashboard/keys — expires_at inheritance from active subscri
     return { sessionToken };
   }
 
+  it("blocks generating a second key while one is active (409)", async () => {
+    // Seed user with an existing non-revoked key, then attempt to generate
+    // a second one. Worker must return 409 with the existing-key metadata
+    // so the UI can tell the user to rotate instead.
+    const { sessionToken } = await seedUserWithKey({
+      userId: "user_stacking",
+      username: "stacker",
+      keyId: "key_stacker_1",
+      keyValue: "sk-recon-stacker1key",
+    });
+
+    const res = await getJson("/v1/dashboard/keys", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "second" }),
+    });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      existing_key_id: "key_stacker_1",
+    });
+
+    // The existing key is still the only row — no silent stacking.
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const count = await db
+      .prepare(
+        "SELECT COUNT(*) as n FROM api_keys WHERE user_id = ? AND revoked_at IS NULL",
+      )
+      .bind("user_stacking")
+      .first<{ n: number }>();
+    expect(count?.n).toBe(1);
+  });
+
+  it("allows generating a new key after the previous one is revoked (rotation)", async () => {
+    // Rotation path: DELETE the existing key, then POST to get a fresh one.
+    // The UI's "Rotate key" button runs these two in sequence.
+    const { sessionToken } = await seedUserWithKey({
+      userId: "user_rotate",
+      username: "rotator",
+      keyId: "key_rot_1",
+      keyValue: "sk-recon-rotate1key",
+    });
+    const headers = {
+      Authorization: `Bearer ${sessionToken}`,
+      "Content-Type": "application/json",
+    };
+
+    // First generate attempt → 409 (existing key).
+    const blocked = await getJson("/v1/dashboard/keys", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Default" }),
+    });
+    expect(blocked.status).toBe(409);
+
+    // Revoke.
+    const del = await getJson("/v1/dashboard/keys/key_rot_1", {
+      method: "DELETE",
+      headers,
+    });
+    expect(del.status).toBe(200);
+
+    // Second generate → success.
+    const fresh = await getJson("/v1/dashboard/keys", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Default" }),
+    });
+    expect(fresh.status).toBe(200);
+    expect(fresh.body).toMatchObject({ tier: "Pro" });
+  });
+
   it("Free user with no subscription gets a key with expires_at = null", async () => {
     const { sessionToken } = await seedUserSession({
       userId: "user_free_new",

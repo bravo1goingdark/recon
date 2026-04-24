@@ -32,6 +32,7 @@ async function loadDashboard() {
     renderKeys(keys);
     renderStats(user, keys);
     renderQuickstart(keys);
+    toggleKeyButtons(keys);
   }
 
   var billingResp = await authFetch("/v1/billing/portal");
@@ -64,10 +65,33 @@ function renderStats(user, keys) {
   if (keysEl) keysEl.innerHTML = active + ' <span class="unit">active</span>';
 }
 
+// localStorage key for the dismiss-quickstart flag. Once set, the
+// "Get started" panel stays hidden across reloads so returning users
+// aren't re-onboarded every time they open the dashboard.
+var QUICKSTART_DISMISSED_KEY = "recon.quickstart.dismissed";
+
+function isQuickstartDismissed() {
+  try {
+    return localStorage.getItem(QUICKSTART_DISMISSED_KEY) === "1";
+  } catch (_) {
+    return false;
+  }
+}
+
+function dismissQuickstart() {
+  try { localStorage.setItem(QUICKSTART_DISMISSED_KEY, "1"); } catch (_) {}
+  var el = document.getElementById("quickstart");
+  if (el) el.style.display = "none";
+}
+
 function renderQuickstart(keys) {
   var el = document.getElementById("quickstart");
   var keyEl = document.getElementById("qs-key");
   if (!el) return;
+  if (isQuickstartDismissed()) {
+    el.style.display = "none";
+    return;
+  }
   var active = keys.filter(function (k) { return !k.revoked; });
   if (active.length > 0 && keyEl) {
     // Show prefix with ellipsis — full key was shown once at generation time
@@ -168,7 +192,9 @@ function renderBilling(billing) {
   // Wire the cancel button if it was rendered this pass.
   var cancelBtn = document.getElementById("cancel-sub-btn");
   if (cancelBtn) {
-    cancelBtn.addEventListener("click", cancelSubscription);
+    // Opens the modal; the modal's confirm button actually runs the
+    // cancel call (wired in wireControls).
+    cancelBtn.addEventListener("click", openCancelSubModal);
   }
 }
 
@@ -187,15 +213,24 @@ function formatDate(value) {
   }
 }
 
+// ─── Cancel subscription ─────────────────────────────────────────────────
+// openCancelSubModal pops the in-page modal; the confirm button (wired in
+// wireControls) runs the actual cancel call. Browser confirm() was the
+// previous UX — jarring, not themable, and shows the URL bar in some
+// browsers which looks unprofessional.
+
+function openCancelSubModal() {
+  var modal = document.getElementById("cancel-sub-modal");
+  if (modal) modal.style.display = "flex";
+}
+
+function closeCancelSubModal() {
+  var modal = document.getElementById("cancel-sub-modal");
+  if (modal) modal.style.display = "none";
+}
+
 async function cancelSubscription() {
-  if (!confirm(
-    "Cancel your subscription?\n\n" +
-    "You'll keep full access until the end of the current billing period. " +
-    "After that, your account drops to the Free tier.\n\n" +
-    "You can resubscribe any time.",
-  )) {
-    return;
-  }
+  closeCancelSubModal();
 
   var btn = document.getElementById("cancel-sub-btn");
   if (btn) {
@@ -216,11 +251,40 @@ async function cancelSubscription() {
     return;
   }
 
-  // Refresh the dashboard to show the new "Cancelled — access until" state.
   loadDashboard();
 }
 
-async function generateKey() {
+// ─── API key lifecycle ──────────────────────────────────────────────────
+// One active key per account. The worker rejects a second POST /keys with
+// 409 (see dashboardRoutes.post("/keys", ...) in worker/src/routes/dashboard.ts).
+// Here we keep the UI's Generate / Rotate buttons in sync with key state
+// so the user never clicks Generate to hit a 409.
+
+// Holds the id of the key targeted by the revoke-key modal. Set when the
+// user clicks a row's Revoke button; read by revokeKeyConfirmed.
+// Null → modal wasn't opened via a row, so it's the "Rotate" path instead.
+var pendingRevokeKeyId = null;
+// True when the Rotate button was clicked: after revoke succeeds, we
+// automatically call generate() so the user gets a replacement key.
+var pendingRotate = false;
+
+function toggleKeyButtons(keys) {
+  var active = (keys || []).filter(function (k) { return !k.revoked; });
+  var gen = document.getElementById("generate-key-btn");
+  var rot = document.getElementById("rotate-key-btn");
+  var hint = document.getElementById("key-hint");
+  if (active.length === 0) {
+    if (gen) gen.style.display = "";
+    if (rot) rot.style.display = "none";
+    if (hint) hint.style.display = "none";
+  } else {
+    if (gen) gen.style.display = "none";
+    if (rot) rot.style.display = "";
+    if (hint) hint.style.display = "";
+  }
+}
+
+async function doGenerateKey() {
   var resp = await authFetch("/v1/dashboard/keys", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -228,7 +292,10 @@ async function generateKey() {
   });
 
   if (!resp.ok) {
-    alert("Failed to generate key");
+    var err = await resp.json().catch(function () {
+      return { error: "Failed to generate key" };
+    });
+    alert(err.error || "Failed to generate key");
     return;
   }
 
@@ -237,17 +304,83 @@ async function generateKey() {
   loadDashboard();
 }
 
-async function revokeKey(id) {
-  if (!confirm("Revoke this API key? This cannot be undone.")) return;
+function openRevokeKeyModal(keyId, options) {
+  pendingRevokeKeyId = keyId;
+  pendingRotate = !!(options && options.rotate);
+  var titleEl = document.getElementById("revoke-key-title");
+  var bodyEl = document.getElementById("revoke-key-body");
+  var confirmBtn = document.getElementById("revoke-key-confirm-btn");
+  if (pendingRotate) {
+    if (titleEl) titleEl.textContent = "Rotate API key?";
+    if (bodyEl) bodyEl.textContent =
+      "We'll revoke your current key and immediately issue a replacement. " +
+      "Any running recon serve using the old key loses access within 15 minutes.";
+    if (confirmBtn) confirmBtn.textContent = "Rotate now";
+  } else {
+    if (titleEl) titleEl.textContent = "Revoke API key?";
+    if (bodyEl) bodyEl.textContent =
+      "Any running recon serve using this key will lose access within 15 minutes, " +
+      "and the key can't be used for new logins. This cannot be undone.";
+    if (confirmBtn) confirmBtn.textContent = "Revoke";
+  }
+  var modal = document.getElementById("revoke-key-modal");
+  if (modal) modal.style.display = "flex";
+}
+
+function closeRevokeKeyModal() {
+  pendingRevokeKeyId = null;
+  pendingRotate = false;
+  var modal = document.getElementById("revoke-key-modal");
+  if (modal) modal.style.display = "none";
+}
+
+async function revokeKeyConfirmed() {
+  var id = pendingRevokeKeyId;
+  var rotate = pendingRotate;
+  closeRevokeKeyModal();
+  if (!id) return;
+
   var resp = await authFetch("/v1/dashboard/keys/" + encodeURIComponent(id), {
     method: "DELETE",
   });
   if (!resp.ok && resp.status !== 404) {
-    // 404 can happen if the row was already gone — treat as success.
+    // 404 → row already gone; treat as success.
     alert("Failed to revoke key");
     return;
   }
+
+  if (rotate) {
+    // Generate the replacement immediately. If this fails (worker
+    // transient), loadDashboard will render the zero-keys state and
+    // the user can click Generate manually.
+    await doGenerateKey();
+    return;
+  }
   loadDashboard();
+}
+
+// Called by the row-level Revoke button (event delegation in wireControls).
+function openRevokeForRowKey(id) {
+  openRevokeKeyModal(id, { rotate: false });
+}
+
+// Called by the "Rotate key" button below the keys list.
+async function rotateKey() {
+  // Need to find the (one) active key's id to pass into the modal.
+  var resp = await authFetch("/v1/dashboard/keys");
+  if (!resp.ok) {
+    alert("Failed to load key state");
+    return;
+  }
+  var data = await resp.json();
+  var active = (data.keys || []).filter(function (k) { return !k.revoked; });
+  if (active.length === 0) {
+    // Edge case: somebody deleted the row via another tab before the
+    // click. Just fall through to generating a fresh one.
+    doGenerateKey();
+    return;
+  }
+  openRevokeKeyModal(active[0].id, { rotate: true });
 }
 
 function showKeyModal(key) {
@@ -345,10 +478,57 @@ async function deleteAccount() {
   }
 }
 
-function wireControls() {
-  var gen = document.getElementById("generate-key-btn");
-  if (gen) gen.addEventListener("click", generateKey);
+// ─── Tabs ────────────────────────────────────────────────────────────────
+// Three round-icon tabs at the top of the dashboard (Keys / Billing /
+// Danger). One-panel-visible-at-a-time so the dashboard fits one screen
+// instead of the old long vertical stack. Uses native `hidden` attribute
+// on the panels; the active button gets a clay border + `.active` class.
 
+function activateTab(name) {
+  document.querySelectorAll(".tab-icon").forEach(function (btn) {
+    var isActive = btn.getAttribute("data-tab") === name;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  document.querySelectorAll(".tab-panel").forEach(function (panel) {
+    panel.hidden = panel.id !== "panel-" + name;
+  });
+}
+
+function wireTabs() {
+  document.querySelectorAll(".tab-icon").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var name = btn.getAttribute("data-tab");
+      if (name) activateTab(name);
+    });
+  });
+}
+
+function wireControls() {
+  wireTabs();
+
+  // API key buttons. Generate is visible when the user has zero active
+  // keys; Rotate replaces it when a key exists. toggleKeyButtons (called
+  // from loadDashboard) manages the display: toggle.
+  var gen = document.getElementById("generate-key-btn");
+  if (gen) gen.addEventListener("click", doGenerateKey);
+
+  var rot = document.getElementById("rotate-key-btn");
+  if (rot) rot.addEventListener("click", rotateKey);
+
+  // Revoke-key modal
+  var revConfirm = document.getElementById("revoke-key-confirm-btn");
+  if (revConfirm) revConfirm.addEventListener("click", revokeKeyConfirmed);
+  var revCancel = document.getElementById("revoke-key-cancel-btn");
+  if (revCancel) revCancel.addEventListener("click", closeRevokeKeyModal);
+
+  // Cancel-subscription modal
+  var cancelConfirm = document.getElementById("cancel-sub-confirm-btn");
+  if (cancelConfirm) cancelConfirm.addEventListener("click", cancelSubscription);
+  var cancelCancel = document.getElementById("cancel-sub-cancel-btn");
+  if (cancelCancel) cancelCancel.addEventListener("click", closeCancelSubModal);
+
+  // Delete-account modal
   var delBtn = document.getElementById("delete-account-btn");
   if (delBtn) delBtn.addEventListener("click", openDeleteAccountModal);
 
@@ -388,16 +568,21 @@ function wireControls() {
   var copyLoginBtn = document.getElementById("copy-login-btn");
   if (copyLoginBtn) copyLoginBtn.addEventListener("click", copyLoginCmd);
 
+  // Dismiss "Get started" panel. Persists via localStorage so the panel
+  // doesn't reappear on every reload after the user has onboarded.
+  var qsClose = document.getElementById("quickstart-close");
+  if (qsClose) qsClose.addEventListener("click", dismissQuickstart);
+
   // Event delegation: one listener for every Revoke button rendered
-  // into #keys by renderKeys(), including ones added on subsequent
-  // reloads after generateKey().
+  // into #keys by renderKeys(). Opens the revoke-key modal instead of
+  // the old browser confirm() dialog.
   var keysContainer = document.getElementById("keys");
   if (keysContainer) {
     keysContainer.addEventListener("click", function (e) {
       var btn = e.target.closest("[data-action='revoke-key']");
       if (!btn) return;
       var id = btn.getAttribute("data-key-id");
-      if (id) revokeKey(id);
+      if (id) openRevokeForRowKey(id);
     });
   }
 }

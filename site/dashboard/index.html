@@ -32,14 +32,51 @@
   .billing-row{display:flex;align-items:center;gap:20px;padding:16px 0;flex-wrap:wrap}
   .billing-limits{font-family:var(--mono);font-size:11px;color:var(--ink-2);display:flex;gap:16px;flex-wrap:wrap}
 
-  .quickstart{border:1px solid var(--rule);border-radius:4px;padding:24px;margin-bottom:32px;background:var(--paper-2)}
+  .quickstart{position:relative;border:1px solid var(--rule);border-radius:4px;padding:24px;margin-bottom:32px;background:var(--paper-2)}
   .quickstart h3{font-size:14px;font-weight:600;margin-bottom:8px}
   .quickstart pre{font-family:var(--mono);font-size:11px;line-height:1.7;color:var(--ink-2);margin:0;white-space:pre-wrap}
   .quickstart pre strong{color:var(--ink);font-weight:500}
   .quickstart .note{font-size:11px;color:var(--ink-3);margin-top:10px}
+  .quickstart .close{
+    position:absolute;top:10px;right:10px;
+    width:26px;height:26px;border-radius:50%;
+    border:1px solid transparent;background:transparent;
+    display:grid;place-items:center;cursor:pointer;
+    color:var(--ink-3);font-size:16px;line-height:1;padding:0;
+    transition:border-color .15s ease, color .15s ease, background .15s ease;
+  }
+  .quickstart .close:hover{border-color:var(--rule);color:var(--ink);background:var(--paper)}
 
   .actions{margin:16px 0}
   .empty{font-family:var(--mono);font-size:12px;color:var(--ink-3);padding:12px 0}
+
+  /* Round-icon tab nav. Three circular buttons collapse the old long
+     stack (Keys → Billing → Danger) into a one-screen layout. Only the
+     active panel renders; others are `hidden`. Left-aligned so the icons
+     sit in the upper-left of the content column rather than floating
+     centered over an empty canvas. */
+  .tab-nav{display:flex;justify-content:flex-start;gap:24px;margin:24px 0 24px}
+  .tab-group{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .tab-icon{
+    width:56px;height:56px;border-radius:50%;
+    border:1px solid var(--rule);background:var(--paper-2);
+    display:grid;place-items:center;cursor:pointer;
+    transition:border-color .15s ease, background .15s ease, transform .1s ease;
+    padding:0;
+  }
+  .tab-icon:hover{border-color:var(--ink-2)}
+  .tab-icon.active{border-color:var(--clay);background:var(--clay-soft,var(--paper-2))}
+  .tab-icon svg{width:22px;height:22px;stroke:var(--ink-2);fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .tab-icon.active svg{stroke:var(--clay)}
+  .tab-icon.danger.active{border-color:var(--clay);background:var(--paper)}
+  .tab-label{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+  .tab-group:has(.active) .tab-label{color:var(--ink-2)}
+  .tab-panel[hidden]{display:none}
+  @media (max-width:640px){
+    .tab-nav{gap:16px;margin:24px 0 20px}
+    .tab-icon{width:48px;height:48px}
+    .tab-icon svg{width:20px;height:20px}
+  }
 
   @media (max-width:640px){
     .page-header{margin:28px 0 24px}
@@ -96,10 +133,43 @@
     </div>
   </div>
 
-  <!-- Quickstart (shown only if user has keys) -->
-  <div class="quickstart" id="quickstart" style="display:none">
-    <h3>Get started</h3>
-    <pre><strong># 1. Install</strong>
+  <!-- Tabbed navigation: three round icon buttons. Keys is the default;
+       Billing holds the subscription state + cancel flow; Danger is the
+       account-delete. aria-label + title attrs carry the text name so
+       screen readers announce them correctly. -->
+  <nav class="tab-nav" role="tablist" aria-label="Dashboard sections">
+    <div class="tab-group">
+      <button type="button" role="tab" aria-selected="true" aria-controls="panel-keys"
+              class="tab-icon active" data-tab="keys" title="API Keys" aria-label="API Keys">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="4"/><path d="M12 12h10M18 12v4M22 12v3"/></svg>
+      </button>
+      <div class="tab-label">Keys</div>
+    </div>
+
+    <div class="tab-group">
+      <button type="button" role="tab" aria-selected="false" aria-controls="panel-billing"
+              class="tab-icon" data-tab="billing" title="Billing" aria-label="Billing">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="13" rx="2"/><line x1="2" y1="10.5" x2="22" y2="10.5"/><line x1="6" y1="15" x2="10" y2="15"/></svg>
+      </button>
+      <div class="tab-label">Billing</div>
+    </div>
+
+    <div class="tab-group">
+      <button type="button" role="tab" aria-selected="false" aria-controls="panel-danger"
+              class="tab-icon danger" data-tab="danger" title="Delete account" aria-label="Delete account">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+      </button>
+      <div class="tab-label">Danger</div>
+    </div>
+  </nav>
+
+  <!-- Panel: API Keys. Quickstart + key list + generate/rotate.
+       One active key per account (worker enforces 409). -->
+  <section class="tab-panel" id="panel-keys" role="tabpanel" aria-labelledby="tab-keys">
+    <div class="quickstart" id="quickstart" style="display:none">
+      <button type="button" id="quickstart-close" class="close" aria-label="Dismiss quickstart" title="Dismiss">×</button>
+      <h3>Get started</h3>
+      <pre><strong># 1. Install</strong>
 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
 <strong># 2. Authenticate (run once, stored globally)</strong>
@@ -108,36 +178,78 @@ recon login <span id="qs-key">sk-recon-...</span>
 <strong># 3. Index your project + wire up your IDE</strong>
 cd your-project
 recon init --mcp cc</pre>
-    <div class="note">Your code stays local. Only the key is validated against the server.</div>
-  </div>
+      <div class="note">Your code stays local. Only the key is validated against the server.</div>
+    </div>
 
-  <!-- API Keys -->
-  <div class="section-label">API Keys</div>
-  <div id="keys"><p class="empty">loading...</p></div>
-  <div class="actions">
-    <button id="generate-key-btn" class="btn primary sm">Generate new key →</button>
-  </div>
+    <div id="keys"><p class="empty">loading...</p></div>
+    <div class="actions">
+      <button id="generate-key-btn" class="btn primary sm">Generate new key →</button>
+      <button id="rotate-key-btn" class="btn ghost sm" style="display:none">Rotate key →</button>
+      <span id="key-hint" style="font-size:12px;color:var(--ink-3);margin-left:12px;display:none">One active key per account. Rotating revokes the current key immediately.</span>
+    </div>
+  </section>
 
-  <!-- Billing -->
-  <div class="section-label">Billing</div>
-  <div id="billing"><p class="empty">loading...</p></div>
+  <!-- Panel: Billing. Tier + limits + next-billing / cancel-access-until,
+       rendered by dashboard.js renderBilling(). -->
+  <section class="tab-panel" id="panel-billing" role="tabpanel" aria-labelledby="tab-billing" hidden>
+    <div id="billing"><p class="empty">loading...</p></div>
+  </section>
 
-  <!-- Danger zone: account delete. Separated from billing so no accidental
-       click path from "cancel subscription" to "delete account". -->
-  <div class="section-label" style="margin-top:48px;color:var(--clay)">Danger zone</div>
-  <div style="border:1px solid var(--clay);border-radius:4px;padding:20px 24px">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
-      <div>
-        <div style="font-weight:500">Delete account</div>
-        <div style="font-size:12px;color:var(--ink-3);margin-top:4px;max-width:520px;line-height:1.5">
-          Permanently removes your user record, all API keys, sessions, payments, and subscription history.
-          Any active Razorpay subscription is cancelled immediately. This cannot be undone.
+  <!-- Panel: Danger zone. Account delete is the only thing here — kept
+       isolated so no accidental click path from billing/cancel bleeds
+       into "delete everything". -->
+  <section class="tab-panel" id="panel-danger" role="tabpanel" aria-labelledby="tab-danger" hidden>
+    <div style="border:1px solid var(--clay);border-radius:4px;padding:20px 24px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div>
+          <div style="font-weight:500">Delete account</div>
+          <div style="font-size:12px;color:var(--ink-3);margin-top:4px;max-width:520px;line-height:1.5">
+            Permanently removes your user record, all API keys, sessions, payments, and subscription history.
+            Any active Razorpay subscription is cancelled immediately. This cannot be undone.
+          </div>
         </div>
+        <button id="delete-account-btn" class="btn ghost sm" style="border-color:var(--clay);color:var(--clay)">Delete my account</button>
       </div>
-      <button id="delete-account-btn" class="btn ghost sm" style="border-color:var(--clay);color:var(--clay)">Delete my account</button>
+    </div>
+  </section>
+
+</div>
+
+<!-- Revoke / rotate key modal. Single modal serves both "revoke this one
+     row from the list" and "Rotate key" (which revokes + immediately
+     generates the replacement). The data-action attribute on the
+     triggering button tells dashboard.js which path to take. -->
+<div class="modal-overlay" id="revoke-key-modal">
+  <div class="modal">
+    <h3 id="revoke-key-title">Revoke API key?</h3>
+    <p id="revoke-key-body">
+      Any running <code>recon serve</code> using this key will lose access within 15 minutes, and
+      the key can't be used for new logins. This cannot be undone.
+    </p>
+    <p style="font-size:12px;color:var(--ink-3)">Rotating will generate a replacement key immediately after revocation.</p>
+    <div class="modal-actions">
+      <button id="revoke-key-confirm-btn" class="btn primary sm">Revoke</button>
+      <button id="revoke-key-cancel-btn" class="btn ghost sm">Keep key</button>
     </div>
   </div>
+</div>
 
+<!-- Cancel subscription modal. Honor-until-period-end is explicit in the
+     body copy so the user isn't surprised by continued charges showing
+     up in an invoice they didn't expect. -->
+<div class="modal-overlay" id="cancel-sub-modal">
+  <div class="modal">
+    <h3>Cancel subscription?</h3>
+    <p>
+      You'll keep full access until the end of the current billing period, which is shown on your dashboard.
+      After that, your account drops to the Free tier.
+    </p>
+    <p style="font-size:12px;color:var(--ink-3)">You can resubscribe any time — your existing indexes stay on disk.</p>
+    <div class="modal-actions">
+      <button id="cancel-sub-confirm-btn" class="btn primary sm">Cancel subscription</button>
+      <button id="cancel-sub-cancel-btn" class="btn ghost sm">Keep subscription</button>
+    </div>
+  </div>
 </div>
 
 <!-- Account-delete confirmation modal. Requires the user to type their
