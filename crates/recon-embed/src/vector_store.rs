@@ -105,13 +105,31 @@ impl VectorStore {
 ///
 /// Idempotent — SQLite deduplicates registrations of the same entry point.
 /// Called by both [`VectorStore::open`] and [`crate::VecReadPool::new`].
-#[allow(clippy::missing_transmute_annotations)]
+///
+/// Why the transmute: the C prototype of `sqlite3_vec_init` is
+///   `int sqlite3_vec_init(sqlite3*, char**, const sqlite3_api_routines*)`
+/// but the upstream `sqlite-vec` crate declares it narrowly as
+/// `pub fn sqlite3_vec_init()`. We need to hand `sqlite3_auto_extension`
+/// a pointer with the full 3-argument signature it expects, so we bridge
+/// through an explicitly named `InitFn` alias. This keeps both ends of
+/// the transmute type-checked at compile time — if either upstream
+/// signature drifts, the build breaks instead of silently producing UB.
 pub(crate) fn register_sqlite_vec() {
-    // SAFETY: sqlite3_vec_init is a valid SQLite extension entry point.
+    type InitFn = unsafe extern "C" fn(
+        db: *mut rusqlite::ffi::sqlite3,
+        pz_err_msg: *mut *mut std::os::raw::c_char,
+        api: *const rusqlite::ffi::sqlite3_api_routines,
+    ) -> std::os::raw::c_int;
+
+    // SAFETY: both source and target are `unsafe extern "C" fn` pointers of
+    // equal size (one native pointer). The target signature matches the
+    // actual C ABI of sqlite3_vec_init per its header; the narrow Rust
+    // declaration in the sqlite-vec crate is the only reason the transmute
+    // is needed at all.
     unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
+        let init: InitFn =
+            std::mem::transmute::<unsafe extern "C" fn(), InitFn>(sqlite_vec::sqlite3_vec_init);
+        rusqlite::ffi::sqlite3_auto_extension(Some(init));
     }
 }
 

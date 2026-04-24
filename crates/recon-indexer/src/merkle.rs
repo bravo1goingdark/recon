@@ -7,6 +7,7 @@
 
 use recon_core::error::Error;
 use std::collections::BTreeMap;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// Entry in a Merkle snapshot: content hash + file mtime.
@@ -102,9 +103,16 @@ impl MerkleSnapshot {
     }
 
     /// Load snapshot from a JSON file.
+    ///
+    /// Streams the file through a BufReader → serde_json parser. On a
+    /// 50K-file repo the snapshot can reach 7–10 MB; `read_to_string`
+    /// would allocate the whole buffer AND run UTF-8 validation over it
+    /// before parsing could start. CLAUDE.md: no `read_to_string` on
+    /// potentially large files.
     pub fn load(path: &Path) -> Result<Self, Error> {
-        let json = std::fs::read_to_string(path)?;
-        let serializable: BTreeMap<String, (String, i64)> = serde_json::from_str(&json)
+        let file = std::fs::File::open(path)?;
+        let reader = BufReader::new(file);
+        let serializable: BTreeMap<String, (String, i64)> = serde_json::from_reader(reader)
             .map_err(|e| Error::Storage(format!("deserialize merkle: {e}")))?;
 
         let mut entries = BTreeMap::new();

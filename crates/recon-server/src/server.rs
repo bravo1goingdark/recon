@@ -394,6 +394,30 @@ impl ReconServer {
         Ok(())
     }
 
+    /// Run a Tantivy search on a blocking thread pool.
+    ///
+    /// `TantivyBackend::search` is `&self` and lock-free internally, but
+    /// the body is CPU-bound (query parser + top-k collector) and can take
+    /// 5–20 ms on a 500K-LOC index. CLAUDE.md: *"tantivy calls always need
+    /// [spawn_blocking]"* — without it, one search stalls every other
+    /// tokio task co-scheduled on the same worker thread.
+    ///
+    /// Errors from Tantivy are swallowed into an empty result (same UX as
+    /// the previous inline `.unwrap_or_default()` chain) because a failed
+    /// BM25 index pass is a tier fallback, not a user-visible error.
+    async fn tantivy_search(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> Vec<recon_search::tantivy_backend::StructuredHit> {
+        let tantivy = self.tantivy.clone();
+        tokio::task::spawn_blocking(move || tantivy.search(&query, limit))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+    }
+
     /// Install / swap the active license.
     ///
     /// Used by `Command::Serve` at startup (after `validate_license_or_die`)
@@ -1292,9 +1316,11 @@ impl ReconServer {
             .find_symbols_exact(&params.0.name, 20)
             .unwrap_or_default();
 
-        // Tier 1: Tantivy BM25 structured search (Tantivy is already lock-free)
+        // Tier 1: Tantivy BM25 structured search. Lock-free ≠ non-blocking —
+        // the query parser + top-k collector is CPU-bound, so we offload
+        // via `tantivy_search` so the tokio worker isn't held.
         if results.is_empty() {
-            let hits = self.tantivy.search(&params.0.name, 20).unwrap_or_default();
+            let hits = self.tantivy_search(params.0.name.clone(), 20).await;
             for hit in &hits {
                 if let Some(sym) = self
                     .read_pool
@@ -1494,7 +1520,7 @@ impl ReconServer {
 
         if params.0.mode == "hybrid" {
             // RRF fusion: Tantivy BM25 results + text grep results
-            let tantivy_hits = self.tantivy.search(&params.0.query, 20).unwrap_or_default();
+            let tantivy_hits = self.tantivy_search(params.0.query.clone(), 20).await;
             let q = TextQuery {
                 pattern: params.0.query.clone(),
                 is_regex: false,
@@ -1571,7 +1597,7 @@ impl ReconServer {
         }
 
         // Exact mode: try Tantivy first (sub-ms), fall back to grep only if empty
-        let tantivy_hits = self.tantivy.search(&params.0.query, 30).unwrap_or_default();
+        let tantivy_hits = self.tantivy_search(params.0.query.clone(), 30).await;
         if !tantivy_hits.is_empty() {
             let entries: Vec<serde_json::Value> = tantivy_hits
                 .iter()
@@ -1715,14 +1741,28 @@ impl ReconServer {
             vec![]
         };
 
-        let ranked = pagerank::pagerank(
-            &all_symbols,
-            &all_refs,
-            &focus_indices,
-            0.85,
-            pagerank::DEFAULT_MAX_ITERATIONS,
-        );
-        let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
+        // PageRank (50-iter power iteration over the full ref graph) and the
+        // subsequent render walk are both CPU-bound. On a cold call they can
+        // run 50-200 ms, long enough to visibly stall any other tool call
+        // landing on the same tokio worker thread. Offload to the blocking
+        // pool; the `all_symbols`/`all_refs` clones are Arc bumps, not deep
+        // copies.
+        let content = {
+            let all_symbols = all_symbols.clone();
+            let all_refs = all_refs.clone();
+            tokio::task::spawn_blocking(move || {
+                let ranked = pagerank::pagerank(
+                    &all_symbols,
+                    &all_refs,
+                    &focus_indices,
+                    0.85,
+                    pagerank::DEFAULT_MAX_ITERATIONS,
+                );
+                pagerank::render_repo_map(&all_symbols, &ranked, budget)
+            })
+            .await
+            .unwrap_or_default()
+        };
 
         let token_est = recon_search::tokens::estimate_tokens(&content);
         let view = ToolOutput::Skeleton(SkeletonView {
