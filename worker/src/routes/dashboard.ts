@@ -70,10 +70,33 @@ dashboardRoutes.post("/keys", async (c) => {
   const keyPrefix = key.slice(0, 14);
   const tierConfig = getTierConfig(user.tier);
 
+  // If the user has an active paid subscription, pin the new key's
+  // expires_at to that subscription's current_period_end. Without this
+  // the hourly downgrade cron (src/scheduled.ts) would never flip the
+  // key back to Free — its WHERE clause excludes NULL expires_at, so a
+  // sub that ends leaves the key permanently at its paid tier.
+  //
+  // `active` / `halted` / `cancelled` all have a known period_end with
+  // paid access through that date. Other statuses (created, authenticated,
+  // pending, expired, completed) either have no paid period yet or the
+  // period has already lapsed — leave expires_at NULL and let the user
+  // stay on whatever tier users.tier currently reflects.
+  const paidSub = await db
+    .prepare(
+      `SELECT current_period_end FROM subscriptions
+       WHERE user_id = ?
+         AND status IN ('active', 'halted', 'cancelled')
+         AND current_period_end IS NOT NULL
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(user.id)
+    .first<{ current_period_end: string | null }>();
+  const keyExpiresAt = paidSub?.current_period_end ?? null;
+
   await db
     .prepare(
-      `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, tier, limits_json)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, tier, limits_json, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       user.id,
@@ -82,6 +105,7 @@ dashboardRoutes.post("/keys", async (c) => {
       name,
       tierConfig.name,
       JSON.stringify(tierConfig.limits),
+      keyExpiresAt,
     )
     .run();
 
@@ -92,6 +116,7 @@ dashboardRoutes.post("/keys", async (c) => {
     name,
     tier: tierConfig.name,
     limits: tierConfig.limits,
+    expires_at: keyExpiresAt,
     created_at: new Date().toISOString(),
   });
 });
