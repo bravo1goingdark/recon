@@ -761,6 +761,12 @@ async fn main() -> Result<()> {
             let (server, repo) = init_server(repo)?;
             info!(?repo, "starting recon server");
 
+            // Install the license we validated above so the per-tool-call
+            // expiry gate can enforce billing-period boundaries. The periodic
+            // re-validation task (spawned below) will swap this out as the
+            // subscription state changes.
+            server.set_license(license.clone());
+
             server
                 .index_repo()
                 .await
@@ -772,6 +778,54 @@ async fn main() -> Result<()> {
             }
 
             server.start_watcher();
+
+            // Periodic license re-validation. The on-disk cache has a 24 h
+            // TTL (see recon_server::license::CACHE_TTL_SECS); we poll every
+            // 6 h (override via RECON_LICENSE_REVALIDATE_SECS) so:
+            //   * a fresh `recon login` from another shell is picked up
+            //     without restarting `recon serve`;
+            //   * once the cache lapses past its TTL, the per-tool-call
+            //     expiry gate flips to blocking with a clear renewal message
+            //     — preventing indefinite use after sub cancellation.
+            //
+            // The task holds a clone of ReconServer (Arc internally). When
+            // the runtime shuts down at process exit, this sleep-loop is
+            // aborted cleanly.
+            {
+                let server_rev = server.clone();
+                let interval_secs = std::env::var("RECON_LICENSE_REVALIDATE_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(21_600) // 6 hours
+                    .clamp(60, 86_400);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+                        let dir = recon_server::license::global_config_dir();
+                        match recon_server::license::validate_license(None, &dir) {
+                            Ok(new) => {
+                                info!(
+                                    tier = new.tier.name(),
+                                    source = %new.source,
+                                    expires_in_secs = new.expires_at.saturating_sub(
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0)
+                                    ),
+                                    "license re-validated",
+                                );
+                                server_rev.set_license(new);
+                            }
+                            Err(e) => {
+                                tracing::warn!("license re-validation failed: {e}");
+                                // Keep the current license; the expiry gate
+                                // will eventually fire when it lapses.
+                            }
+                        }
+                    }
+                });
+            }
 
             if let Some(port) = port {
                 // serve_http already drives its own shutdown via ctrl_c + cancel.

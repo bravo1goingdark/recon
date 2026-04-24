@@ -63,6 +63,9 @@ pub enum ReconErrorCode {
     FileTooLarge = -32009,
     /// I/O failure (file system, network).
     Io = -32010,
+    /// Subscription has expired or no valid license is cached. Agent should
+    /// surface "run `recon login <key>` to renew" to the user.
+    LicenseExpired = -32011,
     /// Anything else — internal invariant, bug, unexpected state.
     Internal = -32099,
 }
@@ -87,6 +90,7 @@ impl ReconErrorCode {
             ReconErrorCode::PermissionDenied => "permission_denied",
             ReconErrorCode::FileTooLarge => "file_too_large",
             ReconErrorCode::Io => "io",
+            ReconErrorCode::LicenseExpired => "license_expired",
             ReconErrorCode::Internal => "internal",
         }
     }

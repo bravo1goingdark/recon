@@ -1,9 +1,20 @@
-import { Hono } from "hono";
-import { createOrder, verifyWebhookSignature } from "../lib/razorpay";
+import { Hono, type Context } from "hono";
+import {
+  createOrder,
+  createPlan,
+  createSubscription,
+  cancelSubscription,
+  verifyWebhookSignature,
+} from "../lib/razorpay";
 import { getTierConfig } from "../lib/tiers";
 import { requireAuth } from "../middleware/auth";
 import { clientIp, rateLimit } from "../middleware/ratelimit";
-import { CheckoutBody, parseBody, RazorpayWebhookBody } from "../schemas";
+import {
+  CheckoutBody,
+  SubscribeBody,
+  parseBody,
+  RazorpayWebhookBody,
+} from "../schemas";
 import type { AuthUser, Env } from "../types";
 
 type AuthedEnv = { Bindings: Env; Variables: { user: AuthUser } };
@@ -11,10 +22,11 @@ type AuthedEnv = { Bindings: Env; Variables: { user: AuthUser } };
 export const billingRoutes = new Hono<AuthedEnv>();
 
 /**
- * POST /v1/billing/checkout — create a Razorpay order for the requested tier.
+ * POST /v1/billing/checkout — legacy one-time purchase flow.
  *
- * Rate limited to discourage brute-force price probing: a human clicks
- * "Upgrade" maybe twice a day, never 5 times in an hour.
+ * Kept for backwards compat and as an escape hatch; new UI calls /subscribe.
+ * Not exercised by the dashboard anymore. Can be removed once we're sure no
+ * cached clients are still hitting it.
  */
 billingRoutes.post(
   "/checkout",
@@ -52,7 +64,6 @@ billingRoutes.post(
       { user_id: user.id, tier: tierConfig.name },
     );
 
-    // amount_paise column historically stored INR paise; we store USD cents.
     await db
       .prepare(
         `INSERT INTO payments (user_id, razorpay_order_id, amount_paise, currency, status, tier)
@@ -73,17 +84,209 @@ billingRoutes.post(
 );
 
 /**
- * POST /v1/billing/webhook — Razorpay payment webhook.
+ * POST /v1/billing/subscribe — start a recurring monthly subscription.
  *
- * **Idempotent.** Razorpay retries `payment.captured` on its own network
- * hiccups with the same `payment.id`. We log every event into
- * `payment_events(razorpay_payment_id PRIMARY KEY)` via `INSERT OR IGNORE`
- * before doing any work; a retry finds the row already present and we
- * short-circuit with `status: "already_processed"`.
+ * Creates a Razorpay subscription against the tier's Plan (lazily created
+ * the first time we see that tier) and returns Razorpay's hosted-checkout
+ * `short_url`. The client redirects the browser there; Razorpay handles
+ * card entry + the first charge, then fires `subscription.activated` back
+ * to our webhook, which flips the user's tier.
  *
- * Rate limited per source IP (not user, since webhook callers don't auth):
- * legitimate Razorpay traffic sits far below the cap; noise from spoofed
- * endpoints is shed early.
+ * Refuses if the user already has an active subscription — upgrade/downgrade
+ * between tiers is a separate flow we haven't built yet (v0.1 ships with
+ * cancel-and-resubscribe only).
+ */
+billingRoutes.post(
+  "/subscribe",
+  requireAuth,
+  rateLimit<AuthedEnv>(
+    "RL_CHECKOUT",
+    (c) => c.get("user")?.id ?? clientIp(c),
+    60,
+  ),
+  async (c) => {
+    const user = c.get("user");
+    const db = c.env.RECON_DB;
+
+    let rawBody: unknown;
+    try {
+      rawBody = await c.req.json();
+    } catch {
+      return c.json({ error: "body must be valid JSON" }, 400);
+    }
+    const parsed = parseBody(SubscribeBody, rawBody);
+    if (!parsed.ok) return c.json(parsed.error, 400);
+
+    const tierConfig = getTierConfig(parsed.value.tier);
+    if (tierConfig.price_cents <= 0) {
+      return c.json({ error: "This tier cannot be subscribed to" }, 400);
+    }
+
+    // Refuse to stack subscriptions. The user must cancel the current one
+    // before starting a new one — keeps Razorpay's billing state unambiguous.
+    const existing = await db
+      .prepare(
+        `SELECT id, razorpay_subscription_id, tier, status FROM subscriptions
+         WHERE user_id = ? AND status IN ('created','authenticated','active','pending','halted')
+         LIMIT 1`,
+      )
+      .bind(user.id)
+      .first();
+    if (existing) {
+      return c.json(
+        {
+          error:
+            "You already have an active subscription. Cancel it from the dashboard before subscribing to a different tier.",
+          existing_tier: existing.tier,
+          existing_status: existing.status,
+        },
+        409,
+      );
+    }
+
+    // Resolve (or lazily create) the Razorpay plan for this tier.
+    const planId = await ensurePlanForTier(
+      db,
+      c.env.RAZORPAY_KEY_ID,
+      c.env.RAZORPAY_KEY_SECRET,
+      tierConfig,
+    );
+
+    // 120 cycles = 10 years of monthly charges. Effectively unbounded but
+    // Razorpay requires a finite total_count.
+    const sub = await createSubscription(
+      c.env.RAZORPAY_KEY_ID,
+      c.env.RAZORPAY_KEY_SECRET,
+      {
+        plan_id: planId,
+        total_count: 120,
+        customer_notify: true,
+        notes: { user_id: user.id, tier: tierConfig.name },
+      },
+    );
+
+    // Insert a preliminary subscriptions row. The webhook will promote it
+    // to 'active' once the first charge lands. Until then, status='created'
+    // blocks a second /subscribe call from this user.
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, status)
+         VALUES (?, ?, ?, 'created')`,
+      )
+      .bind(user.id, sub.id, tierConfig.name)
+      .run();
+
+    return c.json({
+      subscription_id: sub.id,
+      short_url: sub.short_url,
+      tier: tierConfig.name,
+      price_display: tierConfig.price_display,
+    });
+  },
+);
+
+/**
+ * POST /v1/billing/cancel — schedule cancel-at-cycle-end on the user's
+ * active subscription.
+ *
+ * Honor-until-period-end: access stays on the current tier until
+ * `current_period_end`, no further charges happen, and the hourly cron
+ * downgrades the user's api_keys to Free once `expires_at` passes.
+ */
+billingRoutes.post(
+  "/cancel",
+  requireAuth,
+  rateLimit<AuthedEnv>(
+    "RL_CHECKOUT",
+    (c) => c.get("user")?.id ?? clientIp(c),
+    60,
+  ),
+  async (c) => {
+    const user = c.get("user");
+    const db = c.env.RECON_DB;
+
+    const sub = await db
+      .prepare(
+        `SELECT id, razorpay_subscription_id, tier, status,
+                current_period_end, cancel_at_period_end
+         FROM subscriptions
+         WHERE user_id = ? AND status IN ('authenticated','active','pending','halted')
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .bind(user.id)
+      .first<{
+        id: string;
+        razorpay_subscription_id: string | null;
+        tier: string;
+        status: string;
+        current_period_end: string | null;
+        cancel_at_period_end: number;
+      }>();
+
+    if (!sub) {
+      return c.json(
+        { error: "No active subscription to cancel" },
+        404,
+      );
+    }
+
+    if (sub.cancel_at_period_end) {
+      return c.json({
+        status: "already_scheduled",
+        access_until: sub.current_period_end,
+      });
+    }
+
+    if (!sub.razorpay_subscription_id) {
+      return c.json(
+        { error: "Subscription not yet registered with Razorpay" },
+        409,
+      );
+    }
+
+    // Ask Razorpay to stop renewals at the end of the current cycle.
+    // This does NOT refund or end access immediately.
+    await cancelSubscription(
+      c.env.RAZORPAY_KEY_ID,
+      c.env.RAZORPAY_KEY_SECRET,
+      sub.razorpay_subscription_id,
+      true,
+    );
+
+    await db
+      .prepare(
+        `UPDATE subscriptions
+         SET cancel_at_period_end = 1,
+             cancelled_at = datetime('now')
+         WHERE id = ?`,
+      )
+      .bind(sub.id)
+      .run();
+
+    return c.json({
+      status: "scheduled",
+      access_until: sub.current_period_end,
+      tier: sub.tier,
+    });
+  },
+);
+
+/**
+ * POST /v1/billing/webhook — Razorpay event webhook.
+ *
+ * Handles:
+ *   - payment.captured           (legacy one-time orders; unchanged)
+ *   - subscription.activated     (first charge succeeded — grant tier)
+ *   - subscription.charged       (renewal charge — extend expires_at)
+ *   - subscription.cancelled     (cycle-end reached after cancel request)
+ *   - subscription.halted        (repeated charge failures — preserve access until paid period ends)
+ *   - subscription.completed     (total_count reached — same semantics as cancelled)
+ *
+ * Idempotent for payment events via payment_events(razorpay_payment_id PK).
+ * Subscription-only events (cancelled, halted, completed) don't have a
+ * payment_id; we rely on the subscription row's status monotonically
+ * progressing — replays set the same state and are harmless.
  */
 billingRoutes.post(
   "/webhook",
@@ -91,19 +294,14 @@ billingRoutes.post(
   async (c) => {
     const body = await c.req.text();
     const signature = c.req.header("X-Razorpay-Signature");
-
-    if (!signature) {
-      return c.json({ error: "Missing signature" }, 400);
-    }
+    if (!signature) return c.json({ error: "Missing signature" }, 400);
 
     const valid = await verifyWebhookSignature(
       body,
       signature,
       c.env.RAZORPAY_WEBHOOK_SECRET,
     );
-    if (!valid) {
-      return c.json({ error: "Invalid signature" }, 400);
-    }
+    if (!valid) return c.json({ error: "Invalid signature" }, 400);
 
     let eventRaw: unknown;
     try {
@@ -114,95 +312,48 @@ billingRoutes.post(
     const parsed = parseBody(RazorpayWebhookBody, eventRaw);
     if (!parsed.ok) return c.json(parsed.error, 400);
     const event = parsed.value;
-
     const db = c.env.RECON_DB;
 
-    // Only payment.captured is actionable today; everything else is acked
-    // but idempotent-logged so dashboards can report on webhook traffic.
-    if (event.event !== "payment.captured") {
-      return c.json({ status: "ignored", event: event.event });
+    switch (event.event) {
+      case "payment.captured":
+        return handlePaymentCaptured(c, event, db);
+      case "subscription.activated":
+      case "subscription.charged":
+        return handleSubscriptionCharged(c, event, db);
+      case "subscription.cancelled":
+      case "subscription.completed":
+        return handleSubscriptionCancelled(c, event, db);
+      case "subscription.halted":
+        return handleSubscriptionHalted(c, event, db);
+      default:
+        return c.json({ status: "ignored", event: event.event });
     }
-
-    const payment = event.payload.payment.entity;
-
-    // Idempotency gate: if we've already seen this payment_id, bail early
-    // WITHOUT running the tier upgrade again. D1 doesn't return changes()
-    // for INSERT OR IGNORE directly, so we use the returning-row pattern.
-    const firstTime = await db
-      .prepare(
-        `INSERT INTO payment_events (razorpay_payment_id, event_type, razorpay_order_id)
-         VALUES (?, ?, ?)
-         ON CONFLICT(razorpay_payment_id) DO NOTHING
-         RETURNING razorpay_payment_id`,
-      )
-      .bind(payment.id, event.event, payment.order_id)
-      .first();
-
-    if (!firstTime) {
-      console.warn(
-        `webhook retry for payment_id=${payment.id} — already processed`,
-      );
-      return c.json({ status: "already_processed", payment_id: payment.id });
-    }
-
-    const paymentRow = await db
-      .prepare(
-        "SELECT user_id, tier FROM payments WHERE razorpay_order_id = ?",
-      )
-      .bind(payment.order_id)
-      .first();
-
-    if (!paymentRow) {
-      // Webhook for an order we don't know about — not fatal, but worth
-      // surfacing. Keep the idempotency row so Razorpay's retry loop stops.
-      console.warn(
-        `webhook for unknown order_id=${payment.order_id} — no payments row`,
-      );
-      return c.json({ status: "unknown_order", order_id: payment.order_id });
-    }
-
-    const userId = paymentRow.user_id as string;
-    const newTier = paymentRow.tier as string;
-    const newLimits = JSON.stringify(getTierConfig(newTier).limits);
-
-    // All three writes in one round-trip. The fourth statement marks the
-    // event processed — stamped *after* the business writes so a partial
-    // batch leaves processed_at null and the next retry re-runs.
-    await db.batch([
-      db
-        .prepare(
-          `UPDATE payments SET razorpay_payment_id = ?, status = 'captured'
-           WHERE razorpay_order_id = ?`,
-        )
-        .bind(payment.id, payment.order_id),
-      db
-        .prepare(
-          "UPDATE users SET tier = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(newTier, userId),
-      db
-        .prepare(
-          `UPDATE api_keys SET tier = ?, limits_json = ?
-           WHERE user_id = ? AND revoked_at IS NULL`,
-        )
-        .bind(newTier, newLimits, userId),
-      db
-        .prepare(
-          "UPDATE payment_events SET processed_at = datetime('now') WHERE razorpay_payment_id = ?",
-        )
-        .bind(payment.id),
-    ]);
-
-    return c.json({ status: "ok", payment_id: payment.id });
   },
 );
 
-/** GET /v1/billing/portal — subscription status. */
+/** GET /v1/billing/portal — subscription status + next billing info. */
 billingRoutes.get("/portal", requireAuth, async (c) => {
   const user = c.get("user");
   const db = c.env.RECON_DB;
 
-  // Latest captured payment
+  const sub = await db
+    .prepare(
+      `SELECT tier, status, current_period_start, current_period_end,
+              cancel_at_period_end, cancelled_at
+       FROM subscriptions
+       WHERE user_id = ?
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(user.id)
+    .first<{
+      tier: string;
+      status: string;
+      current_period_start: string | null;
+      current_period_end: string | null;
+      cancel_at_period_end: number;
+      cancelled_at: string | null;
+    }>();
+
   const latestPayment = await db
     .prepare(
       `SELECT tier, status, created_at FROM payments
@@ -215,6 +366,16 @@ billingRoutes.get("/portal", requireAuth, async (c) => {
   return c.json({
     tier: user.tier,
     tier_config: getTierConfig(user.tier),
+    subscription: sub
+      ? {
+          tier: sub.tier,
+          status: sub.status,
+          current_period_start: sub.current_period_start,
+          current_period_end: sub.current_period_end,
+          cancel_at_period_end: !!sub.cancel_at_period_end,
+          cancelled_at: sub.cancelled_at,
+        }
+      : null,
     latest_payment: latestPayment
       ? {
           tier: latestPayment.tier,
@@ -224,3 +385,249 @@ billingRoutes.get("/portal", requireAuth, async (c) => {
       : null,
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Internal webhook handlers — one per event shape.
+// Keeping these separate from the dispatch switch makes each handler's
+// happy-path short enough to read end-to-end.
+// ────────────────────────────────────────────────────────────────────────────
+
+type WebhookCtx = Context<AuthedEnv>;
+
+async function handlePaymentCaptured(
+  c: WebhookCtx,
+  event: RazorpayWebhookBody,
+  db: D1Database,
+) {
+  const payment = event.payload.payment?.entity;
+  if (!payment?.order_id) {
+    return c.json({ status: "ignored", reason: "no order_id on payment" });
+  }
+
+  const firstTime = await db
+    .prepare(
+      `INSERT INTO payment_events (razorpay_payment_id, event_type, razorpay_order_id)
+       VALUES (?, ?, ?)
+       ON CONFLICT(razorpay_payment_id) DO NOTHING
+       RETURNING razorpay_payment_id`,
+    )
+    .bind(payment.id, event.event, payment.order_id)
+    .first();
+
+  if (!firstTime) {
+    console.warn(
+      `webhook retry for payment_id=${payment.id} — already processed`,
+    );
+    return c.json({ status: "already_processed", payment_id: payment.id });
+  }
+
+  const paymentRow = await db
+    .prepare("SELECT user_id, tier FROM payments WHERE razorpay_order_id = ?")
+    .bind(payment.order_id)
+    .first<{ user_id: string; tier: string }>();
+
+  if (!paymentRow) {
+    console.warn(
+      `webhook for unknown order_id=${payment.order_id} — no payments row`,
+    );
+    return c.json({ status: "unknown_order", order_id: payment.order_id });
+  }
+
+  const newLimits = JSON.stringify(getTierConfig(paymentRow.tier).limits);
+
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE payments SET razorpay_payment_id = ?, status = 'captured'
+         WHERE razorpay_order_id = ?`,
+      )
+      .bind(payment.id, payment.order_id),
+    db
+      .prepare(
+        "UPDATE users SET tier = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+      .bind(paymentRow.tier, paymentRow.user_id),
+    db
+      .prepare(
+        `UPDATE api_keys SET tier = ?, limits_json = ?
+         WHERE user_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(paymentRow.tier, newLimits, paymentRow.user_id),
+    db
+      .prepare(
+        "UPDATE payment_events SET processed_at = datetime('now') WHERE razorpay_payment_id = ?",
+      )
+      .bind(payment.id),
+  ]);
+
+  return c.json({ status: "ok", payment_id: payment.id });
+}
+
+async function handleSubscriptionCharged(
+  c: WebhookCtx,
+  event: RazorpayWebhookBody,
+  db: D1Database,
+) {
+  const sub = event.payload.subscription?.entity;
+  if (!sub) {
+    return c.json({ status: "ignored", reason: "no subscription entity" });
+  }
+
+  // Locate our row.
+  const row = await db
+    .prepare(
+      `SELECT id, user_id, tier FROM subscriptions
+       WHERE razorpay_subscription_id = ?`,
+    )
+    .bind(sub.id)
+    .first<{ id: string; user_id: string; tier: string }>();
+
+  if (!row) {
+    console.warn(`subscription webhook for unknown sub_id=${sub.id}`);
+    return c.json({ status: "unknown_subscription", subscription_id: sub.id });
+  }
+
+  const periodStart = sub.current_start
+    ? isoFromUnix(sub.current_start)
+    : null;
+  const periodEnd = sub.current_end ? isoFromUnix(sub.current_end) : null;
+  const limits = JSON.stringify(getTierConfig(row.tier).limits);
+
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE subscriptions
+         SET status = 'active',
+             current_period_start = COALESCE(?, current_period_start),
+             current_period_end = COALESCE(?, current_period_end)
+         WHERE id = ?`,
+      )
+      .bind(periodStart, periodEnd, row.id),
+    db
+      .prepare(
+        "UPDATE users SET tier = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+      .bind(row.tier, row.user_id),
+    db
+      .prepare(
+        `UPDATE api_keys SET tier = ?, limits_json = ?, expires_at = ?
+         WHERE user_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(row.tier, limits, periodEnd, row.user_id),
+  ]);
+
+  return c.json({
+    status: "ok",
+    subscription_id: sub.id,
+    period_end: periodEnd,
+  });
+}
+
+async function handleSubscriptionCancelled(
+  c: WebhookCtx,
+  event: RazorpayWebhookBody,
+  db: D1Database,
+) {
+  const sub = event.payload.subscription?.entity;
+  if (!sub) {
+    return c.json({ status: "ignored", reason: "no subscription entity" });
+  }
+
+  // Do NOT expire api_keys here — the user paid for the current cycle and
+  // keeps access until current_period_end. The hourly cron will downgrade
+  // once that time passes. We only flip the subscription row's status so
+  // /portal reflects reality and future charges don't happen.
+  await db
+    .prepare(
+      `UPDATE subscriptions
+       SET status = 'cancelled',
+           cancelled_at = COALESCE(cancelled_at, datetime('now'))
+       WHERE razorpay_subscription_id = ?`,
+    )
+    .bind(sub.id)
+    .run();
+
+  return c.json({ status: "ok", subscription_id: sub.id });
+}
+
+async function handleSubscriptionHalted(
+  c: WebhookCtx,
+  event: RazorpayWebhookBody,
+  db: D1Database,
+) {
+  const sub = event.payload.subscription?.entity;
+  if (!sub) {
+    return c.json({ status: "ignored", reason: "no subscription entity" });
+  }
+
+  // Razorpay has stopped trying to charge after repeated failures. Access
+  // continues until the already-paid current_period_end, same as cancelled
+  // — the user just can't re-activate without a fresh card.
+  await db
+    .prepare(
+      `UPDATE subscriptions
+       SET status = 'halted'
+       WHERE razorpay_subscription_id = ?`,
+    )
+    .bind(sub.id)
+    .run();
+
+  return c.json({ status: "ok", subscription_id: sub.id });
+}
+
+/**
+ * Resolve a Razorpay plan_id for a tier, creating it in Razorpay (and caching
+ * the ID in D1) on first use. Subsequent subscribers to the same tier reuse
+ * the cached ID.
+ *
+ * There is a benign race: two simultaneous first-subscribers could each call
+ * createPlan, yielding two Razorpay plans for the same tier. Whichever
+ * INSERT OR IGNORE lands first wins; the other reads the winner's plan_id.
+ * Razorpay keeps the orphan plan (no customer churn cost), we don't.
+ */
+async function ensurePlanForTier(
+  db: D1Database,
+  keyId: string,
+  keySecret: string,
+  tier: { name: string; price_cents: number },
+): Promise<string> {
+  const cached = await db
+    .prepare(
+      "SELECT razorpay_plan_id FROM subscription_plans WHERE tier = ?",
+    )
+    .bind(tier.name)
+    .first<{ razorpay_plan_id: string }>();
+  if (cached?.razorpay_plan_id) return cached.razorpay_plan_id;
+
+  const plan = await createPlan(keyId, keySecret, {
+    tier: tier.name,
+    amount: tier.price_cents,
+    currency: "USD",
+    period: "monthly",
+    interval: 1,
+  });
+
+  await db
+    .prepare(
+      `INSERT INTO subscription_plans
+         (tier, razorpay_plan_id, amount, currency, interval_period, interval_count)
+       VALUES (?, ?, ?, 'USD', 'monthly', 1)
+       ON CONFLICT(tier) DO NOTHING`,
+    )
+    .bind(tier.name, plan.id, tier.price_cents)
+    .run();
+
+  // Re-read to resolve the race described above — whoever actually inserted
+  // wins, so everyone ends up seeing the same plan_id.
+  const winner = await db
+    .prepare(
+      "SELECT razorpay_plan_id FROM subscription_plans WHERE tier = ?",
+    )
+    .bind(tier.name)
+    .first<{ razorpay_plan_id: string }>();
+  return winner?.razorpay_plan_id ?? plan.id;
+}
+
+function isoFromUnix(unixSeconds: number): string {
+  return new Date(unixSeconds * 1000).toISOString();
+}

@@ -3,6 +3,12 @@ main = "src/index.ts"
 compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Hourly cron — downgrades api_keys whose subscription billing period has
+# ended. See src/scheduled.ts. Hourly balances "user sees downgrade soon
+# after period_end" against D1 scan cost (~730 ticks/month, negligible).
+[triggers]
+crons = ["0 * * * *"]
+
 [vars]
 ALLOWED_ORIGINS = "https://mcprecon.pages.dev,http://localhost:8788"
 FRONTEND_URL = "https://mcprecon.pages.dev"

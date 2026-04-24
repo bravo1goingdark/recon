@@ -107,15 +107,111 @@ function renderBilling(billing) {
     " · " + tc.limits.max_files.toLocaleString() + " files" +
     " · " + (tc.limits.max_loc / 1000).toLocaleString() + "K LOC";
 
+  // Pick the status line + right-hand CTA based on subscription state.
+  // Four states the dashboard has to reflect:
+  //   1. Free + no sub  → show Subscribe CTA
+  //   2. Paid + active + not cancelled → show "Next billing: DATE" + Cancel
+  //   3. Paid + cancel_at_period_end → show "Ends DATE" + Resubscribe
+  //   4. Paid + cancelled/halted/expired → show "Access until DATE" + Resubscribe
+  var statusLine = "";
+  var actionHtml = "";
+  var sub = billing.subscription;
+
+  if (sub && sub.tier !== "Free") {
+    var endDate = sub.current_period_end
+      ? formatDate(sub.current_period_end)
+      : "unknown";
+
+    if (sub.status === "active" && !sub.cancel_at_period_end) {
+      statusLine =
+        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px">Next billing: ' +
+        escapeHtml(endDate) +
+        "</div>";
+      actionHtml =
+        '<button id="cancel-sub-btn" class="btn ghost sm" style="margin-left:auto">Cancel subscription</button>';
+    } else if (sub.cancel_at_period_end || sub.status === "cancelled") {
+      statusLine =
+        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px;color:var(--clay)">Cancelled — access until ' +
+        escapeHtml(endDate) +
+        "</div>";
+      actionHtml =
+        '<a href="/pricing" class="btn primary sm" style="margin-left:auto">Resubscribe →</a>';
+    } else if (sub.status === "halted") {
+      statusLine =
+        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px;color:var(--clay)">Payment failed — access until ' +
+        escapeHtml(endDate) +
+        ". Update card at Razorpay and resubscribe.</div>";
+      actionHtml =
+        '<a href="/pricing" class="btn primary sm" style="margin-left:auto">Resubscribe →</a>';
+    }
+  } else if (billing.tier === "Free") {
+    actionHtml =
+      '<a href="/pricing" class="btn primary sm" style="margin-left:auto">Subscribe →</a>';
+  }
+
   el.innerHTML =
     '<div class="billing-row">' +
     '<div><strong>' + escapeHtml(billing.tier) + "</strong> " +
-    '<span class="dim" style="font-family:var(--mono);font-size:11px">' + escapeHtml(tc.price_display) + "</span></div>" +
+    '<span class="dim" style="font-family:var(--mono);font-size:11px">' + escapeHtml(tc.price_display) + "</span>" +
+    statusLine +
+    "</div>" +
     '<div class="billing-limits">' + limitsHtml + "</div>" +
-    (billing.tier === "Free"
-      ? '<a href="/pricing" class="btn primary sm" style="margin-left:auto">Upgrade →</a>'
-      : "") +
+    actionHtml +
     "</div>";
+
+  // Wire the cancel button if it was rendered this pass.
+  var cancelBtn = document.getElementById("cancel-sub-btn");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", cancelSubscription);
+  }
+}
+
+/**
+ * Format a UTC ISO date or unix-second-ish value into a local YYYY-MM-DD
+ * string. Worker returns ISO-8601 from D1; fall back gracefully for
+ * anything else.
+ */
+function formatDate(value) {
+  try {
+    var d = new Date(value);
+    if (isNaN(d.getTime())) return String(value);
+    return d.toISOString().slice(0, 10);
+  } catch (_) {
+    return String(value);
+  }
+}
+
+async function cancelSubscription() {
+  if (!confirm(
+    "Cancel your subscription?\n\n" +
+    "You'll keep full access until the end of the current billing period. " +
+    "After that, your account drops to the Free tier.\n\n" +
+    "You can resubscribe any time.",
+  )) {
+    return;
+  }
+
+  var btn = document.getElementById("cancel-sub-btn");
+  if (btn) {
+    btn.textContent = "Cancelling…";
+    btn.disabled = true;
+  }
+
+  var resp = await authFetch("/v1/billing/cancel", { method: "POST" });
+  if (!resp.ok) {
+    var err = await resp.json().catch(function () {
+      return { error: "Cancel failed (" + resp.status + ")" };
+    });
+    alert(err.error || "Cancel failed");
+    if (btn) {
+      btn.textContent = "Cancel subscription";
+      btn.disabled = false;
+    }
+    return;
+  }
+
+  // Refresh the dashboard to show the new "Cancelled — access until" state.
+  loadDashboard();
 }
 
 async function generateKey() {

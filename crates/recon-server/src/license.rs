@@ -105,6 +105,52 @@ pub struct ValidatedLicense {
     pub message: String,
 }
 
+impl ValidatedLicense {
+    /// Whether this license has passed its billing-period end.
+    ///
+    /// `expires_at == 0` means "no expiry" (Free tier fallback, or a legacy
+    /// perpetual one-time-purchase license) — always returns false.
+    pub fn is_expired(&self) -> bool {
+        self.expires_at > 0 && self.expires_at < now_secs()
+    }
+
+    /// Format the expiry as an ISO-8601 UTC date for user-facing messages.
+    ///
+    /// Returns "never" for `expires_at == 0` so the caller can render a
+    /// consistent string without an extra branch.
+    pub fn expiry_string(&self) -> String {
+        if self.expires_at == 0 {
+            return "never".to_string();
+        }
+        // Render YYYY-MM-DD HH:MM UTC — cheap, avoids pulling in chrono.
+        let secs = self.expires_at as i64;
+        let days_since_epoch = secs / 86_400;
+        let time_of_day = secs % 86_400;
+        let (year, month, day) = days_to_ymd(days_since_epoch);
+        let hh = time_of_day / 3600;
+        let mm = (time_of_day % 3600) / 60;
+        format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02} UTC")
+    }
+}
+
+/// Convert days-since-Unix-epoch to a (year, month, day) triple.
+///
+/// Algorithm from Howard Hinnant's "date" library (civil_from_days), adapted
+/// for i64. Tiny, allocation-free, no dependency.
+fn days_to_ymd(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
+
 /// How the license was resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LicenseSource {

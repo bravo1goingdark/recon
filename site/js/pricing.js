@@ -1,5 +1,11 @@
 /**
- * Pricing page — uses authFetch() from auth.js for Razorpay checkout.
+ * Pricing page — starts a Razorpay subscription for the clicked tier,
+ * then full-page redirects to Razorpay's hosted checkout (short_url).
+ *
+ * We use Razorpay Subscriptions (not Orders), so the user authorises a
+ * recurring mandate and the first charge runs immediately. `subscription.
+ * activated` fires back to our webhook and flips the tier; we then
+ * redirect the browser to /dashboard.
  */
 
 var currentUser = null;
@@ -7,7 +13,8 @@ var currentUser = null;
 async function initPricing() {
   currentUser = await checkAuth();
 
-  // Update button states
+  // Mark "current plan" buttons. A user who's already on Pro sees "Current
+  // plan" on the Pro card and can only interact with Team.
   document.querySelectorAll("[data-upgrade-tier]").forEach(function (btn) {
     var tier = btn.getAttribute("data-upgrade-tier");
     if (currentUser && currentUser.tier === tier) {
@@ -18,7 +25,7 @@ async function initPricing() {
   });
 }
 
-async function upgradeTier(tierName) {
+async function subscribeToTier(tierName) {
   if (!currentUser) {
     window.location.href = "/login";
     return;
@@ -26,65 +33,60 @@ async function upgradeTier(tierName) {
 
   var btn = document.querySelector('[data-upgrade-tier="' + tierName + '"]');
   if (btn) {
-    btn.textContent = "Processing...";
+    btn.textContent = "Opening checkout…";
     btn.disabled = true;
   }
 
   try {
-    var resp = await authFetch("/v1/billing/checkout", {
+    var resp = await authFetch("/v1/billing/subscribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tier: tierName }),
     });
 
     if (!resp.ok) {
-      var err = await resp.json();
-      alert(err.error || "Failed to create checkout");
+      var err = await resp.json().catch(function () {
+        return { error: "Subscribe failed (" + resp.status + ")" };
+      });
+      alert(err.error || "Failed to start subscription");
+      if (btn) {
+        btn.textContent = "Subscribe to " + tierName + " →";
+        btn.disabled = false;
+      }
       return;
     }
 
     var data = await resp.json();
 
-    var rzp = new Razorpay({
-      key: data.key_id,
-      amount: data.amount,
-      currency: data.currency,
-      order_id: data.order_id,
-      name: "recon",
-      description: data.tier + " plan — monthly",
-      theme: { color: "#18181b" },
-      handler: function () {
-        window.location.href = "/dashboard?upgraded=true";
-      },
-      modal: {
-        ondismiss: function () {
-          if (btn) {
-            btn.textContent = "Upgrade to " + tierName + " \u2192";
-            btn.disabled = false;
-          }
-        },
-      },
-    });
-    rzp.open();
+    // Full-page redirect to Razorpay's hosted subscription page. The user
+    // authorises the mandate there; on success Razorpay redirects back to
+    // our callback URL (configured in Razorpay dashboard → Subscriptions).
+    // The webhook is what actually grants the tier; this redirect is UX.
+    if (data.short_url) {
+      window.location.href = data.short_url;
+      return;
+    }
+
+    alert("Unexpected response — no checkout URL returned.");
   } catch (e) {
     alert("Payment error: " + e.message);
     if (btn) {
-      btn.textContent = "Upgrade to " + tierName + " \u2192";
+      btn.textContent = "Subscribe to " + tierName + " →";
       btn.disabled = false;
     }
   }
 }
 
 /**
- * Bind upgrade buttons. Inline `onclick=` would trip CSP under the
- * site's strict script-src — one delegated listener on the document
- * dispatches to upgradeTier() based on the button's data attribute.
+ * Bind subscribe buttons. Inline `onclick=` would trip CSP under the
+ * site's strict script-src — one delegated listener per button dispatches
+ * to subscribeToTier() based on the button's data attribute.
  */
 function wireUpgradeButtons() {
   document.querySelectorAll("[data-upgrade-tier]").forEach(function (btn) {
     btn.addEventListener("click", function () {
       var tier = btn.getAttribute("data-upgrade-tier");
-      if (tier) upgradeTier(tier);
+      if (tier) subscribeToTier(tier);
     });
   });
 }

@@ -22,6 +22,9 @@ import migration0001 from "../migrations/0001_initial.sql?raw";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error vite `?raw` import — string, no type declaration
 import migration0002 from "../migrations/0002_payment_events.sql?raw";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error vite `?raw` import — string, no type declaration
+import migration0003 from "../migrations/0003_subscription_lifecycle.sql?raw";
 
 /**
  * Split a SQL file into individual statements.
@@ -42,6 +45,10 @@ function splitSql(sql: string): string[] {
 const MIGRATIONS = [
   { name: "0001_initial", queries: splitSql(migration0001 as string) },
   { name: "0002_payment_events", queries: splitSql(migration0002 as string) },
+  {
+    name: "0003_subscription_lifecycle",
+    queries: splitSql(migration0003 as string),
+  },
 ];
 
 /**
@@ -52,6 +59,7 @@ export async function resetDb(): Promise<void> {
   const db = (env as { RECON_DB: D1Database }).RECON_DB;
   // Drop every table we created so applyD1Migrations re-runs cleanly.
   const tables = [
+    "subscription_plans",
     "payment_events",
     "subscriptions",
     "payments",

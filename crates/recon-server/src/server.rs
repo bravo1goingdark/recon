@@ -67,6 +67,11 @@ pub struct ReconServer {
     shutdown_flag: Arc<AtomicBool>,
     /// Handle to the spawned watcher task so `shutdown()` can await its exit.
     watcher_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Current license, atomically swappable by the periodic re-validation
+    /// task. `None` means "not enforced" — used by tests and direct library
+    /// callers that bypass `recon serve`. The stdio `Command::Serve` path
+    /// always populates this via [`ReconServer::set_license`].
+    license: Arc<ArcSwap<Option<crate::license::ValidatedLicense>>>,
 }
 
 fn redact_response(response: String) -> String {
@@ -206,6 +211,7 @@ impl ReconServer {
             cached_refs: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             watcher_handle: Arc::new(Mutex::new(None)),
+            license: Arc::new(ArcSwap::new(Arc::new(None))),
             #[cfg(feature = "embed")]
             embed_service: Arc::new(Mutex::new(None)),
             #[cfg(feature = "embed")]
@@ -388,6 +394,20 @@ impl ReconServer {
         Ok(())
     }
 
+    /// Install / swap the active license.
+    ///
+    /// Used by `Command::Serve` at startup (after `validate_license_or_die`)
+    /// and by the periodic re-validation task so the expiry gate in
+    /// [`query_tool`] sees the current billing state atomically.
+    pub fn set_license(&self, license: crate::license::ValidatedLicense) {
+        self.license.store(Arc::new(Some(license)));
+    }
+
+    /// Return a snapshot of the current license, if one is installed.
+    pub fn current_license(&self) -> Option<crate::license::ValidatedLicense> {
+        self.license.load().as_ref().clone()
+    }
+
     /// Dispatch a tool call by name with JSON arguments. For CLI `query` subcommand.
     ///
     /// Returns the tool's JSON response string, or an error message.
@@ -405,6 +425,32 @@ impl ReconServer {
             tool = tool_name,
             request_id = %request_id,
         );
+
+        // Pre-flight: if the cached license has expired, short-circuit with a
+        // clear renewal message. `current_license() == None` means the server
+        // is running in a library-test context and expiry enforcement is off —
+        // `Command::Serve` always installs a license via `set_license`.
+        if let Some(license) = self.current_license() {
+            if license.is_expired() {
+                return REQUEST_ID
+                    .scope(request_id.clone(), async move {
+                        tool_error(
+                            ReconErrorCode::LicenseExpired,
+                            format!(
+                                "License expired on {}. Run `recon login <key>` to renew, \
+                                 or resubscribe at https://mcprecon.pages.dev/dashboard",
+                                license.expiry_string()
+                            ),
+                            Some(serde_json::json!({
+                                "tier": license.tier.name(),
+                                "expires_at": license.expires_at,
+                            })),
+                        )
+                    })
+                    .instrument(span)
+                    .await;
+            }
+        }
 
         REQUEST_ID
             .scope(request_id.clone(), async move {
@@ -2562,5 +2608,95 @@ mod tests {
         assert_eq!(err["shape"], "Error");
         assert_eq!(err["code"], -32002); // NotFound
         assert_eq!(err["data"]["path"], "does/not/exist.rs");
+    }
+
+    // ── License expiry gate ────────────────────────────────────────────────
+    // These tests pin the honor-until-period-end contract at the CLI boundary:
+    // once a license's expires_at has passed, every tool call returns the
+    // LicenseExpired error shape instead of running the tool. Renewal (via
+    // `recon login`) refreshes the cache, the re-validation task swaps a
+    // fresh license in, and tool calls resume.
+
+    fn expired_license() -> crate::license::ValidatedLicense {
+        crate::license::ValidatedLicense {
+            tier: crate::router::Tier::new(
+                "Pro",
+                crate::router::TierLimits::PRO,
+            ),
+            expires_at: 1_000_000_000, // 2001 — long past
+            source: crate::license::LicenseSource::Cache,
+            message: "Pro plan active until 2001".into(),
+        }
+    }
+
+    fn fresh_license() -> crate::license::ValidatedLicense {
+        crate::license::ValidatedLicense {
+            tier: crate::router::Tier::new(
+                "Pro",
+                crate::router::TierLimits::PRO,
+            ),
+            expires_at: u64::MAX / 2, // far future
+            source: crate::license::LicenseSource::Cache,
+            message: "Pro plan active".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_blocks_on_expired_license() {
+        let (server, _tmp) = make_indexed_server().await;
+        server.set_license(expired_license());
+
+        let result = server.query_tool("code_stats", "{}").await;
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], ReconErrorCode::LicenseExpired.code());
+        assert_eq!(err["kind"], "license_expired");
+        assert!(err["message"].as_str().unwrap().contains("expired"));
+        assert!(err["message"].as_str().unwrap().contains("recon login"));
+        assert_eq!(err["data"]["tier"], "Pro");
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_passes_with_fresh_license() {
+        let (server, _tmp) = make_indexed_server().await;
+        server.set_license(fresh_license());
+
+        // With a fresh license the gate is silent; code_stats should succeed.
+        let result = server.query_tool("code_stats", "{}").await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_ne!(
+            v["shape"], "Error",
+            "fresh license must not trigger the gate: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_passes_when_no_license_installed() {
+        // Library callers / tests that don't call set_license should still work
+        // — the gate is opt-in via set_license so we don't break existing
+        // test suites that construct ReconServer directly.
+        let (server, _tmp) = make_indexed_server().await;
+        let result = server.query_tool("code_stats", "{}").await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_ne!(v["shape"], "Error");
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_swaps_license_atomically() {
+        let (server, _tmp) = make_indexed_server().await;
+        server.set_license(expired_license());
+
+        // Expired → blocked.
+        let blocked = server.query_tool("code_stats", "{}").await;
+        let v: serde_json::Value = serde_json::from_str(&blocked).unwrap();
+        assert_eq!(v["code"], ReconErrorCode::LicenseExpired.code());
+
+        // Simulate the periodic re-validation task dropping in a fresh license.
+        server.set_license(fresh_license());
+
+        // After swap → unblocked on the next call.
+        let ok = server.query_tool("code_stats", "{}").await;
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_ne!(v["shape"], "Error");
     }
 }
