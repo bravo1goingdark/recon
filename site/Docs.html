@@ -484,7 +484,7 @@ allow_sensitive = <span class="h">false</span></pre>
       </tbody>
     </table>
 
-    <h3>Token reduction</h3>
+    <h3>Token reduction (per operation)</h3>
     <table>
       <thead><tr><th>Scenario</th><th>Read/Grep/Glob</th><th>recon</th><th>Reduction</th></tr></thead>
       <tbody>
@@ -495,6 +495,34 @@ allow_sensitive = <span class="h">false</span></pre>
         <tr><td>Typical bug-fix task</td><td>~109,000 tok</td><td>~3,100 tok</td><td>35×</td></tr>
       </tbody>
     </table>
+
+    <h3>Real-world billed cost</h3>
+    <p>
+      Per-operation reductions are real for <b>fresh input tokens</b>, but
+      Anthropic's prompt caching absorbs most of the obvious savings on warm
+      sessions. The honest end-to-end number is smaller than the headline.
+      From an independent third-party benchmark
+      (<a href="https://yoanbernabeu.github.io/grepai/blog/benchmark-grepai-vs-grep-claude-code" target="_blank" rel="noopener" style="color:var(--clay);text-decoration:underline">grepai vs Claude Code</a>,
+      155K-LOC TypeScript codebase, 5 questions × 5 runs):
+    </p>
+    <table>
+      <thead><tr><th>Axis</th><th>Without recon</th><th>With recon</th><th>Reduction</th></tr></thead>
+      <tbody>
+        <tr><td>Fresh input tokens</td><td>51,147</td><td>1,326</td><td><b>−97%</b></td></tr>
+        <tr><td>Tool calls</td><td>139</td><td>62</td><td>−55%</td></tr>
+        <tr><td>Subagents launched</td><td>5</td><td>0</td><td>−100%</td></tr>
+        <tr><td>Cache-creation tokens</td><td>563,883</td><td>162,289</td><td>−71%</td></tr>
+        <tr><td><b>Total billed cost</b></td><td>$6.78</td><td>$4.92</td><td><b>−27%</b></td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="tag">Where it shines</div>
+      <p>Cold sessions, large repos (&gt;50K LOC), tasks the agent would otherwise solve by spawning subagents. These are where the <b>−97% fresh-input</b> number dominates.</p>
+    </div>
+    <div class="callout">
+      <div class="tag">Where it shrinks</div>
+      <p>Warm sessions where prompt caching already covers most reads, and small codebases (&lt;5K LOC) the agent would pull wholesale anyway. Expect closer to the <b>−27% billed cost</b> floor here.</p>
+    </div>
 
     <h3>System</h3>
     <table>

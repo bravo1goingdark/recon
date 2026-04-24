@@ -556,11 +556,63 @@
   </div>
 </section>
 
+<!-- ECONOMICS -->
+<section id="economics">
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>03</em> &nbsp;— &nbsp;What you save</div>
+      <h2>A benchmark that doesn't <em>round up.</em></h2>
+    </div>
+
+    <p style="color:var(--ink-2);max-width:680px;margin-bottom:32px;font-size:16px;line-height:1.55">
+      Headline multiples like <b>35×</b> are real <em>for fresh input tokens</em>.
+      Anthropic's prompt caching already absorbs most of the obvious savings
+      on warm sessions, so the number that actually hits your bill is smaller.
+      Here's the honest breakdown from an independent third-party measurement
+      (<a href="https://yoanbernabeu.github.io/grepai/blog/benchmark-grepai-vs-grep-claude-code" target="_blank" rel="noopener" style="color:var(--clay);text-decoration:underline">grepai vs Claude Code</a>,
+      155K-LOC TypeScript repo, 5 questions × 5 runs):
+    </p>
+
+    <div class="strip" style="border-top:1px solid var(--rule)">
+      <div class="cell">
+        <div class="k">Fresh input tokens</div>
+        <div class="v">-97<sub>%</sub></div>
+        <div class="foot">51,147 → 1,326</div>
+      </div>
+      <div class="cell">
+        <div class="k">Tool calls</div>
+        <div class="v">-55<sub>%</sub></div>
+        <div class="foot">139 → 62</div>
+      </div>
+      <div class="cell">
+        <div class="k">Subagents</div>
+        <div class="v">-100<sub>%</sub></div>
+        <div class="foot">5 → 0 launched</div>
+      </div>
+      <div class="cell">
+        <div class="k">Billed $ cost</div>
+        <div class="v">-27<sub>%</sub></div>
+        <div class="foot">$6.78 → $4.92</div>
+      </div>
+    </div>
+
+    <p style="color:var(--ink-3);max-width:780px;margin-top:32px;font-size:13.5px;line-height:1.6">
+      The gap between <b style="color:var(--ink-2)">−97% fresh-input</b> and
+      <b style="color:var(--ink-2)">−27% billed cost</b> is prompt caching doing its job.
+      Savings dominate on <b style="color:var(--ink-2)">cold sessions</b>,
+      <b style="color:var(--ink-2)">large repos</b>, and
+      <b style="color:var(--ink-2)">tasks where the agent would otherwise spawn subagents</b>.
+      They shrink on warm sessions and on repos small enough that the agent would
+      read the whole thing anyway.
+    </p>
+  </div>
+</section>
+
 <!-- ARCHITECTURE PRINCIPLES -->
 <section>
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>03</em> &nbsp;— &nbsp;Principles</div>
+      <div class="no"><em>04</em> &nbsp;— &nbsp;Principles</div>
       <h2>Built on four small, stubborn <em>ideas.</em></h2>
     </div>
 
@@ -593,7 +645,7 @@
 <section id="benchmarks">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>04</em> &nbsp;— &nbsp;Benchmarks</div>
+      <div class="no"><em>05</em> &nbsp;— &nbsp;Benchmarks</div>
       <h2>Tested on <em>real</em> codebases. Not toy repos.</h2>
     </div>
 
@@ -659,7 +711,7 @@
 <section id="install">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>05</em> &nbsp;— &nbsp;Install</div>
+      <div class="no"><em>06</em> &nbsp;— &nbsp;Install</div>
       <h2>One <em>signed</em> binary. Your code stays <em>local.</em></h2>
     </div>
 
@@ -711,7 +763,7 @@ Read/Grep/Glob when exploring code.</pre>
 <section id="faq">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>06</em> &nbsp;— &nbsp;Questions</div>
+      <div class="no"><em>07</em> &nbsp;— &nbsp;Questions</div>
       <h2>Things <em>security-minded</em> buyers ask us first.</h2>
     </div>
 
