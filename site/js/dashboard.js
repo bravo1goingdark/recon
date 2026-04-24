@@ -65,10 +65,33 @@ function renderStats(user, keys) {
   if (keysEl) keysEl.innerHTML = active + ' <span class="unit">active</span>';
 }
 
+// localStorage key for the dismiss-quickstart flag. Once set, the
+// "Get started" panel stays hidden across reloads so returning users
+// aren't re-onboarded every time they open the dashboard.
+var QUICKSTART_DISMISSED_KEY = "recon.quickstart.dismissed";
+
+function isQuickstartDismissed() {
+  try {
+    return localStorage.getItem(QUICKSTART_DISMISSED_KEY) === "1";
+  } catch (_) {
+    return false;
+  }
+}
+
+function dismissQuickstart() {
+  try { localStorage.setItem(QUICKSTART_DISMISSED_KEY, "1"); } catch (_) {}
+  var el = document.getElementById("quickstart");
+  if (el) el.style.display = "none";
+}
+
 function renderQuickstart(keys) {
   var el = document.getElementById("quickstart");
   var keyEl = document.getElementById("qs-key");
   if (!el) return;
+  if (isQuickstartDismissed()) {
+    el.style.display = "none";
+    return;
+  }
   var active = keys.filter(function (k) { return !k.revoked; });
   if (active.length > 0 && keyEl) {
     // Show prefix with ellipsis — full key was shown once at generation time
@@ -544,6 +567,11 @@ function wireControls() {
 
   var copyLoginBtn = document.getElementById("copy-login-btn");
   if (copyLoginBtn) copyLoginBtn.addEventListener("click", copyLoginCmd);
+
+  // Dismiss "Get started" panel. Persists via localStorage so the panel
+  // doesn't reappear on every reload after the user has onboarded.
+  var qsClose = document.getElementById("quickstart-close");
+  if (qsClose) qsClose.addEventListener("click", dismissQuickstart);
 
   // Event delegation: one listener for every Revoke button rendered
   // into #keys by renderKeys(). Opens the revoke-key modal instead of
