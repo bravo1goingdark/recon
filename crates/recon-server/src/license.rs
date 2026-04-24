@@ -103,14 +103,26 @@ pub struct ValidatedLicense {
     pub source: LicenseSource,
     /// Human-readable message from the server.
     pub message: String,
+    /// Set to `true` when the periodic re-validation task has observed a
+    /// hard rejection from the worker (revoked key, deleted key). Distinct
+    /// from natural expiry: the gate treats both as "expired" for the
+    /// agent-facing error message, but telemetry/diagnostics can tell them
+    /// apart. Not persisted in the signed cache — it's runtime-only state.
+    pub revoked: bool,
 }
 
 impl ValidatedLicense {
-    /// Whether this license has passed its billing-period end.
+    /// Whether the license has ceased to be valid — either naturally via
+    /// `expires_at` or via an explicit `revoked` flag set by the
+    /// re-validation task when the worker returns 401.
     ///
     /// `expires_at == 0` means "no expiry" (Free tier fallback, or a legacy
-    /// perpetual one-time-purchase license) — always returns false.
+    /// perpetual one-time-purchase license) — on its own, returns false,
+    /// but `revoked = true` still fires the gate.
     pub fn is_expired(&self) -> bool {
+        if self.revoked {
+            return true;
+        }
         self.expires_at > 0 && self.expires_at < now_secs()
     }
 
@@ -297,6 +309,96 @@ pub fn compute_signature(resp: &LicenseResponse) -> Result<String, String> {
         .collect())
 }
 
+/// Path to the credentials file (raw API key).
+///
+/// Separate from `license.json` so the signed auth result (durable,
+/// HMAC-verified, safe to read without restrictions) stays independent
+/// from the credential (sensitive, chmod-0600 on Unix, required only by
+/// the periodic re-validation task).
+pub fn credentials_path(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("credentials.json")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredCredentials {
+    key: String,
+}
+
+/// Persist the raw API key next to the license cache. On Unix, the file is
+/// written with mode 0600 so only the owning user can read it — same pattern
+/// as `gh`, `aws-cli`, and `stripe` CLIs. On Windows, file-ACL defaults do
+/// the equivalent via the user's profile ACL.
+///
+/// Idempotent — overwrites any previous credential.
+pub fn save_credentials(cache_dir: &Path, key: &str) -> Result<(), String> {
+    std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
+    let path = credentials_path(cache_dir);
+    let body = serde_json::to_string(&StoredCredentials {
+        key: key.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        use std::io::Write;
+        f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Read the raw API key from disk, if present. Returns `None` if the
+/// credentials file is missing or unreadable — the caller treats this as
+/// "no cached credential, run `recon login` to refresh remotely".
+pub fn read_credentials(cache_dir: &Path) -> Option<String> {
+    let path = credentials_path(cache_dir);
+    let body = std::fs::read_to_string(&path).ok()?;
+    let stored: StoredCredentials = serde_json::from_str(&body).ok()?;
+    if stored.key.is_empty() {
+        return None;
+    }
+    Some(stored.key)
+}
+
+/// Remove the credentials file. Idempotent — missing file is not an error.
+/// Called by `recon logout` and by the periodic re-validation task when the
+/// worker rejects the key (so subsequent polls don't hammer a dead key).
+pub fn delete_credentials(cache_dir: &Path) -> Result<(), String> {
+    let path = credentials_path(cache_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Delete the cached signed license.
+///
+/// Used together with [`delete_credentials`] on worker-initiated rejection so
+/// that cold-starting `recon serve` after revocation fails cleanly with
+/// "run `recon login`" rather than continuing to honor the stale cache
+/// until its 24h TTL lapses.
+pub fn delete_cache(cache_dir: &Path) -> Result<(), String> {
+    let path = cache_dir.join("license.json");
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Write a signed Pro-tier dev license to `<cache_dir>/license.json`.
 ///
 /// Useful in integration tests that need the CLI to start without a real API
@@ -319,29 +421,79 @@ pub fn seed_dev_cache(cache_dir: &Path) -> Result<(), String> {
     write_cache(&cache_dir.join("license.json"), &resp)
 }
 
-/// Call the remote license server and return a parsed, signature-verified response.
-fn validate_remote(key: &str) -> Result<LicenseResponse, String> {
+/// Why a remote validation call did not produce a trusted license.
+///
+/// The periodic re-validation task in `recon serve` distinguishes these so it
+/// can propagate a dashboard-initiated revocation quickly — a `Rejected`
+/// result means the worker has explicitly told us this key is no longer
+/// honored and we should stop serving tool calls. `Transient` means the
+/// network lied, so we keep the current cached license and retry later.
+#[derive(Debug, Clone)]
+pub enum RemoteError {
+    /// Worker returned a definitive rejection (HTTP 4xx, or 200 with
+    /// `valid: false`, or a signature that fails verification after the
+    /// server claimed to sign it). The key should not be trusted further.
+    Rejected(String),
+    /// Transport, DNS, 5xx, or JSON-parse failure. Retry-safe.
+    Transient(String),
+}
+
+impl std::fmt::Display for RemoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(m) => write!(f, "rejected: {m}"),
+            Self::Transient(m) => write!(f, "transient: {m}"),
+        }
+    }
+}
+
+/// Call the remote license endpoint and return a result whose variant tells
+/// the caller whether to treat a failure as a revoke signal or as a network
+/// hiccup.
+pub fn validate_remote_strict(key: &str) -> Result<LicenseResponse, RemoteError> {
     let api_url = std::env::var("RECON_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
     let url = format!("{api_url}/v1/license/validate");
 
-    let resp: LicenseResponse = ureq::post(&url)
+    let mut response = match ureq::post(&url)
         .header("Authorization", &format!("Bearer {key}"))
         .header("User-Agent", concat!("recon/", env!("CARGO_PKG_VERSION")))
         .send_json(serde_json::json!({ "key": key }))
-        .map_err(|e| format!("HTTP error: {e}"))?
+    {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(code)) if (400..500).contains(&code) => {
+            return Err(RemoteError::Rejected(format!(
+                "HTTP {code} from license endpoint"
+            )));
+        }
+        Err(e) => return Err(RemoteError::Transient(format!("HTTP error: {e}"))),
+    };
+
+    let resp: LicenseResponse = response
         .body_mut()
         .read_json()
-        .map_err(|e| format!("JSON parse error: {e}"))?;
+        .map_err(|e| RemoteError::Transient(format!("JSON parse error: {e}")))?;
 
     if !resp.valid {
-        return Err(format!("invalid key: {}", resp.message));
+        return Err(RemoteError::Rejected(format!(
+            "worker rejected key: {}",
+            resp.message
+        )));
     }
-
     if !verify_signature(&resp) {
-        return Err("server response signature invalid or missing".into());
+        return Err(RemoteError::Rejected(
+            "server response signature invalid or missing".into(),
+        ));
     }
-
     Ok(resp)
+}
+
+/// Call the remote license server and return a parsed, signature-verified response.
+///
+/// Thin wrapper over [`validate_remote_strict`] that collapses both failure
+/// modes into a string for callers that don't care to distinguish them
+/// (e.g. `recon login`, where a failure is always fatal).
+fn validate_remote(key: &str) -> Result<LicenseResponse, String> {
+    validate_remote_strict(key).map_err(|e| e.to_string())
 }
 
 /// Verify the HMAC-SHA256 signature on a license response.
@@ -396,6 +548,21 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+/// Write a successfully-validated response into `license.json`.
+///
+/// Thin `pub` wrapper over the internal `write_cache` helper so the
+/// periodic re-validation task in `recon serve` can refresh the disk
+/// cache after a successful remote poll without reaching into
+/// module-private plumbing.
+pub fn write_cache_public(cache_dir: &Path, resp: &LicenseResponse) -> Result<(), String> {
+    write_cache(&cache_dir.join("license.json"), resp)
+}
+
+/// `pub` wrapper over `response_to_license` for the same reason as above.
+pub fn response_to_validated(resp: LicenseResponse, source: LicenseSource) -> ValidatedLicense {
+    response_to_license(resp, source)
+}
+
 /// Convert an API response into a `ValidatedLicense`.
 fn response_to_license(resp: LicenseResponse, source: LicenseSource) -> ValidatedLicense {
     let limits = TierLimits {
@@ -408,6 +575,7 @@ fn response_to_license(resp: LicenseResponse, source: LicenseSource) -> Validate
         expires_at: resp.expires_at,
         source,
         message: resp.message,
+        revoked: false,
     }
 }
 
