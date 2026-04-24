@@ -7,12 +7,14 @@
 use crate::search_trait::{TextHit, TextQuery, TextSearcher};
 use crate::utils::regex_escape;
 use aho_corasick::AhoCorasick;
+use compact_str::CompactString;
 use dashmap::DashMap;
 use grep_regex::RegexMatcher;
 use rayon::prelude::*;
 use recon_core::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::instrument;
 
 /// Maximum number of entries in the mmap cache.
 const MAX_CACHE_ENTRIES: usize = 1024;
@@ -70,9 +72,17 @@ impl FffBackend {
             }
         };
 
-        // Evict if at capacity — DashMap handles concurrent insertion safely.
+        // Evict ~25% of cache when at capacity to retain warm entries.
         if self.cache.len() >= MAX_CACHE_ENTRIES {
-            self.cache.clear();
+            let to_remove: Vec<PathBuf> = self
+                .cache
+                .iter()
+                .take(MAX_CACHE_ENTRIES / 4)
+                .map(|e| e.key().clone())
+                .collect();
+            for key in to_remove {
+                self.cache.remove(&key);
+            }
         }
 
         // Double-check: another thread may have inserted while we were mmap'ing.
@@ -156,12 +166,12 @@ impl<'a> fff_grep::Sink for CollectSink<'a> {
         }
         // Use lossy decoding so non-UTF-8 files still produce visible hit lines
         // rather than silently empty strings.
-        let line_text = String::from_utf8_lossy(mat.bytes()).trim_end().to_string();
+        let decoded = String::from_utf8_lossy(mat.bytes());
         self.hits.push(TextHit {
             path: self.path.to_path_buf(),
             line: mat.line_number().unwrap_or(0) as u32,
             col: None,
-            line_text,
+            line_text: CompactString::new(decoded.trim_end()),
         });
         Ok(true)
     }
@@ -199,10 +209,9 @@ fn resolve_line(line_index: &[usize], data_len: usize, offset: usize) -> (u32, u
 
 /// Extract line text from byte range, decoded lossily.
 #[inline]
-fn extract_line_text(data: &[u8], start: usize, end: usize) -> String {
-    String::from_utf8_lossy(&data[start..end])
-        .trim_end()
-        .to_string()
+fn extract_line_text(data: &[u8], start: usize, end: usize) -> CompactString {
+    let trimmed = String::from_utf8_lossy(&data[start..end]);
+    CompactString::new(trimmed.trim_end())
 }
 
 // ── Core search logic ──────────────────────────────────────────────────────────
@@ -239,6 +248,15 @@ fn build_matcher(pattern: &str, is_regex: bool) -> Result<FffMatcher, Error> {
 // ── TextSearcher impl ──────────────────────────────────────────────────────────
 
 impl TextSearcher for FffBackend {
+    #[instrument(
+        skip(self, q),
+        fields(
+            pattern_len = q.pattern.len(),
+            is_regex = q.is_regex,
+            scope_files = q.scope.len(),
+            max_results = q.max_results,
+        ),
+    )]
     fn search(&self, q: &TextQuery) -> Result<Vec<TextHit>, Error> {
         let matcher = build_matcher(&q.pattern, q.is_regex)?;
         let mut hits = Vec::with_capacity(q.max_results.min(64));
@@ -259,6 +277,14 @@ impl TextSearcher for FffBackend {
         Ok(hits)
     }
 
+    #[instrument(
+        skip(self, patterns, scope),
+        fields(
+            patterns = patterns.len(),
+            scope_files = scope.len(),
+            max_per_pattern,
+        ),
+    )]
     fn multi_search(
         &self,
         patterns: &[&str],

@@ -68,11 +68,11 @@ pub struct TierLimits {
 
 /// Built-in tier presets. Add new tiers here — no match arms to update.
 impl TierLimits {
-    /// Starter (free): 1 repo, 250 files, 5K LOC.
+    /// Starter (free): 1 repo, 250 files, 10K LOC.
     pub const FREE: Self = Self {
         max_repos: 1,
         max_files: 250,
-        max_loc: 5_000,
+        max_loc: 10_000,
     };
 
     /// Pro: 10 repos, 5K files, 200K LOC.
@@ -692,7 +692,7 @@ mod tests {
         let free: Tier = "free".parse().unwrap();
         assert_eq!(free.max_repos(), 1);
         assert_eq!(free.max_files(), 250);
-        assert_eq!(free.max_loc(), 5_000);
+        assert_eq!(free.max_loc(), 10_000);
 
         let pro: Tier = "pro".parse().unwrap();
         assert_eq!(pro.max_repos(), 10);

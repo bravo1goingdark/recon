@@ -31,6 +31,7 @@ ahash = { workspace = true }
 compact_str = { workspace = true }
 smallvec = { workspace = true }
 arc-swap = { workspace = true }
+ulid = { workspace = true }
 recon-embed = { workspace = true, optional = true }
 
 [dev-dependencies]

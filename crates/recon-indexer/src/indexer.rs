@@ -14,7 +14,7 @@ use recon_storage::store::Store;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Result of parsing a single file (before storing).
 pub struct ParsedFile {
@@ -209,12 +209,33 @@ pub fn index_file(
     Ok(false)
 }
 
+/// Per-file result from Phase 1 parallel processing.
+struct FileResult {
+    parsed: Option<ParsedFile>,
+    rel_path: PathBuf,
+    /// Tracks what happened to this file for Merkle snapshot construction.
+    snapshot_state: SnapshotState,
+    mtime: i64,
+}
+
+/// Tracks what we know about a file's content hash after Phase 1.
+enum SnapshotState {
+    /// Hash computed this run — use it directly.
+    Known([u8; 32]),
+    /// mtime matched previous snapshot — reuse previous entry.
+    MtimeSkipped,
+    /// Generated content, read error, or unknown language — omit from snapshot.
+    Excluded,
+}
+
 /// Index all files in a repo — parallel parse, sequential batch store + Tantivy.
 /// Full repo index. If `shared_writer` is provided, uses it instead of creating
 /// a new IndexWriter (avoids LockBusy when a watcher already holds the lock).
 ///
 /// On subsequent runs, loads the previous Merkle snapshot and skips files whose
 /// content hash has not changed, making cold-start re-indexing faster.
+///
+/// Builds the new Merkle snapshot from Phase 1 data — no second full repo read.
 #[allow(clippy::needless_option_as_deref)]
 pub fn index_repo(
     store: &Store,
@@ -233,19 +254,23 @@ pub fn index_repo(
     // Load previous Merkle snapshot for change detection
     let previous_snapshot = load_previous_snapshot(repo_root);
 
-    // Phase 1: Parallel read + parse, skipping unchanged files
-    let parsed: Vec<_> = paths
+    // Phase 1: Parallel read + parse. Returns a FileResult for every path so we
+    // can build the new Merkle snapshot without a second full repo walk.
+    let all_results: Vec<FileResult> = paths
         .par_iter()
-        .filter_map(|path| {
+        .map(|path| {
+            let rel = path.strip_prefix(repo_root).unwrap_or(path).to_path_buf();
+            let mtime = mtime_of(path);
+
             // Mtime pre-filter: skip if mtime matches snapshot (no read needed)
             if let Some(ref prev) = previous_snapshot {
-                let rel = match path.strip_prefix(repo_root) {
-                    Ok(r) => r,
-                    Err(_) => path,
-                };
-                let mtime = mtime_of(path);
-                if prev.is_unchanged(rel, mtime) {
-                    return None;
+                if prev.is_unchanged(&rel, mtime) {
+                    return FileResult {
+                        parsed: None,
+                        rel_path: rel,
+                        snapshot_state: SnapshotState::MtimeSkipped,
+                        mtime,
+                    };
                 }
             }
 
@@ -253,29 +278,46 @@ pub fn index_repo(
                 Ok(c) => c,
                 Err(e) => {
                     warn!(?path, "read error: {e}");
-                    return None;
+                    return FileResult {
+                        parsed: None,
+                        rel_path: rel,
+                        snapshot_state: SnapshotState::Excluded,
+                        mtime,
+                    };
                 }
             };
             if walker::is_generated_content(&content) {
-                return None;
+                return FileResult {
+                    parsed: None,
+                    rel_path: rel,
+                    snapshot_state: SnapshotState::Excluded,
+                    mtime,
+                };
             }
             let content_hash = hash::blake3_bytes(&content);
 
             // Double-check: skip if hash matches previous snapshot
             if let Some(ref prev) = previous_snapshot {
-                let rel = match path.strip_prefix(repo_root) {
-                    Ok(r) => r,
-                    Err(_) => path,
-                };
-                if let Some(prev_hash) = prev.get_hash(rel) {
+                if let Some(prev_hash) = prev.get_hash(&rel) {
                     if prev_hash == content_hash {
-                        return None;
+                        return FileResult {
+                            parsed: None,
+                            rel_path: rel,
+                            snapshot_state: SnapshotState::Known(content_hash),
+                            mtime,
+                        };
                     }
                 }
             }
 
-            let mtime = mtime_of(path);
-            parse_file_with_content(&content, path, repo_root, &pools, content_hash, mtime)
+            let parsed =
+                parse_file_with_content(&content, path, repo_root, &pools, content_hash, mtime);
+            FileResult {
+                parsed,
+                rel_path: rel,
+                snapshot_state: SnapshotState::Known(content_hash),
+                mtime,
+            }
         })
         .collect();
 
@@ -283,7 +325,12 @@ pub fn index_repo(
     let mut stats = IndexStats::default();
     const CHUNK_SIZE: usize = 500;
 
-    for chunk in parsed.chunks(CHUNK_SIZE) {
+    let to_store: Vec<&ParsedFile> = all_results
+        .iter()
+        .filter_map(|r| r.parsed.as_ref())
+        .collect();
+
+    for chunk in to_store.chunks(CHUNK_SIZE) {
         let bulk: Vec<_> = chunk
             .iter()
             .map(|p| (&p.meta, p.symbols.as_slice(), p.refs.as_slice()))
@@ -310,14 +357,16 @@ pub fn index_repo(
 
     if let (Some(tb), Some(writer)) = (tantivy, writer_ref) {
         let mut docs_since_commit = 0usize;
-        for parsed_file in &parsed {
-            let _ = tb.index_symbols(writer, &parsed_file.meta.path, &parsed_file.symbols);
-            docs_since_commit += parsed_file.symbols.len();
-            if docs_since_commit >= 20_000 {
-                if let Err(e) = tb.commit(writer) {
-                    warn!("tantivy interim commit error: {e}");
+        for r in &all_results {
+            if let Some(ref pf) = r.parsed {
+                let _ = tb.index_symbols(writer, &pf.meta.path, &pf.symbols);
+                docs_since_commit += pf.symbols.len();
+                if docs_since_commit >= 20_000 {
+                    if let Err(e) = tb.commit(writer) {
+                        warn!("tantivy interim commit error: {e}");
+                    }
+                    docs_since_commit = 0;
                 }
-                docs_since_commit = 0;
             }
         }
         if let Err(e) = tb.commit(writer) {
@@ -325,8 +374,29 @@ pub fn index_repo(
         }
     }
 
-    // Build and save the new Merkle snapshot
-    let new_snapshot = build_merkle_snapshot(repo_root);
+    // Build and save the new Merkle snapshot from Phase 1 data — no second full read.
+    let new_snapshot = {
+        let mut entries = Vec::with_capacity(all_results.len());
+        for r in &all_results {
+            match r.snapshot_state {
+                SnapshotState::Known(hash) => {
+                    entries.push((r.rel_path.clone(), hash, r.mtime));
+                }
+                SnapshotState::MtimeSkipped => {
+                    // Use previous snapshot's hash (mtime unchanged → content unchanged)
+                    if let Some(ref prev) = previous_snapshot {
+                        if let Some(prev_hash) = prev.get_hash(&r.rel_path) {
+                            entries.push((r.rel_path.clone(), prev_hash, r.mtime));
+                        }
+                    }
+                }
+                SnapshotState::Excluded => {
+                    // Generated content, read errors, or unknown language — omit
+                }
+            }
+        }
+        MerkleSnapshot::build(entries)
+    };
     save_snapshot(repo_root, &new_snapshot);
 
     // Restore safe SQLite defaults and flush WAL
@@ -353,6 +423,7 @@ pub fn index_repo(
 /// If `shared_writer` is provided, uses it for Tantivy writes instead of
 /// creating a new writer (prevents LockBusy).
 #[allow(clippy::needless_option_as_deref)]
+#[instrument(skip(store, tantivy, shared_writer), fields(repo = %repo_root.display()))]
 pub fn index_repo_incremental(
     store: &Store,
     tantivy: Option<&TantivyBackend>,

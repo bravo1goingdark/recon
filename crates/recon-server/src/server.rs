@@ -3,8 +3,10 @@
 use crate::tools::*;
 use ahash::AHashMap;
 use arc_swap::ArcSwap;
+use compact_str::CompactString;
 use parking_lot::Mutex;
 use rayon::prelude::*;
+use recon_core::error::ReconErrorCode;
 use recon_core::lang::Language;
 use recon_core::redact;
 use recon_core::shapes::*;
@@ -23,9 +25,11 @@ use rmcp::model::{Implementation, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use smallvec::SmallVec;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use std::time::Duration;
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn, Instrument};
 
 /// The recon MCP server.
 #[derive(Clone)]
@@ -59,6 +63,15 @@ pub struct ReconServer {
     /// Write handle — taken by `start_watcher`, None afterwards.
     #[cfg(feature = "embed")]
     vec_writer: Arc<Mutex<Option<recon_embed::VectorStore>>>,
+    /// Cooperative shutdown flag — watcher loop polls this between batches.
+    shutdown_flag: Arc<AtomicBool>,
+    /// Handle to the spawned watcher task so `shutdown()` can await its exit.
+    watcher_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Current license, atomically swappable by the periodic re-validation
+    /// task. `None` means "not enforced" — used by tests and direct library
+    /// callers that bypass `recon serve`. The stdio `Command::Serve` path
+    /// always populates this via [`ReconServer::set_license`].
+    license: Arc<ArcSwap<Option<crate::license::ValidatedLicense>>>,
 }
 
 fn redact_response(response: String) -> String {
@@ -68,6 +81,81 @@ fn redact_response(response: String) -> String {
 /// Maximum file size for `read_to_string` calls (2 MB).
 /// Prevents OOM on accidentally large files (e.g. minified bundles, lock files).
 const MAX_READ_FILE_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Per-request deadline. Queries longer than this return `ToolOutput::Error`
+/// with `ReconErrorCode::Timeout` rather than hanging the client.
+/// Override with `RECON_REQUEST_TIMEOUT_SECS`.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+tokio::task_local! {
+    /// Per-tool-call request ID (ULID). Set by [`ReconServer::query_tool`] so
+    /// error responses and log spans carry the same correlation handle.
+    pub static REQUEST_ID: CompactString;
+}
+
+/// Return the active request ID, or `"-"` if we're called outside a scoped
+/// request (e.g. direct rmcp dispatch). Never panics.
+pub(crate) fn current_request_id() -> CompactString {
+    REQUEST_ID
+        .try_with(|id| id.clone())
+        .unwrap_or_else(|_| CompactString::new("-"))
+}
+
+/// Read the per-request timeout from `RECON_REQUEST_TIMEOUT_SECS` once per
+/// call. Bounded to `[1, 600]` seconds so a typo in env never wedges the
+/// server or disables the guard.
+fn request_timeout() -> std::time::Duration {
+    let secs = std::env::var("RECON_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
+        .clamp(1, 600);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Build a structured `ToolOutput::Error` and serialize it for the wire.
+///
+/// Uses the currently-scoped request ID (falls back to `"-"` for direct
+/// rmcp dispatch). `data` is free-form JSON the client can inspect for
+/// the failing path, size, identifier, etc.
+pub(crate) fn tool_error(
+    code: ReconErrorCode,
+    message: impl Into<String>,
+    data: Option<serde_json::Value>,
+) -> String {
+    let view = ToolOutput::Error(ToolErrorView {
+        code: code.code(),
+        kind: CompactString::new(code.kind()),
+        message: message.into(),
+        data,
+        request_id: current_request_id(),
+    });
+    serde_json::to_string(&view).unwrap_or_else(|e| {
+        // Absolute fallback — serde_json on a pure-Serialize value almost never
+        // fails, but if it does we must still produce SOME parseable response.
+        format!(
+            r#"{{"shape":"Error","code":{},"kind":"{}","message":"serialize failed: {}","request_id":"-"}}"#,
+            code.code(),
+            code.kind(),
+            e
+        )
+    })
+}
+
+/// Convenience for the common case: map a `recon_core::error::Error` through
+/// its `rpc_code` and render. The error's `Display` is used for the message.
+pub(crate) fn tool_error_from(err: &recon_core::error::Error) -> String {
+    tool_error(err.rpc_code(), err.to_string(), None)
+}
+
+/// Tool-error specifically for invalid JSON args.
+pub(crate) fn tool_error_invalid_args(err: &serde_json::Error) -> String {
+    tool_error(
+        ReconErrorCode::InvalidParams,
+        format!("invalid tool arguments: {err}"),
+        None,
+    )
+}
 
 impl ReconServer {
     /// Create a new server for the given repo root.
@@ -84,6 +172,15 @@ impl ReconServer {
         store: Store,
         tantivy: TantivyBackend,
     ) -> Result<Self, recon_core::error::Error> {
+        // Canonicalize once at construction so `resolve_path`'s
+        // `canonical.starts_with(&self.repo_root)` check works on platforms
+        // where the input path differs from its canonical form (notably
+        // macOS `/var` → `/private/var`, symlinked parent directories).
+        // Fall back to the raw path if the root doesn't exist yet —
+        // construction-time failure would regress behavior for callers
+        // that create the root lazily.
+        let repo_root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
+
         let writer = tantivy.writer(50_000_000).ok();
         if writer.is_none() {
             warn!("tantivy writer creation failed at startup");
@@ -112,6 +209,9 @@ impl ReconServer {
             cached_file_count: Arc::new(AtomicU64::new(0)),
             cached_symbols: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             cached_refs: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            watcher_handle: Arc::new(Mutex::new(None)),
+            license: Arc::new(ArcSwap::new(Arc::new(None))),
             #[cfg(feature = "embed")]
             embed_service: Arc::new(Mutex::new(None)),
             #[cfg(feature = "embed")]
@@ -206,8 +306,16 @@ impl ReconServer {
     #[cfg(feature = "embed")]
     pub async fn init_embed(&self) -> Result<(), recon_core::error::Error> {
         let vec_dir = self.repo_root.join(".recon").join("vectors");
-        let embedder = recon_embed::Embedder::new()
-            .map_err(|e| recon_core::error::Error::Search(format!("embed init: {e}")))?;
+
+        let embedder = if let Ok(dir) = std::env::var("RECON_EMBED_DIR") {
+            let model_dir = std::path::Path::new(&dir);
+            info!(dir = %dir, "using local embedding model");
+            recon_embed::Embedder::from_local_model(model_dir)
+                .map_err(|e| recon_core::error::Error::Search(format!("local embed init: {e}")))?
+        } else {
+            recon_embed::Embedder::new()
+                .map_err(|e| recon_core::error::Error::Search(format!("embed init: {e}")))?
+        };
         let svc =
             Arc::new(recon_embed::EmbedService::spawn(embedder).map_err(|e| {
                 recon_core::error::Error::Search(format!("embed thread spawn: {e}"))
@@ -286,60 +394,175 @@ impl ReconServer {
         Ok(())
     }
 
+    /// Run a Tantivy search on a blocking thread pool.
+    ///
+    /// `TantivyBackend::search` is `&self` and lock-free internally, but
+    /// the body is CPU-bound (query parser + top-k collector) and can take
+    /// 5–20 ms on a 500K-LOC index. CLAUDE.md: *"tantivy calls always need
+    /// [spawn_blocking]"* — without it, one search stalls every other
+    /// tokio task co-scheduled on the same worker thread.
+    ///
+    /// Errors from Tantivy are swallowed into an empty result (same UX as
+    /// the previous inline `.unwrap_or_default()` chain) because a failed
+    /// BM25 index pass is a tier fallback, not a user-visible error.
+    async fn tantivy_search(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> Vec<recon_search::tantivy_backend::StructuredHit> {
+        let tantivy = self.tantivy.clone();
+        tokio::task::spawn_blocking(move || tantivy.search(&query, limit))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+    }
+
+    /// Install / swap the active license.
+    ///
+    /// Used by `Command::Serve` at startup (after `validate_license_or_die`)
+    /// and by the periodic re-validation task so the expiry gate in
+    /// [`query_tool`] sees the current billing state atomically.
+    pub fn set_license(&self, license: crate::license::ValidatedLicense) {
+        self.license.store(Arc::new(Some(license)));
+    }
+
+    /// Return a snapshot of the current license, if one is installed.
+    pub fn current_license(&self) -> Option<crate::license::ValidatedLicense> {
+        self.license.load().as_ref().clone()
+    }
+
     /// Dispatch a tool call by name with JSON arguments. For CLI `query` subcommand.
     ///
     /// Returns the tool's JSON response string, or an error message.
     pub async fn query_tool(&self, tool_name: &str, args_json: &str) -> String {
+        // Generate a ULID per call and scope it into task-local state so any
+        // `tool_error*` helper invoked downstream carries the same handle.
+        // The `tracing` span attaches the same ID so a client-side request_id
+        // can be grepped back to server logs.
+        let request_id = CompactString::new(ulid::Ulid::new().to_string());
+        let tool_name_owned = tool_name.to_string();
+        let args_owned = args_json.to_string();
+        let timeout = request_timeout();
+        let span = tracing::info_span!(
+            "query_tool",
+            tool = tool_name,
+            request_id = %request_id,
+        );
+
+        // Pre-flight: if the cached license has expired, short-circuit with a
+        // clear renewal message. `current_license() == None` means the server
+        // is running in a library-test context and expiry enforcement is off —
+        // `Command::Serve` always installs a license via `set_license`.
+        if let Some(license) = self.current_license() {
+            if license.is_expired() {
+                return REQUEST_ID
+                    .scope(request_id.clone(), async move {
+                        tool_error(
+                            ReconErrorCode::LicenseExpired,
+                            format!(
+                                "License expired on {}. Run `recon login <key>` to renew, \
+                                 or resubscribe at https://mcprecon.pages.dev/dashboard",
+                                license.expiry_string()
+                            ),
+                            Some(serde_json::json!({
+                                "tier": license.tier.name(),
+                                "expires_at": license.expires_at,
+                            })),
+                        )
+                    })
+                    .instrument(span)
+                    .await;
+            }
+        }
+
+        REQUEST_ID
+            .scope(request_id.clone(), async move {
+                let fut = self.dispatch_tool(&tool_name_owned, &args_owned);
+                match tokio::time::timeout(timeout, fut).await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        tracing::warn!(
+                            tool = %tool_name_owned,
+                            %request_id,
+                            timeout_secs = timeout.as_secs(),
+                            "tool call exceeded deadline",
+                        );
+                        tool_error(
+                            ReconErrorCode::Timeout,
+                            format!(
+                                "tool {tool_name_owned} exceeded {}s deadline",
+                                timeout.as_secs()
+                            ),
+                            Some(serde_json::json!({
+                                "tool": tool_name_owned,
+                                "timeout_secs": timeout.as_secs(),
+                            })),
+                        )
+                    }
+                }
+            })
+            .instrument(span)
+            .await
+    }
+
+    /// Inner dispatch. Separated from [`query_tool`] so the latter can wrap
+    /// it in `task_local::scope` + `tokio::time::timeout`.
+    async fn dispatch_tool(&self, tool_name: &str, args_json: &str) -> String {
         match tool_name {
             "code_outline" => match serde_json::from_str::<OutlineParams>(args_json) {
                 Ok(p) => self.code_outline(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_skeleton" => match serde_json::from_str::<SkeletonParams>(args_json) {
                 Ok(p) => self.code_skeleton(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_read_symbol" => match serde_json::from_str::<ReadSymbolParams>(args_json) {
                 Ok(p) => self.code_read_symbol(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_find_symbol" => match serde_json::from_str::<FindSymbolParams>(args_json) {
                 Ok(p) => self.code_find_symbol(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_find_refs" => match serde_json::from_str::<FindRefsParams>(args_json) {
                 Ok(p) => self.code_find_refs(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_search" => match serde_json::from_str::<SearchParams>(args_json) {
                 Ok(p) => self.code_search(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_list" => match serde_json::from_str::<ListParams>(args_json) {
                 Ok(p) => self.code_list(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_repo_map" => match serde_json::from_str::<RepoMapParams>(args_json) {
                 Ok(p) => self.code_repo_map(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_find_strings" => match serde_json::from_str::<FindStringsParams>(args_json) {
                 Ok(p) => self.code_find_strings(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_multi_find" => match serde_json::from_str::<MultiFindParams>(args_json) {
                 Ok(p) => self.code_multi_find(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_reindex" => match serde_json::from_str::<ReindexParams>(args_json) {
                 Ok(p) => self.code_reindex(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
             "code_stats" => match serde_json::from_str::<StatsParams>(args_json) {
                 Ok(p) => self.code_stats(Parameters(p)).await,
-                Err(e) => format!("invalid args: {e}"),
+                Err(e) => tool_error_invalid_args(&e),
             },
-            _ => format!("unknown tool: {tool_name}"),
+            other => tool_error(
+                ReconErrorCode::NotFound,
+                format!("unknown tool: {other}"),
+                Some(serde_json::json!({ "tool": other })),
+            ),
         }
     }
 
@@ -358,6 +581,7 @@ impl ReconServer {
         let cached_file_count = self.cached_file_count.clone();
         let cached_symbols = self.cached_symbols.clone();
         let cached_refs = self.cached_refs.clone();
+        let shutdown_flag = self.shutdown_flag.clone();
         // Clone the Arc handles once; the hot path inside the loop needs no locks.
         #[cfg(feature = "embed")]
         let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.lock().clone();
@@ -367,7 +591,7 @@ impl ReconServer {
         #[cfg(feature = "embed")]
         let vec_writer: Option<recon_embed::VectorStore> = self.vec_writer.lock().take();
 
-        tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             let watcher = match Watcher::new(&repo_root) {
                 Ok(w) => w,
                 Err(e) => {
@@ -468,7 +692,19 @@ impl ReconServer {
                 }
             }
 
-            while let Some(changed_paths) = watcher.recv() {
+            loop {
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    debug!("watcher: shutdown flag set, exiting loop");
+                    break;
+                }
+                let changed_paths = match watcher.recv_timeout(Duration::from_millis(500)) {
+                    Ok(paths) => paths,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        debug!("watcher: channel disconnected, exiting loop");
+                        break;
+                    }
+                };
                 // catch_unwind: a panic in one batch must not kill the watcher
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // Phase 1: Filter to files that actually changed (lock-free via ReadPool)
@@ -656,20 +892,75 @@ impl ReconServer {
                     warn!("watcher batch panicked — recovering for next batch");
                 }
             }
+            info!("file watcher stopped");
         });
+
+        *self.watcher_handle.lock() = Some(handle);
     }
 
-    fn resolve_path(&self, rel: &str) -> Result<PathBuf, String> {
+    /// Graceful shutdown: stop the watcher, flush the Tantivy writer, and run
+    /// `incremental_vacuum` on SQLite. Safe to call more than once.
+    ///
+    /// The watcher loop polls `shutdown_flag` every ~500 ms, so the worst-case
+    /// latency is one poll interval plus the current batch's processing time.
+    /// A final `PRAGMA optimize` still runs from `Store::drop`.
+    pub async fn shutdown(&self) {
+        info!("shutdown: requested");
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+
+        // Wait for the watcher task to exit. Bounded so a wedged batch cannot
+        // block shutdown forever.
+        let handle_opt = self.watcher_handle.lock().take();
+        if let Some(handle) = handle_opt {
+            match tokio::time::timeout(Duration::from_secs(10), handle).await {
+                Ok(Ok(())) => debug!("shutdown: watcher joined cleanly"),
+                Ok(Err(e)) => warn!("shutdown: watcher task error: {e}"),
+                Err(_) => warn!("shutdown: watcher did not exit within 10 s — proceeding"),
+            }
+        }
+
+        // Final Tantivy commit — ensures any uncommitted segments are flushed.
+        if let Some(ref mut writer) = *self.tantivy_writer.lock() {
+            if let Err(e) = self.tantivy.commit(writer) {
+                warn!("shutdown: tantivy commit failed: {e}");
+            } else {
+                debug!("shutdown: tantivy committed");
+            }
+        }
+
+        // Reclaim free pages. `PRAGMA optimize` runs from `Store::drop`.
+        match self.write_store.lock().incremental_vacuum() {
+            Ok(_) => debug!("shutdown: sqlite incremental_vacuum ok"),
+            Err(e) => warn!("shutdown: sqlite incremental_vacuum failed: {e}"),
+        }
+
+        info!("shutdown: complete");
+    }
+
+    /// Resolve a repo-relative path to its canonical absolute form.
+    ///
+    /// Returns `Err((code, message))` so callers can forward the exact
+    /// `ReconErrorCode` into their `tool_error` response.
+    fn resolve_path(&self, rel: &str) -> Result<PathBuf, (ReconErrorCode, String)> {
         if redact::is_blocked_path(std::path::Path::new(rel)) {
-            return Err(format!("access denied: sensitive file: {rel}"));
+            return Err((
+                ReconErrorCode::PermissionDenied,
+                format!("access denied: sensitive file: {rel}"),
+            ));
         }
         let path = self.repo_root.join(rel);
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| format!("path not found: {rel}: {e}"))?;
+        let canonical = path.canonicalize().map_err(|e| {
+            (
+                ReconErrorCode::NotFound,
+                format!("path not found: {rel}: {e}"),
+            )
+        })?;
         // repo_root is already canonicalized at construction time
         if !canonical.starts_with(&self.repo_root) {
-            return Err(format!("path traversal denied: {rel}"));
+            return Err((
+                ReconErrorCode::PathTraversal,
+                format!("path traversal denied: {rel}"),
+            ));
         }
         Ok(canonical)
     }
@@ -716,14 +1007,18 @@ impl ReconServer {
     )]
     async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
         // Validate path doesn't escape repo root
-        if let Err(e) = self.resolve_path(&params.0.path) {
-            return format!("Error: {e}");
+        if let Err((code, msg)) = self.resolve_path(&params.0.path) {
+            return tool_error(
+                code,
+                msg,
+                Some(serde_json::json!({ "path": params.0.path })),
+            );
         }
         let symbols = {
             let rel_path = PathBuf::from(&params.0.path);
             match self.read_pool.symbols_for_path(&rel_path) {
                 Ok(s) => s,
-                Err(e) => return format!("Error: {e}"),
+                Err(e) => return tool_error_from(&e),
             }
         };
 
@@ -803,23 +1098,49 @@ impl ReconServer {
         if skeleton.is_empty() {
             let abs_path = match self.resolve_path(&params.0.path) {
                 Ok(p) => p,
-                Err(e) => return format!("Error: {e}"),
+                Err((code, msg)) => {
+                    return tool_error(
+                        code,
+                        msg,
+                        Some(serde_json::json!({ "path": params.0.path })),
+                    );
+                }
             };
             // Size cap to prevent OOM on large files (minified bundles, lock files, etc.)
             match tokio::fs::metadata(&abs_path).await {
                 Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
-                    return format!(
-                        "Error: file too large ({} MB, max {} MB)",
-                        m.len() / (1024 * 1024),
-                        MAX_READ_FILE_SIZE / (1024 * 1024)
+                    return tool_error(
+                        ReconErrorCode::FileTooLarge,
+                        format!(
+                            "file too large ({} MB, max {} MB)",
+                            m.len() / (1024 * 1024),
+                            MAX_READ_FILE_SIZE / (1024 * 1024)
+                        ),
+                        Some(serde_json::json!({
+                            "path": params.0.path,
+                            "size_bytes": m.len(),
+                            "max_bytes": MAX_READ_FILE_SIZE,
+                        })),
                     );
                 }
-                Err(e) => return format!("Error reading file metadata: {e}"),
+                Err(e) => {
+                    return tool_error(
+                        ReconErrorCode::Io,
+                        format!("reading file metadata: {e}"),
+                        Some(serde_json::json!({ "path": params.0.path })),
+                    );
+                }
                 _ => {}
             }
             let content = match tokio::fs::read_to_string(&abs_path).await {
                 Ok(c) => c,
-                Err(e) => return format!("Error reading file: {e}"),
+                Err(e) => {
+                    return tool_error(
+                        ReconErrorCode::Io,
+                        format!("reading file: {e}"),
+                        Some(serde_json::json!({ "path": params.0.path })),
+                    );
+                }
             };
             skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
         }
@@ -840,23 +1161,49 @@ impl ReconServer {
     async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
         let abs_path = match self.resolve_path(&params.0.path) {
             Ok(p) => p,
-            Err(e) => return format!("Error: {e}"),
+            Err((code, msg)) => {
+                return tool_error(
+                    code,
+                    msg,
+                    Some(serde_json::json!({ "path": params.0.path })),
+                );
+            }
         };
         // Size cap to prevent OOM on large files.
         match tokio::fs::metadata(&abs_path).await {
             Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
-                return format!(
-                    "Error: file too large ({} MB, max {} MB)",
-                    m.len() / (1024 * 1024),
-                    MAX_READ_FILE_SIZE / (1024 * 1024)
+                return tool_error(
+                    ReconErrorCode::FileTooLarge,
+                    format!(
+                        "file too large ({} MB, max {} MB)",
+                        m.len() / (1024 * 1024),
+                        MAX_READ_FILE_SIZE / (1024 * 1024)
+                    ),
+                    Some(serde_json::json!({
+                        "path": params.0.path,
+                        "size_bytes": m.len(),
+                        "max_bytes": MAX_READ_FILE_SIZE,
+                    })),
                 );
             }
-            Err(e) => return format!("Error reading file metadata: {e}"),
+            Err(e) => {
+                return tool_error(
+                    ReconErrorCode::Io,
+                    format!("reading file metadata: {e}"),
+                    Some(serde_json::json!({ "path": params.0.path })),
+                );
+            }
             _ => {}
         }
         let content = match tokio::fs::read_to_string(&abs_path).await {
             Ok(c) => c,
-            Err(e) => return format!("Error: {e}"),
+            Err(e) => {
+                return tool_error(
+                    ReconErrorCode::Io,
+                    format!("reading file: {e}"),
+                    Some(serde_json::json!({ "path": params.0.path })),
+                );
+            }
         };
 
         let rel_path = PathBuf::from(&params.0.path);
@@ -875,7 +1222,16 @@ impl ReconServer {
 
         let sym = match target {
             Some(s) => s,
-            None => return format!("Symbol not found: {}", params.0.symbol_or_line),
+            None => {
+                return tool_error(
+                    ReconErrorCode::NotFound,
+                    format!("symbol not found: {}", params.0.symbol_or_line),
+                    Some(serde_json::json!({
+                        "path": params.0.path,
+                        "symbol_or_line": params.0.symbol_or_line,
+                    })),
+                );
+            }
         };
 
         let body = content
@@ -960,9 +1316,11 @@ impl ReconServer {
             .find_symbols_exact(&params.0.name, 20)
             .unwrap_or_default();
 
-        // Tier 1: Tantivy BM25 structured search (Tantivy is already lock-free)
+        // Tier 1: Tantivy BM25 structured search. Lock-free ≠ non-blocking —
+        // the query parser + top-k collector is CPU-bound, so we offload
+        // via `tantivy_search` so the tokio worker isn't held.
         if results.is_empty() {
-            let hits = self.tantivy.search(&params.0.name, 20).unwrap_or_default();
+            let hits = self.tantivy_search(params.0.name.clone(), 20).await;
             for hit in &hits {
                 if let Some(sym) = self
                     .read_pool
@@ -1162,7 +1520,7 @@ impl ReconServer {
 
         if params.0.mode == "hybrid" {
             // RRF fusion: Tantivy BM25 results + text grep results
-            let tantivy_hits = self.tantivy.search(&params.0.query, 20).unwrap_or_default();
+            let tantivy_hits = self.tantivy_search(params.0.query.clone(), 20).await;
             let q = TextQuery {
                 pattern: params.0.query.clone(),
                 is_regex: false,
@@ -1239,7 +1597,7 @@ impl ReconServer {
         }
 
         // Exact mode: try Tantivy first (sub-ms), fall back to grep only if empty
-        let tantivy_hits = self.tantivy.search(&params.0.query, 30).unwrap_or_default();
+        let tantivy_hits = self.tantivy_search(params.0.query.clone(), 30).await;
         if !tantivy_hits.is_empty() {
             let entries: Vec<serde_json::Value> = tantivy_hits
                 .iter()
@@ -1383,14 +1741,28 @@ impl ReconServer {
             vec![]
         };
 
-        let ranked = pagerank::pagerank(
-            &all_symbols,
-            &all_refs,
-            &focus_indices,
-            0.85,
-            pagerank::DEFAULT_MAX_ITERATIONS,
-        );
-        let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
+        // PageRank (50-iter power iteration over the full ref graph) and the
+        // subsequent render walk are both CPU-bound. On a cold call they can
+        // run 50-200 ms, long enough to visibly stall any other tool call
+        // landing on the same tokio worker thread. Offload to the blocking
+        // pool; the `all_symbols`/`all_refs` clones are Arc bumps, not deep
+        // copies.
+        let content = {
+            let all_symbols = all_symbols.clone();
+            let all_refs = all_refs.clone();
+            tokio::task::spawn_blocking(move || {
+                let ranked = pagerank::pagerank(
+                    &all_symbols,
+                    &all_refs,
+                    &focus_indices,
+                    0.85,
+                    pagerank::DEFAULT_MAX_ITERATIONS,
+                );
+                pagerank::render_repo_map(&all_symbols, &ranked, budget)
+            })
+            .await
+            .unwrap_or_default()
+        };
 
         let token_est = recon_search::tokens::estimate_tokens(&content);
         let view = ToolOutput::Skeleton(SkeletonView {
@@ -1915,10 +2287,11 @@ mod tests {
             symbol_or_line: "nonexistent_symbol_xyz".into(),
         });
         let result = server.code_read_symbol(params).await;
-        assert!(
-            result.contains("Symbol not found"),
-            "should report symbol not found: {result}"
-        );
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], -32002, "should be NotFound: {result}");
+        assert_eq!(err["kind"], "not_found");
+        assert_eq!(err["data"]["symbol_or_line"], "nonexistent_symbol_xyz");
     }
 
     #[tokio::test]
@@ -2199,25 +2572,165 @@ mod tests {
     async fn query_tool_dispatch() {
         let (server, _tmp) = make_indexed_server().await;
 
-        // Test dispatch to code_stats
+        // Successful dispatch — should NOT be an error shape.
         let result = server.query_tool("code_stats", "{}").await;
         assert!(
-            !result.starts_with("Error:") && !result.starts_with("unknown tool"),
-            "query_tool should dispatch code_stats: {result}"
+            !result.contains(r#""shape":"Error""#),
+            "query_tool should dispatch code_stats successfully: {result}"
         );
 
-        // Test unknown tool
+        // Unknown tool — structured NotFound (-32002).
         let result = server.query_tool("unknown_tool", "{}").await;
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], -32002);
+        assert_eq!(err["kind"], "not_found");
         assert!(
-            result.contains("unknown tool"),
-            "should report unknown tool: {result}"
+            err["message"].as_str().unwrap().contains("unknown tool"),
+            "unknown-tool message: {result}"
+        );
+        assert!(
+            err["request_id"].as_str().unwrap().len() >= 20,
+            "request_id must be a real ULID, got {result}"
         );
 
-        // Test invalid args
+        // Invalid JSON args — structured InvalidParams (-32001).
         let result = server.query_tool("code_outline", "{invalid json").await;
-        assert!(
-            result.contains("invalid args"),
-            "should report invalid args: {result}"
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], -32001);
+        assert_eq!(err["kind"], "invalid_params");
+    }
+
+    #[tokio::test]
+    async fn query_tool_structured_errors_carry_request_id() {
+        let (server, _tmp) = make_indexed_server().await;
+
+        // Two back-to-back calls must produce distinct ULIDs — correlation is
+        // the whole point of the request_id field.
+        let a = server.query_tool("unknown_tool", "{}").await;
+        let b = server.query_tool("unknown_tool", "{}").await;
+        let a: serde_json::Value = serde_json::from_str(&a).unwrap();
+        let b: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_ne!(
+            a["request_id"], b["request_id"],
+            "each query_tool call must get its own ULID"
         );
+    }
+
+    #[test]
+    fn tool_error_produces_valid_structured_shape() {
+        // Directly verify the Timeout error shape — the wrapper that fires it
+        // lives inside tokio::time::timeout and is exercised in production
+        // paths; this checks the wire contract it produces.
+        let out = super::tool_error(
+            ReconErrorCode::Timeout,
+            "deadline exceeded",
+            Some(serde_json::json!({ "tool": "foo", "timeout_secs": 30 })),
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["shape"], "Error");
+        assert_eq!(v["code"], -32003);
+        assert_eq!(v["kind"], "timeout");
+        assert_eq!(v["message"], "deadline exceeded");
+        assert_eq!(v["data"]["tool"], "foo");
+        assert_eq!(v["data"]["timeout_secs"], 30);
+        assert!(v["request_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn query_tool_returns_structured_not_found_on_missing_file() {
+        let (server, _tmp) = make_indexed_server().await;
+        let result = server
+            .query_tool("code_outline", r#"{"path":"does/not/exist.rs"}"#)
+            .await;
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], -32002); // NotFound
+        assert_eq!(err["data"]["path"], "does/not/exist.rs");
+    }
+
+    // ── License expiry gate ────────────────────────────────────────────────
+    // These tests pin the honor-until-period-end contract at the CLI boundary:
+    // once a license's expires_at has passed, every tool call returns the
+    // LicenseExpired error shape instead of running the tool. Renewal (via
+    // `recon login`) refreshes the cache, the re-validation task swaps a
+    // fresh license in, and tool calls resume.
+
+    fn expired_license() -> crate::license::ValidatedLicense {
+        crate::license::ValidatedLicense {
+            tier: crate::router::Tier::new("Pro", crate::router::TierLimits::PRO),
+            expires_at: 1_000_000_000, // 2001 — long past
+            source: crate::license::LicenseSource::Cache,
+            message: "Pro plan active until 2001".into(),
+        }
+    }
+
+    fn fresh_license() -> crate::license::ValidatedLicense {
+        crate::license::ValidatedLicense {
+            tier: crate::router::Tier::new("Pro", crate::router::TierLimits::PRO),
+            expires_at: u64::MAX / 2, // far future
+            source: crate::license::LicenseSource::Cache,
+            message: "Pro plan active".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_blocks_on_expired_license() {
+        let (server, _tmp) = make_indexed_server().await;
+        server.set_license(expired_license());
+
+        let result = server.query_tool("code_stats", "{}").await;
+        let err: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(err["shape"], "Error");
+        assert_eq!(err["code"], ReconErrorCode::LicenseExpired.code());
+        assert_eq!(err["kind"], "license_expired");
+        assert!(err["message"].as_str().unwrap().contains("expired"));
+        assert!(err["message"].as_str().unwrap().contains("recon login"));
+        assert_eq!(err["data"]["tier"], "Pro");
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_passes_with_fresh_license() {
+        let (server, _tmp) = make_indexed_server().await;
+        server.set_license(fresh_license());
+
+        // With a fresh license the gate is silent; code_stats should succeed.
+        let result = server.query_tool("code_stats", "{}").await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_ne!(
+            v["shape"], "Error",
+            "fresh license must not trigger the gate: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_passes_when_no_license_installed() {
+        // Library callers / tests that don't call set_license should still work
+        // — the gate is opt-in via set_license so we don't break existing
+        // test suites that construct ReconServer directly.
+        let (server, _tmp) = make_indexed_server().await;
+        let result = server.query_tool("code_stats", "{}").await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_ne!(v["shape"], "Error");
+    }
+
+    #[tokio::test]
+    async fn query_tool_gate_swaps_license_atomically() {
+        let (server, _tmp) = make_indexed_server().await;
+        server.set_license(expired_license());
+
+        // Expired → blocked.
+        let blocked = server.query_tool("code_stats", "{}").await;
+        let v: serde_json::Value = serde_json::from_str(&blocked).unwrap();
+        assert_eq!(v["code"], ReconErrorCode::LicenseExpired.code());
+
+        // Simulate the periodic re-validation task dropping in a fresh license.
+        server.set_license(fresh_license());
+
+        // After swap → unblocked on the next call.
+        let ok = server.query_tool("code_stats", "{}").await;
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_ne!(v["shape"], "Error");
     }
 }

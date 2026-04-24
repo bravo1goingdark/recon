@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { getCookie } from "hono/cookie";
 import { exchangeCodeForToken, fetchGitHubUser } from "../lib/github";
 import { sha256Hex, generateApiKey, generateSessionToken } from "../lib/crypto";
@@ -12,12 +13,40 @@ export const authRoutes = new Hono<{
   Variables: { user: AuthUser };
 }>();
 
+/**
+ * Compute the browser-visible origin for this request.
+ *
+ * The Worker can be reached two ways:
+ *   - Directly at recon-api.kumarashutosh34169.workers.dev (dev / curl / CI).
+ *   - Through the Pages proxy at mcprecon.pages.dev/api/… (production UX).
+ *
+ * In the proxied case, `c.req.url` shows the Worker's own origin — useless
+ * for the OAuth redirect_uri, because GitHub validates against the origin
+ * the *browser* will hit, not the origin the Worker receives the request
+ * on. The Pages Function forwards the original host in X-Forwarded-Host,
+ * letting us rebuild the URL the browser actually sees.
+ *
+ * Falls back to the request URL's own origin when the header is absent
+ * (direct-hit path) so local dev / curl smoke tests still work.
+ */
+function browserOrigin(c: Context): string {
+  const fwdHost = c.req.header("x-forwarded-host");
+  const fwdProto = c.req.header("x-forwarded-proto") || "https";
+  if (fwdHost) {
+    return `${fwdProto}://${fwdHost}`;
+  }
+  return new URL(c.req.url).origin;
+}
+
 /** GET /v1/auth/github — redirect to GitHub OAuth. */
 authRoutes.get("/github", (c) => {
-  // Build callback URL matching the request prefix (/api/v1 or /v1)
+  // Build callback URL matching the request prefix (/api/v1 or /v1) and
+  // the browser-visible origin (NOT the Worker's own origin when proxied
+  // via the Pages Function — GitHub validates redirect_uri against what
+  // the browser will hit, not what the Worker sees).
   const reqUrl = new URL(c.req.url);
   const callbackPath = reqUrl.pathname.replace(/\/github$/, "/github/callback");
-  const redirectUri = reqUrl.origin + callbackPath;
+  const redirectUri = browserOrigin(c) + callbackPath;
   const state = generateSessionToken().slice(0, 32); // CSRF token
 
   const url = new URL("https://github.com/login/oauth/authorize");
@@ -36,9 +65,10 @@ authRoutes.get("/github/callback", async (c) => {
     return c.json({ error: "Missing code parameter" }, 400);
   }
 
-  // Must match exactly what was sent in the authorize request
+  // Must match exactly what was sent in the authorize request — that
+  // means the browser-visible origin (Pages), not the Worker origin.
   const reqUrl = new URL(c.req.url);
-  const redirectUri = reqUrl.origin + reqUrl.pathname;
+  const redirectUri = browserOrigin(c) + reqUrl.pathname;
 
   // Exchange code for access token
   const accessToken = await exchangeCodeForToken(
@@ -105,16 +135,18 @@ authRoutes.get("/github/callback", async (c) => {
       .run();
   }
 
-  // Create session
+  // Create session and hand the token to the browser via an HttpOnly,
+  // Secure, SameSite=Lax cookie. JS cannot read it → immune to XSS token
+  // exfiltration. `__Host-` prefix enforces Secure + Path=/ + no Domain.
+  // SameSite=Lax allows the cookie on GitHub's top-level redirect back to
+  // us but blocks cross-site POSTs (CSRF protection).
   const token = await createSession(db, userId);
-
-  // Redirect to dashboard with token in URL fragment (not query param — fragments
-  // are never sent to the server, so the token stays client-side only).
   const frontendUrl = c.env.FRONTEND_URL || "https://mcprecon.pages.dev";
   return new Response(null, {
     status: 302,
     headers: {
-      Location: `${frontendUrl}/dashboard#token=${token}`,
+      Location: `${frontendUrl}/dashboard`,
+      "Set-Cookie": sessionCookie(token),
     },
   });
 });
@@ -127,12 +159,25 @@ authRoutes.get("/me", requireAuth, (c) => {
 
 /** POST /v1/auth/logout — destroy session. */
 authRoutes.post("/logout", requireAuth, async (c) => {
-  // The token comes via Authorization header (from auth.js localStorage)
+  // The token arrives via either the __Host-session cookie (browser) or a
+  // Bearer header (legacy callers). Destroy whichever we find, and always
+  // emit a clearing Set-Cookie so the browser drops the HttpOnly cookie.
   const authHeader = c.req.header("Authorization");
+  let token: string | undefined;
   if (authHeader?.startsWith("Bearer ")) {
-    const token = authHeader.slice(7).trim();
+    token = authHeader.slice(7).trim();
+  } else {
+    token = getCookie(c, "__Host-session");
+  }
+  if (token) {
     await destroySession(c.env.RECON_DB, token);
   }
 
-  return c.json({ ok: true });
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Set-Cookie": clearSessionCookie(),
+    },
+  });
 });

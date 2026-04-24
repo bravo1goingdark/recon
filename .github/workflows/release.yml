@@ -6,6 +6,9 @@ on:
 
 permissions:
   contents: write
+  # Required by the sigstore/cosign keyless flow: the action trades the
+  # workflow's OIDC identity for a short-lived signing certificate.
+  id-token: write
 
 jobs:
   build:
@@ -17,15 +20,23 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: recon
+            ext: tar.gz
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: recon
+            ext: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: recon
+            ext: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: recon
+            ext: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: recon.exe
+            ext: zip
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,34 +57,177 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
+      - name: Install build dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc --no-progress -y
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          RECON_LICENSE_HMAC_KEY: ${{ secrets.RECON_LICENSE_HMAC_KEY }}
 
-      - name: Package
+      - name: Strip binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          else
+            strip target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          fi
+
+      - name: Strip binary (macOS)
+        if: runner.os == 'macOS'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../recon-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "target/${{ matrix.target }}/release/${{ matrix.artifact }}" `
+            -DestinationPath "recon-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: recon-${{ matrix.target }}
-          path: recon-${{ matrix.target }}.tar.gz
+          path: recon-${{ matrix.target }}.${{ matrix.ext }}
 
-  release:
-    name: Create Release
+  publish:
+    name: Publish to R2 + update latest.json
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      # ─── Supply-chain verification artifacts ──────────────────────────────
+      # SHA256SUMS.txt: one line per tarball/zip in the standard
+      # `<hex>  <filename>` format that `sha256sum -c` consumes. This is
+      # what scripts/install.{sh,ps1} fetch and verify against before
+      # extracting — tampered binaries fail the check.
+      - name: Generate SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          for f in recon-*.tar.gz recon-*.zip; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" >> SHA256SUMS.txt
+          done
+          echo "── SHA256SUMS.txt ──"
+          cat SHA256SUMS.txt
+
+      # Sigstore keyless: no long-lived signing key. The cosign action
+      # exchanges our GitHub OIDC token for a short-lived Fulcio
+      # certificate and signs SHA256SUMS.txt with it. The resulting
+      # .sig and .pem are uploaded alongside the sums so install scripts
+      # (with cosign installed) can verify provenance.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS.txt (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --output-signature SHA256SUMS.txt.sig \
+            --output-certificate SHA256SUMS.txt.pem \
+            SHA256SUMS.txt
+          echo "signed; certificate identity = $(cosign triangulate SHA256SUMS.txt 2>/dev/null || echo 'n/a')"
+
+      - name: Upload binaries + sums + signatures to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.ref_name }}"
+          # Upload binaries
+          for f in recon-*.tar.gz recon-*.zip; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *.tar.gz) ct="application/gzip" ;;
+              *.zip)    ct="application/zip" ;;
+            esac
+            echo "Uploading $f → releases/$VERSION/$f"
+            wrangler r2 object put "recon-releases/releases/$VERSION/$f" \
+              --file "$f" \
+              --content-type "$ct" \
+              --remote
+          done
+          # Upload sums + cosign artifacts. The sums file is served as
+          # text/plain so browsers don't try to interpret it.
+          for f in SHA256SUMS.txt SHA256SUMS.txt.sig SHA256SUMS.txt.pem; do
+            [ -f "$f" ] || continue
+            echo "Uploading $f → releases/$VERSION/$f"
+            wrangler r2 object put "recon-releases/releases/$VERSION/$f" \
+              --file "$f" \
+              --content-type "text/plain" \
+              --remote
+          done
+
+      - name: Update latest.json
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          echo "{\"version\":\"$VERSION\"}" > latest.json
+          wrangler r2 object put recon-releases/latest.json \
+            --file latest.json \
+            --content-type "application/json" \
+            --remote
+
+      - name: Create GitHub Release (private, for changelog)
         uses: softprops/action-gh-release@v2
         with:
-          files: recon-*.tar.gz
+          files: |
+            recon-*.tar.gz
+            recon-*.zip
+            SHA256SUMS.txt
+            SHA256SUMS.txt.sig
+            SHA256SUMS.txt.pem
           generate_release_notes: true
+
+  deploy-site:
+    name: Deploy Pages site + Functions
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      # Single source of truth for installers: scripts/install.{sh,ps1}
+      # are copied into the Pages root here so `curl …/install.sh | bash`
+      # always serves the version that ships with the release. No more
+      # drift between site/install.ps1 and scripts/install.ps1.
+      - name: Sync installers into site/
+        run: |
+          install -m 0755 scripts/install.sh  site/install.sh
+          install -m 0644 scripts/install.ps1 site/install.ps1
+
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd site && wrangler pages deploy . \
+            --project-name mcprecon \
+            --commit-message "release ${{ github.ref_name }}"

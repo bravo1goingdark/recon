@@ -5,6 +5,7 @@ import { licenseRoutes } from "./routes/license";
 import { authRoutes } from "./routes/auth";
 import { dashboardRoutes } from "./routes/dashboard";
 import { billingRoutes } from "./routes/billing";
+import { handleScheduled } from "./scheduled";
 import type { Env } from "./types";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -32,4 +33,16 @@ app.get("/api/health", (c) => c.json({ status: "ok", version: "1.0.0" }));
 // 404 fallback
 app.all("*", (c) => c.json({ error: "Not found" }, 404));
 
-export default app;
+// Module-format default export: fetch for HTTP, scheduled for cron triggers.
+// The `scheduled` handler runs on the cadence defined in wrangler.toml
+// [triggers] — currently hourly, for subscription-expiry downgrades.
+export default {
+  fetch: app.fetch,
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ) {
+    ctx.waitUntil(handleScheduled(env));
+  },
+};

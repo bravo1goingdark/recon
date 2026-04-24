@@ -1,5 +1,11 @@
 /**
  * Dashboard page — uses authFetch() from auth.js for all API calls.
+ *
+ * Wiring note: we cannot use inline `onclick=` attributes under the
+ * strict CSP (`script-src 'self'` with no unsafe-inline). Every
+ * interactive element is bound once at DOMContentLoaded via
+ * `addEventListener`, with the dynamic revoke buttons handled by a
+ * single event-delegation listener on the #keys container.
  */
 
 async function loadDashboard() {
@@ -57,6 +63,7 @@ function renderQuickstart(keys) {
   if (!el) return;
   var active = keys.filter(function (k) { return !k.revoked; });
   if (active.length > 0 && keyEl) {
+    // Show prefix with ellipsis — full key was shown once at generation time
     keyEl.textContent = active[0].key_prefix + "...";
     el.style.display = "block";
   }
@@ -71,6 +78,8 @@ function renderKeys(keys) {
     return;
   }
 
+  // NOTE: the Revoke button uses `data-key-id` + a single delegated
+  // listener on #keys. Don't reintroduce `onclick=` — CSP blocks it.
   el.innerHTML = keys
     .map(function (k) {
       return (
@@ -81,7 +90,7 @@ function renderKeys(keys) {
         '<span class="dim">' + new Date(k.created_at).toLocaleDateString() + "</span>" +
         (k.revoked
           ? '<span class="dim">revoked</span>'
-          : '<button onclick="revokeKey(\'' + k.id + '\')" class="btn ghost sm danger">Revoke</button>') +
+          : '<button class="btn ghost sm danger" data-action="revoke-key" data-key-id="' + escapeHtml(k.id) + '">Revoke</button>') +
         "</div>"
       );
     })
@@ -98,15 +107,111 @@ function renderBilling(billing) {
     " · " + tc.limits.max_files.toLocaleString() + " files" +
     " · " + (tc.limits.max_loc / 1000).toLocaleString() + "K LOC";
 
+  // Pick the status line + right-hand CTA based on subscription state.
+  // Four states the dashboard has to reflect:
+  //   1. Free + no sub  → show Subscribe CTA
+  //   2. Paid + active + not cancelled → show "Next billing: DATE" + Cancel
+  //   3. Paid + cancel_at_period_end → show "Ends DATE" + Resubscribe
+  //   4. Paid + cancelled/halted/expired → show "Access until DATE" + Resubscribe
+  var statusLine = "";
+  var actionHtml = "";
+  var sub = billing.subscription;
+
+  if (sub && sub.tier !== "Free") {
+    var endDate = sub.current_period_end
+      ? formatDate(sub.current_period_end)
+      : "unknown";
+
+    if (sub.status === "active" && !sub.cancel_at_period_end) {
+      statusLine =
+        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px">Next billing: ' +
+        escapeHtml(endDate) +
+        "</div>";
+      actionHtml =
+        '<button id="cancel-sub-btn" class="btn ghost sm" style="margin-left:auto">Cancel subscription</button>';
+    } else if (sub.cancel_at_period_end || sub.status === "cancelled") {
+      statusLine =
+        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px;color:var(--clay)">Cancelled — access until ' +
+        escapeHtml(endDate) +
+        "</div>";
+      actionHtml =
+        '<a href="/pricing" class="btn primary sm" style="margin-left:auto">Resubscribe →</a>';
+    } else if (sub.status === "halted") {
+      statusLine =
+        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px;color:var(--clay)">Payment failed — access until ' +
+        escapeHtml(endDate) +
+        ". Update card at Razorpay and resubscribe.</div>";
+      actionHtml =
+        '<a href="/pricing" class="btn primary sm" style="margin-left:auto">Resubscribe →</a>';
+    }
+  } else if (billing.tier === "Free") {
+    actionHtml =
+      '<a href="/pricing" class="btn primary sm" style="margin-left:auto">Subscribe →</a>';
+  }
+
   el.innerHTML =
     '<div class="billing-row">' +
     '<div><strong>' + escapeHtml(billing.tier) + "</strong> " +
-    '<span class="dim" style="font-family:var(--mono);font-size:11px">' + escapeHtml(tc.price_display) + "</span></div>" +
+    '<span class="dim" style="font-family:var(--mono);font-size:11px">' + escapeHtml(tc.price_display) + "</span>" +
+    statusLine +
+    "</div>" +
     '<div class="billing-limits">' + limitsHtml + "</div>" +
-    (billing.tier === "Free"
-      ? '<a href="/pricing" class="btn primary sm" style="margin-left:auto">Upgrade →</a>'
-      : "") +
+    actionHtml +
     "</div>";
+
+  // Wire the cancel button if it was rendered this pass.
+  var cancelBtn = document.getElementById("cancel-sub-btn");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", cancelSubscription);
+  }
+}
+
+/**
+ * Format a UTC ISO date or unix-second-ish value into a local YYYY-MM-DD
+ * string. Worker returns ISO-8601 from D1; fall back gracefully for
+ * anything else.
+ */
+function formatDate(value) {
+  try {
+    var d = new Date(value);
+    if (isNaN(d.getTime())) return String(value);
+    return d.toISOString().slice(0, 10);
+  } catch (_) {
+    return String(value);
+  }
+}
+
+async function cancelSubscription() {
+  if (!confirm(
+    "Cancel your subscription?\n\n" +
+    "You'll keep full access until the end of the current billing period. " +
+    "After that, your account drops to the Free tier.\n\n" +
+    "You can resubscribe any time.",
+  )) {
+    return;
+  }
+
+  var btn = document.getElementById("cancel-sub-btn");
+  if (btn) {
+    btn.textContent = "Cancelling…";
+    btn.disabled = true;
+  }
+
+  var resp = await authFetch("/v1/billing/cancel", { method: "POST" });
+  if (!resp.ok) {
+    var err = await resp.json().catch(function () {
+      return { error: "Cancel failed (" + resp.status + ")" };
+    });
+    alert(err.error || "Cancel failed");
+    if (btn) {
+      btn.textContent = "Cancel subscription";
+      btn.disabled = false;
+    }
+    return;
+  }
+
+  // Refresh the dashboard to show the new "Cancelled — access until" state.
+  loadDashboard();
 }
 
 async function generateKey() {
@@ -128,15 +233,24 @@ async function generateKey() {
 
 async function revokeKey(id) {
   if (!confirm("Revoke this API key? This cannot be undone.")) return;
-  await authFetch("/v1/dashboard/keys/" + id, { method: "DELETE" });
+  var resp = await authFetch("/v1/dashboard/keys/" + encodeURIComponent(id), {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 404) {
+    // 404 can happen if the row was already gone — treat as success.
+    alert("Failed to revoke key");
+    return;
+  }
   loadDashboard();
 }
 
 function showKeyModal(key) {
   var modal = document.getElementById("key-modal");
   var keyEl = document.getElementById("new-key-value");
+  var loginCmdEl = document.getElementById("login-cmd");
   if (modal && keyEl) {
     keyEl.textContent = key;
+    if (loginCmdEl) loginCmdEl.textContent = "recon login " + key;
     modal.style.display = "flex";
   }
 }
@@ -153,9 +267,66 @@ function copyKey() {
     var btn = document.getElementById("copy-btn");
     if (btn) {
       btn.textContent = "Copied!";
-      setTimeout(function () { btn.textContent = "Copy to clipboard"; }, 2000);
+      setTimeout(function () { btn.textContent = "Copy key"; }, 2000);
     }
   }
 }
 
-document.addEventListener("DOMContentLoaded", loadDashboard);
+function copyLoginCmd() {
+  var el = document.getElementById("login-cmd");
+  if (el) {
+    navigator.clipboard.writeText(el.textContent || "");
+    var btn = document.getElementById("copy-login-btn");
+    if (btn) {
+      btn.textContent = "Copied!";
+      setTimeout(function () { btn.textContent = "Copy command"; }, 2000);
+    }
+  }
+}
+
+/**
+ * Bind all interactive elements once on page load.
+ * Static buttons get direct listeners; the dynamic revoke buttons
+ * (generated by renderKeys into #keys innerHTML) use a single
+ * delegated listener on the container.
+ */
+function wireControls() {
+  var gen = document.getElementById("generate-key-btn");
+  if (gen) gen.addEventListener("click", generateKey);
+
+  var logoutLink = document.getElementById("logout-link");
+  if (logoutLink) {
+    logoutLink.addEventListener("click", function (e) {
+      e.preventDefault();
+      // `logout` is defined in auth.js — shared across pages.
+      if (typeof logout === "function") logout();
+    });
+  }
+
+  var closeBtn = document.getElementById("close-key-modal-btn");
+  if (closeBtn) closeBtn.addEventListener("click", closeKeyModal);
+
+  var copyBtn = document.getElementById("copy-btn");
+  if (copyBtn) copyBtn.addEventListener("click", copyKey);
+
+  var copyLoginBtn = document.getElementById("copy-login-btn");
+  if (copyLoginBtn) copyLoginBtn.addEventListener("click", copyLoginCmd);
+
+  // Event delegation: one listener for every Revoke button rendered
+  // into #keys by renderKeys(), including ones added on subsequent
+  // reloads after generateKey().
+  var keysContainer = document.getElementById("keys");
+  if (keysContainer) {
+    keysContainer.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-action='revoke-key']");
+      if (!btn) return;
+      var id = btn.getAttribute("data-key-id");
+      if (id) revokeKey(id);
+    });
+  }
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  wireControls();
+  loadDashboard();
+});

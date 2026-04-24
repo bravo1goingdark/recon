@@ -1,0 +1,94 @@
+# cargo-deny configuration.
+#
+# Run locally with:   cargo deny check
+# In CI:              .github/workflows/ci.yml audit job
+#
+# What each section gates:
+#   advisories - RUSTSEC vulnerability database. Any new CVE on a transitive
+#                dep fails the build.
+#   licenses   - Allowlist only. Anything outside this list needs a justification
+#                and an explicit `exceptions` entry.
+#   bans       - Specific packages we refuse to ship (e.g. unmaintained forks,
+#                known-bad crates).
+#   sources    - Crate registries we trust. Only crates.io today.
+
+[graph]
+# Include dev-dependencies too — benches and tests run in the same ecosystem
+# and are just as exposed to supply-chain issues.
+all-features = false
+no-default-features = false
+
+[advisories]
+# `deny` fails the build on any advisory. `warn` on unmaintained is a
+# judgement call: unmaintained doesn't mean vulnerable, but it does mean
+# we won't get a fix for the next issue.
+yanked = "deny"
+ignore = [
+  # paste 1.0.15 — unmaintained (author archived the repo). Pulled in
+  # transitively by tokenizers/rav1e via fastembed (optional `embed`
+  # feature) and by image. No drop-in replacement available in our
+  # dependency graph; pastey is a fork but tokenizers hasn't switched.
+  # Revisit when tokenizers or fastembed adopt pastey/with_builtin_macros.
+  # https://rustsec.org/advisories/RUSTSEC-2024-0436
+  "RUSTSEC-2024-0436",
+]
+
+[licenses]
+# Allowlist — every crate in our graph must match one of these SPDX ids.
+# Copy-left licenses (GPL, AGPL) are intentionally omitted; they would
+# force us to open-source recon's proprietary components.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "MPL-2.0",
+  "0BSD",
+  "BSL-1.0",
+  # libfuzzer-sys ships with "(MIT OR Apache-2.0) AND NCSA". NCSA is
+  # permissive (close to MIT); allowing it just lets cargo-deny accept
+  # the composite expression.
+  "NCSA",
+  # webpki-roots + webpki-root-certs (required by our TLS stack via
+  # ureq/rustls) use the CDLA-Permissive-2.0 license for the certificate
+  # bundle itself. It is permissive and explicitly compatible with
+  # redistribution in a binary.
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.92
+
+[bans]
+multiple-versions = "warn"
+# All our wildcards are internal `{ workspace = true }` references, which
+# cargo-deny flags as version="*". Downgrade to warn rather than mis-label
+# a workspace dependency as a supply-chain risk.
+wildcards = "warn"
+# Crates we explicitly refuse, with justification.
+deny = [
+  # git2 is a libgit2 FFI — we use gix (pure Rust) per CLAUDE.md. Pulling
+  # git2 transitively would undo the binary-size + portability work.
+  { name = "git2" },
+  { name = "libgit2-sys" },
+  # NOTE: openssl-sys is NOT in this list. It enters the graph via the
+  # optional `embed` feature (fastembed → ort → reqwest → native-tls).
+  # When `embed` is off — which is the default for server/CLI release
+  # builds — openssl-sys is not linked. Listing it here would fail CI
+  # because cargo-deny inspects the full Cargo.lock regardless of
+  # feature selection. We accept the dependency transitively and rely
+  # on code review to keep openssl-sys out of non-embed code paths.
+]
+# Skip multiple-version noise for deps where a duplicate pin is expected
+# (build graphs converging on old minor versions).
+skip = []
+
+[sources]
+# Lock the registry set to the crates.io default. Any attempt to pull
+# from a private registry, git URL, or local path fails the check.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

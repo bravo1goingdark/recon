@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>recon docs — Architecture, Tools, Filter DSL, Benchmarks</title>
-<meta name="description" content="Technical documentation for recon MCP server. 12 tools, 5 search tiers, PageRank repo map, filter DSL, incremental indexing, secret redaction." />
+<title>recon docs — Local-first MCP server · Tools · Filter DSL · Benchmarks</title>
+<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 12 tools, 5 search tiers, PageRank repo map, filter DSL, incremental indexing, secret redaction." />
 <link rel="canonical" href="https://mcprecon.pages.dev/Docs.html" />
-<meta property="og:title" content="recon docs — Architecture & API Reference" />
-<meta property="og:description" content="12 symbol-aware MCP tools. SQLite + Tantivy + fff-grep search tiers. PageRank repo map. Filter DSL." />
+<meta property="og:title" content="recon docs — Local-first MCP server" />
+<meta property="og:description" content="12 symbol-aware MCP tools. Signed 24 MB Rust binary. SQLite + Tantivy + fff-grep search tiers. Your code stays on your machine." />
 <meta property="og:url" content="https://mcprecon.pages.dev/Docs.html" />
 <meta property="og:image" content="https://mcprecon.pages.dev/og.png" />
 <meta name="twitter:card" content="summary_large_image" />
@@ -168,7 +168,7 @@
     <li><a href="index.html#tools">Tools</a></li>
     <li><a href="index.html#how">How it works</a></li>
     <li><a href="index.html#benchmarks">Benchmarks</a></li>
-    <li><a href="index.html#install">Connect</a></li>
+    <li><a href="index.html#install">Install</a></li>
     <li><a class="active" href="Docs.html">Docs</a></li>
   </ul>
   <div style="display:flex;align-items:center;gap:16px">
@@ -219,9 +219,9 @@
     <div class="crumb"><em>Docs</em> &nbsp;/ &nbsp;Introduction</div>
     <h1>The <em>manual.</em></h1>
     <p class="lede">
-      <b>recon</b> is a Rust MCP server that gives AI coding agents symbol-aware tools
+      <b>recon</b> is a local-first Rust MCP server that gives AI coding agents symbol-aware tools
       in place of <code>Read</code>, <code>Grep</code>, and <code>Glob</code>. This
-      document explains what it is, how to run it, and the ideas that shape its API.
+      document explains what it is, how to install it, and the ideas that shape its API.
     </p>
 
     <!-- INTRO -->
@@ -233,9 +233,10 @@
       fact of life.
     </p>
     <p>
-      recon is a <b>hosted MCP server</b>. Your agent connects over MCP; indexing,
-      watching, ranking, and search all run server-side. There is no local binary to
-      install, no build step, no watcher process on your machine.
+      recon is a <b>local-first MCP server</b>, shipped as a signed 24 MB Rust binary.
+      Your IDE auto-spawns it over stdio; indexing, watching, ranking, and search all
+      run on your machine. The only thing that touches the network is a one-time license
+      validation — your source code never leaves.
     </p>
     <p>
       Under the hood it is tree-sitter for structure, SQLite + FTS5 for exact and fuzzy
@@ -251,40 +252,59 @@
     </div>
 
     <!-- INSTALL -->
-    <h2 id="install"><span class="no">02</span>Connecting</h2>
-    <p>recon is a hosted MCP server. You don't install anything — you connect your agent to it.</p>
+    <h2 id="install"><span class="no">02</span>Installation</h2>
+    <p>recon ships as a single 24 MB Rust binary. The installer verifies the artifact's SHA256 against a co-signed manifest before extraction — and, when <code>cosign</code> is present on the machine, also verifies the manifest's sigstore signature against our GitHub Actions release workflow.</p>
 
-<pre><span class="c"># 1. create a workspace key at recon.dev</span>
-<span class="h">RECON_KEY</span>=rk_live_9f2c…
+<pre><span class="c"># Linux · macOS</span>
+curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
-<span class="c"># 2. register the repo you want indexed</span>
-POST https://api.recon.dev/v1/workspaces/acme/repos
-  { <span class="h">"remote"</span>: "git@…:acme/web.git", <span class="h">"ref"</span>: "main" }</pre>
+<span class="c"># Windows (PowerShell)</span>
+iwr https://mcprecon.pages.dev/install.ps1 | iex
+
+<span class="c"># pin a specific version (default is the latest release)</span>
+VERSION=v0.1.0 curl -fsSL https://mcprecon.pages.dev/install.sh | bash</pre>
+
+    <p>If piping a script into a shell isn't your style, grab the tarball and <code>SHA256SUMS.txt</code> from the release page and verify by hand:</p>
+<pre><span class="c"># manual verification</span>
+cosign verify-blob \
+  --certificate SHA256SUMS.txt.pem \
+  --signature SHA256SUMS.txt.sig \
+  --certificate-identity-regexp '^https://github.com/.*/.github/workflows/release.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS.txt
+
+sha256sum -c SHA256SUMS.txt</pre>
 
     <h3 id="quickstart">Quickstart</h3>
-    <p>Point your agent at recon over MCP. Any MCP-compatible client works — Claude Code, Cursor, custom agents. Drop this into your agent's MCP config:</p>
-<pre>{
-  <span class="h">"mcpServers"</span>: {
-    <span class="h">"recon"</span>: {
-      "url": "https://mcp.recon.dev/v1",
-      "headers": {
-        "Authorization": "Bearer $RECON_KEY"
-      }
-    }
-  }
-}</pre>
+    <p>Authenticate once per machine, then configure each repo. Your IDE auto-spawns <code>recon serve</code> over stdio — you never run it by hand.</p>
+<pre><span class="c"># 1. authenticate once (caches license globally)</span>
+recon login <span class="h">sk-recon-your-key</span>
 
-    <p>Then nudge the agent to prefer symbol-aware tools. Add this to its system prompt or agent rules:</p>
+<span class="c"># 2. in each project: index + write MCP config</span>
+cd your-project
+recon init --mcp <span class="h">cc</span>        <span class="c"># Claude Code  → .mcp.json</span>
+recon init --mcp <span class="h">cursor</span>    <span class="c"># Cursor       → .cursor/mcp.json</span>
+recon init --mcp <span class="h">windsurf</span>  <span class="c"># Windsurf     → .windsurf/mcp.json</span>
+recon init --mcp <span class="h">oc</span>        <span class="c"># OpenCode     → .opencode/mcp.json</span></pre>
+
+    <p>Then nudge the agent to prefer symbol-aware tools. Add this to <code>CLAUDE.md</code> or your agent's system prompt:</p>
 <pre><span class="c"># agent rules</span>
 Use <span class="h">code_*</span> tools (code_outline, code_skeleton, code_find_symbol,
 code_search, code_repo_map) before Read/Grep/Glob when
 exploring code. They return structured, token-efficient results.</pre>
 
-    <!-- CONFIG -->
-    <h2 id="configuration"><span class="no">03</span>Workspace configuration</h2>
-    <p>Per-workspace settings live at <code>recon.dev/settings</code>, or via the management API. These apply server-side; your agent never sees them.</p>
+    <div class="callout">
+      <div class="tag">Privacy</div>
+      <p>The only network traffic recon ever makes is a short license check against our auth API — it carries your key and returns your tier. Your source, your search queries, and every tool response stay on your machine.</p>
+    </div>
 
-<pre><span class="c"># Additional ignore patterns (on top of .gitignore)</span>
+    <!-- CONFIG -->
+    <h2 id="configuration"><span class="no">03</span>Configuration</h2>
+    <p>Per-repo settings live in <code>.recon/config.toml</code> at your project root. The file is local — it ships with your repo if you choose, never with your license. Defaults are conservative; override only what you need.</p>
+
+<pre><span class="c"># .recon/config.toml</span>
+
+<span class="c"># Additional ignore patterns (on top of .gitignore)</span>
 ignore_patterns = [<span class="h">"*.generated.*"</span>, <span class="h">"dist/"</span>]
 
 <span class="c"># Max file size to index (default 2 MB)</span>
@@ -501,18 +521,18 @@ allow_sensitive = <span class="h">false</span></pre>
     <h2 id="changelog"><span class="no">12</span>Changelog</h2>
     <p><b>v0.1.0</b> — Initial release.</p>
     <ul class="bul">
-      <li>Hosted MCP server with API key auth and multi-tenant DashMap routing</li>
-      <li>Streamable HTTP transport (MCP spec 2025-11-25) + stdio</li>
-      <li>12 tools, 9 languages, 5 output shapes</li>
+      <li>Local-first MCP server, 24 MB Rust binary, signed with SHA256 + cosign keyless sigstore</li>
+      <li>GitHub OAuth sign-in, license issued via <code>recon login</code>, cached per machine</li>
+      <li>stdio MCP transport — the IDE spawns <code>recon serve</code>, no inbound ports</li>
+      <li>12 tools, 9 languages, 5 canonical output shapes</li>
       <li>3-tier symbol search: exact SQLite → Tantivy BM25 → FTS5 trigram + nucleo fuzzy</li>
-      <li>Tantivy-first text search with grep fallback</li>
+      <li>Tantivy-first text search with fff-grep SIMD fallback</li>
       <li>PageRank repo map with early convergence, cached in SQLite</li>
-      <li>Merkle incremental indexing with chunked bulk inserts (500 files/tx)</li>
-      <li>Secret redaction on all code-returning tool responses</li>
+      <li>Merkle incremental indexing, chunked bulk inserts (500 files/tx)</li>
+      <li>Secret redaction on every code-returning tool response</li>
       <li>mimalloc, parking_lot::Mutex, ahash::AHashMap, fat LTO</li>
-      <li>107 tests, zero unwrap in production code, #[deny(missing_docs)] on all crates</li>
-      <li><code>rr</code> — public CLI client for remote servers</li>
-      <li>Tested on Zed (1.3M LOC) and Rust compiler (3.8M LOC)</li>
+      <li>367 Rust tests + 22 worker tests; zero unwrap in production code; <code>#[deny(missing_docs)]</code> on every crate root</li>
+      <li>Tested on Zed (1.3M LOC) and the Rust compiler (3.8M LOC)</li>
     </ul>
 
     <h2 id="license"><span class="no">13</span>License</h2>
@@ -551,46 +571,8 @@ allow_sensitive = <span class="h">false</span></pre>
   </aside>
 </div>
 
-<script>
-  // Active TOC + sidebar highlight on scroll
-  const ids = ['introduction','install','configuration','shapes','tiers','incremental','filter-dsl','tools','security','performance','adrs','changelog','license'];
-  const links = ids.map(id => ({
-    id,
-    toc:  document.querySelector(`aside.toc a[href="#${id}"]`),
-    side: document.querySelector(`aside.side a[href="#${id}"]`)
-  }));
-  const io = new IntersectionObserver(entries => {
-    entries.forEach(e => {
-      if (!e.isIntersecting) return;
-      links.forEach(l => { l.toc?.classList.remove('on'); l.side?.classList.remove('on'); });
-      const active = links.find(l => l.id === e.target.id);
-      active?.toc?.classList.add('on');
-      active?.side?.classList.add('on');
-    });
-  }, { rootMargin: '-96px 0px -70% 0px', threshold: 0 });
-  ids.forEach(id => { const el = document.getElementById(id); if (el) io.observe(el); });
-</script>
-
-<script>
-(function(){
-  const btn = document.getElementById('theme-toggle');
-  const icon = document.getElementById('theme-icon');
-  const html = document.documentElement;
-  function getTheme(){
-    return localStorage.getItem('theme') ||
-      (matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
-  }
-  function apply(t){
-    html.setAttribute('data-theme', t);
-    icon.textContent = t === 'dark' ? '☀' : '◑';
-    localStorage.setItem('theme', t);
-  }
-  apply(getTheme());
-  btn.addEventListener('click', function(){ apply(getTheme() === 'dark' ? 'light' : 'dark'); });
-  btn.addEventListener('mouseenter', function(){ btn.style.borderColor = 'var(--ink-2)'; btn.style.color = 'var(--ink)'; });
-  btn.addEventListener('mouseleave', function(){ btn.style.borderColor = 'var(--rule)'; btn.style.color = 'var(--ink-3)'; });
-})();
-</script>
+<script src="/js/docs-toc.js"></script>
+<script src="/js/theme.js"></script>
 
 </body>
 </html>

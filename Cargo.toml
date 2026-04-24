@@ -129,6 +129,7 @@ sha2 = "0.10"
 # Misc
 tempfile = "3.27.0"
 filetime = "0.2"
+ulid = { version = "1.2", default-features = false, features = ["std"] }
 
 [profile.dev.package."*"]
 opt-level = 2

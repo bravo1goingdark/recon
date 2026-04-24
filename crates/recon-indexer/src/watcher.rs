@@ -92,6 +92,16 @@ impl Watcher {
         self.rx.recv().ok()
     }
 
+    /// Block up to `timeout` for the next batch.
+    ///
+    /// Returns `Ok(paths)` on a batch, `Err(RecvTimeoutError::Timeout)` if
+    /// nothing arrived in time, `Err(Disconnected)` once the debouncer stops.
+    /// The timeout lets shutdown logic wake every few hundred ms to observe a
+    /// cancellation flag.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Vec<PathBuf>, mpsc::RecvTimeoutError> {
+        self.rx.recv_timeout(timeout)
+    }
+
     /// Non-blocking poll for changed paths.
     pub fn try_recv(&self) -> Option<Vec<PathBuf>> {
         self.rx.try_recv().ok()

@@ -1,2 +1,5 @@
 # Page rewrites handled by directory structure (login/index.html, etc.)
 /docs  /Docs.html  200
+
+# /api/* and /releases/* and /latest.json are served by Pages Functions in
+# site/functions/ — no _redirects entries needed for those routes.

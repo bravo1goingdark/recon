@@ -335,11 +335,7 @@ fn init_server(repo: PathBuf) -> Result<(ReconServer, PathBuf)> {
 
 /// Open an existing index for read-only CLI queries (no re-index on startup).
 fn read_server(repo: PathBuf) -> Result<ReconServer> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(EnvFilter::new("warn"))
-        .init();
-
+    init_tracing("warn");
     let (server, _) = init_server(repo)?;
     Ok(server)
 }
@@ -405,8 +401,8 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
                     }
                 });
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("shutting down");
+            _ = wait_for_shutdown_signal() => {
+                info!("http server shutting down");
                 cancel.cancel();
                 break;
             }
@@ -417,10 +413,111 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
+// ── Tracing init ───────────────────────────────────────────────────────────────
+
+/// Initialize the global tracing subscriber.
+///
+/// Honors two environment variables:
+/// - `RECON_LOG` / `RUST_LOG` — standard `EnvFilter` directive
+///   (defaults to `default_filter` if unset).
+/// - `RECON_LOG_FORMAT` — `json` for structured JSON-per-line output,
+///   anything else (default) for the human-friendly text format.
+///
+/// Always writes to stderr. Never writes to stdout — the MCP stdio
+/// transport would corrupt on stdout log lines.
+///
+/// Idempotent in the sense that an already-installed subscriber means
+/// subsequent calls silently no-op (they return `Err` from `try_init`).
+fn init_tracing(default_filter: &str) {
+    let env_filter = EnvFilter::try_from_env("RECON_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+
+    let json = std::env::var("RECON_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    if json {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_writer(std::io::stderr)
+            .with_env_filter(env_filter)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(env_filter)
+            .try_init();
+    }
+}
+
+// ── Shutdown signal ────────────────────────────────────────────────────────────
+
+/// Wait for either SIGINT (Ctrl-C) or, on Unix, SIGTERM.
+///
+/// Systemd / docker / kubernetes send SIGTERM to request graceful stop.
+/// Without this, the MCP server would exit only on Ctrl-C and get SIGKILLed
+/// in production after the kill-grace window.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("could not install SIGTERM handler: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("received SIGINT");
+            }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("received Ctrl-C");
+    }
+}
+
+// ── Panic hook ─────────────────────────────────────────────────────────────────
+
+/// Install a panic hook that writes a structured one-line record plus backtrace
+/// to stderr. Writes to stderr only — stdio-transport MCP would corrupt on a
+/// panic to stdout. Captures a backtrace when `RUST_BACKTRACE` is set.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
+        let backtrace = std::backtrace::Backtrace::capture();
+        eprintln!("\n[recon] panic at {location} in thread {thread:?}: {msg}\n{backtrace}");
+    }));
+}
+
 // ── main ───────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_panic_hook();
+
     let cli = Cli::parse();
     let repo = cli.repo;
     let raw_json = cli.json;
@@ -435,19 +532,22 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let limits = license.tier.limits();
             eprintln!(
-                "{} tier: {} repos, {} files, {}K LOC",
+                "✓ Authenticated — {} tier ({} repos, {} files, {}K LOC)",
                 license.tier.name(),
                 limits.max_repos,
                 limits.max_files,
                 limits.max_loc / 1_000,
             );
             if !license.message.is_empty() {
-                eprintln!("{}", license.message);
+                eprintln!("  {}", license.message);
             }
-            eprintln!(
-                "License cached at {}",
-                config_dir.join("license.json").display()
-            );
+            eprintln!();
+            eprintln!("Next steps:");
+            eprintln!("  cd your-project");
+            eprintln!("  recon init --mcp cc      # Claude Code");
+            eprintln!("  recon init --mcp cursor  # Cursor");
+            eprintln!("  recon init --mcp windsurf  # Windsurf");
+            eprintln!("  recon init --mcp oc      # OpenCode");
             Ok(())
         }
 
@@ -486,10 +586,7 @@ async fn main() -> Result<()> {
 
         // ── Indexing + IDE setup ──────────────────────────────────────────────
         Command::Init { mcp } => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .with_env_filter(EnvFilter::new("info"))
-                .init();
+            init_tracing("info");
 
             let repo = repo.canonicalize()?;
 
@@ -606,10 +703,7 @@ async fn main() -> Result<()> {
 
         // ── MCP server ────────────────────────────────────────────────────────
         Command::Serve { log, port, host } => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .with_env_filter(EnvFilter::new(&log))
-                .init();
+            init_tracing(&log);
 
             // Try to migrate a per-repo license before validating.
             let canon_repo = repo.canonicalize().unwrap_or_else(|e| {
@@ -667,6 +761,12 @@ async fn main() -> Result<()> {
             let (server, repo) = init_server(repo)?;
             info!(?repo, "starting recon server");
 
+            // Install the license we validated above so the per-tool-call
+            // expiry gate can enforce billing-period boundaries. The periodic
+            // re-validation task (spawned below) will swap this out as the
+            // subscription state changes.
+            server.set_license(license.clone());
+
             server
                 .index_repo()
                 .await
@@ -679,22 +779,88 @@ async fn main() -> Result<()> {
 
             server.start_watcher();
 
+            // Periodic license re-validation. The on-disk cache has a 24 h
+            // TTL (see recon_server::license::CACHE_TTL_SECS); we poll every
+            // 6 h (override via RECON_LICENSE_REVALIDATE_SECS) so:
+            //   * a fresh `recon login` from another shell is picked up
+            //     without restarting `recon serve`;
+            //   * once the cache lapses past its TTL, the per-tool-call
+            //     expiry gate flips to blocking with a clear renewal message
+            //     — preventing indefinite use after sub cancellation.
+            //
+            // The task holds a clone of ReconServer (Arc internally). When
+            // the runtime shuts down at process exit, this sleep-loop is
+            // aborted cleanly.
+            {
+                let server_rev = server.clone();
+                let interval_secs = std::env::var("RECON_LICENSE_REVALIDATE_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(21_600) // 6 hours
+                    .clamp(60, 86_400);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+                        let dir = recon_server::license::global_config_dir();
+                        match recon_server::license::validate_license(None, &dir) {
+                            Ok(new) => {
+                                info!(
+                                    tier = new.tier.name(),
+                                    source = %new.source,
+                                    expires_in_secs = new.expires_at.saturating_sub(
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0)
+                                    ),
+                                    "license re-validated",
+                                );
+                                server_rev.set_license(new);
+                            }
+                            Err(e) => {
+                                tracing::warn!("license re-validation failed: {e}");
+                                // Keep the current license; the expiry gate
+                                // will eventually fire when it lapses.
+                            }
+                        }
+                    }
+                });
+            }
+
             if let Some(port) = port {
-                serve_http(server, &host, port).await
+                // serve_http already drives its own shutdown via ctrl_c + cancel.
+                let result = serve_http(server.clone(), &host, port).await;
+                server.shutdown().await;
+                result
             } else {
+                // Stdio MCP: the IDE (Claude Code, Cursor, Windsurf, OpenCode)
+                // spawns us as a subprocess. When the IDE exits it closes our
+                // stdio pipes; we must notice that as a shutdown trigger, not
+                // just SIGINT/SIGTERM. So select on both: signal *or* the
+                // MCP service loop terminating on its own.
                 let (stdin, stdout) = rmcp::transport::io::stdio();
-                let _service = server.serve((stdin, stdout)).await?;
-                tokio::signal::ctrl_c().await?;
+                let service = server.clone().serve((stdin, stdout)).await?;
+                let mut waiter = Box::pin(service.waiting());
+                tokio::select! {
+                    _ = wait_for_shutdown_signal() => {
+                        info!("shutdown requested");
+                    }
+                    res = &mut waiter => match res {
+                        Ok(reason) => info!(?reason, "MCP transport closed"),
+                        Err(e) => tracing::warn!("MCP service join error: {e}"),
+                    },
+                }
+                // Drop the pinned waiter: its DropGuard cancels the service
+                // task and its owned transport, releasing stdin/stdout.
+                drop(waiter);
+                server.shutdown().await;
                 Ok(())
             }
         }
 
         // ── Indexing only ─────────────────────────────────────────────────────
         Command::Index => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .with_env_filter(EnvFilter::new("info"))
-                .init();
+            init_tracing("info");
 
             validate_license_or_die()?;
 
@@ -857,6 +1023,14 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    // Env vars are process-global, so any test that mutates
+    // `RECON_WINDSURF_CONFIG_PATH` must hold this mutex for the whole
+    // duration of its set/use/remove critical section. Without it, cargo
+    // test's parallel scheduler races the three write_mcp_config_windsurf_*
+    // tests with the two ide_config_path_windsurf tests and the loser
+    // writes to the real home dir.
+    static WINDSURF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // ── Ide::config_abs_path ──────────────────────────────────────────────────
 
     #[test]
@@ -888,6 +1062,7 @@ mod tests {
 
     #[test]
     fn ide_config_path_windsurf_is_global_not_in_repo() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         let override_path = global.path().join("mcp_config.json");
@@ -904,6 +1079,7 @@ mod tests {
 
     #[test]
     fn all_ide_config_paths_are_distinct() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         std::env::set_var(
@@ -1111,6 +1287,7 @@ mod tests {
 
     #[test]
     fn write_mcp_config_windsurf_writes_to_global_path() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         let config_path = global.path().join("mcp_config.json");
@@ -1129,6 +1306,7 @@ mod tests {
 
     #[test]
     fn write_mcp_config_windsurf_uses_mcp_servers_key() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         let config_path = global.path().join("mcp_config.json");
@@ -1142,6 +1320,7 @@ mod tests {
 
     #[test]
     fn write_mcp_config_windsurf_merges_with_existing() {
+        let _guard = WINDSURF_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let repo = tempdir().unwrap();
         let global = tempdir().unwrap();
         let config_path = global.path().join("mcp_config.json");

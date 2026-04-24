@@ -110,30 +110,6 @@ recon license    # show cached tier, limits, expiry
 recon logout     # remove cached license
 ```
 
-## CLI (`rr` -- recon remote)
-
-Public CLI client for querying hosted recon servers. No local deps, just HTTP:
-
-```bash
-cargo install rr
-
-# Set server URL
-export RECON_URL=https://mcp.recon.dev/v1
-
-# Query
-rr find TyCtxt
-rr search 'fn render'
-rr outline src/main.rs
-rr skeleton src/lib.rs
-rr refs Editor
-rr map --budget 2000
-rr stats
-rr ping                         # check connectivity
-rr update                       # self-update from GitHub Releases
-```
-
-All output is human-readable by default. Pass `--json` for machine consumption.
-
 ## Tools (12)
 
 | Tool | Replaces | What it does | Latency |

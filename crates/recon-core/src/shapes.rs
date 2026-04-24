@@ -1,4 +1,4 @@
-//! The five canonical output shapes for MCP tool responses.
+//! The canonical output shapes for MCP tool responses.
 
 use crate::symbol::SymbolKind;
 use compact_str::CompactString;
@@ -20,6 +20,29 @@ pub enum ToolOutput {
     ReferenceDigest(RefDigestView),
     /// Diagnostic messages in `file:line:col: msg` form.
     Diagnostics(DiagView),
+    /// Structured tool-error response. Agents pattern-match on `code` / `kind`
+    /// rather than scraping an opaque "Error: …" prefix from the free-text body.
+    Error(ToolErrorView),
+}
+
+/// Structured tool-error response.
+///
+/// Wire shape matches JSON-RPC's `error` object: a stable numeric `code`,
+/// a human message, optional structured `data`, plus a `request_id` clients
+/// can cite in support tickets and recon can grep out of logs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolErrorView {
+    /// Stable numeric code in `-32001..=-32099`. See `recon_core::error::ReconErrorCode`.
+    pub code: i32,
+    /// Kebab-case identifier (`not_found`, `timeout`, …) for switch-style handling.
+    pub kind: CompactString,
+    /// User-facing message. Safe to display verbatim; secrets already redacted.
+    pub message: String,
+    /// Optional structured payload (e.g. the path that failed, size in bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    /// ULID assigned at tool-entry — use to correlate with server logs.
+    pub request_id: CompactString,
 }
 
 /// Outline view — one line per top-level symbol.

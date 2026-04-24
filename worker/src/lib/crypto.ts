@@ -49,12 +49,21 @@ export async function hmacSha256Hex(
     .join("");
 }
 
-/** Timing-safe string comparison. */
+/**
+ * Timing-safe string comparison.
+ *
+ * XOR-folds both UTF-8 encodings so every byte is always visited,
+ * preventing early-exit timing side-channels.  Safe to use for
+ * comparing HMAC hex outputs of equal length.
+ */
 export function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
   const encoder = new TextEncoder();
   const bufA = encoder.encode(a);
   const bufB = encoder.encode(b);
-  // crypto.subtle.timingSafeEqual available in Workers runtime
-  return (crypto.subtle as any).timingSafeEqual(bufA, bufB);
+  if (bufA.length !== bufB.length) return false;
+  let diff = 0;
+  for (let i = 0; i < bufA.length; i++) {
+    diff |= bufA[i] ^ bufB[i];
+  }
+  return diff === 0;
 }

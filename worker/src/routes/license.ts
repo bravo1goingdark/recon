@@ -14,9 +14,27 @@
 import { Hono } from "hono";
 import { sha256Hex, hmacSha256Hex } from "../lib/crypto";
 import { getTierConfig } from "../lib/tiers";
+import { clientIp, rateLimit } from "../middleware/ratelimit";
 import type { Env, LicenseValidateResponse } from "../types";
 
 export const licenseRoutes = new Hono<{ Bindings: Env }>();
+
+/**
+ * Per-key-prefix rate limit guards against brute-force validation of random
+ * API keys. Key prefix is the first 14 chars — unique per issued key, so a
+ * single stolen-prefix attacker can't exhaust the bucket for every user.
+ * Unauthenticated (no Authorization header / body key) requests fall back
+ * to the caller's IP so the limiter can't be bypassed by omitting the key.
+ */
+async function licenseRateKey(
+  c: Parameters<Parameters<typeof rateLimit>[1]>[0],
+): Promise<string> {
+  const auth = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "").trim();
+  if (auth && auth.length >= 14) return `key:${auth.slice(0, 14)}`;
+  return `ip:${clientIp(c)}`;
+}
+
+licenseRoutes.use("*", rateLimit("RL_LICENSE", licenseRateKey, 60));
 
 licenseRoutes.post("/validate", async (c) => {
   // Extract key from Authorization header or body
