@@ -156,3 +156,174 @@ describe("DELETE /v1/dashboard/keys/:id", () => {
     expect(row).not.toBeNull();
   });
 });
+
+describe("POST /v1/dashboard/keys — expires_at inheritance from active subscription", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  /**
+   * Seed user + session only (no api_key yet). Returns the session so a
+   * POST /keys test can authenticate and create a key from scratch.
+   */
+  async function seedUserSession(opts: {
+    userId: string;
+    username: string;
+    tier: string;
+  }): Promise<{ sessionToken: string }> {
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const sessionToken = "test-session-" + opts.userId;
+    const tokenHash = await sha256Hex(sessionToken);
+    const expiresAt = new Date(Date.now() + 86_400_000).toISOString();
+
+    await db
+      .prepare(
+        "INSERT INTO users (id, github_id, github_username, tier) VALUES (?, ?, ?, ?)",
+      )
+      .bind(opts.userId, Math.floor(Math.random() * 1_000_000), opts.username, opts.tier)
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
+      )
+      .bind(opts.userId, tokenHash, expiresAt)
+      .run();
+    return { sessionToken };
+  }
+
+  it("Free user with no subscription gets a key with expires_at = null", async () => {
+    const { sessionToken } = await seedUserSession({
+      userId: "user_free_new",
+      username: "freshfree",
+      tier: "Free",
+    });
+    const res = await getJson("/v1/dashboard/keys", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Default" }),
+    });
+    expect(res.status).toBe(200);
+    type CreateBody = { key: string; tier: string; expires_at: string | null };
+    const body = res.body as CreateBody;
+    expect(body.tier).toBe("Free");
+    expect(body.expires_at).toBeNull();
+
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const row = await db
+      .prepare("SELECT expires_at FROM api_keys WHERE user_id = ?")
+      .bind("user_free_new")
+      .first<{ expires_at: string | null }>();
+    expect(row?.expires_at).toBeNull();
+  });
+
+  it("Pro user with active subscription inherits subscription.current_period_end on new key", async () => {
+    // The real bug the test replays: a user revokes their existing key mid-
+    // subscription, generates a new one. Before the fix, the new key had
+    // expires_at = NULL and the downgrade cron's WHERE clause never matched
+    // it — the key stayed Pro forever even after the sub ended.
+    const { sessionToken } = await seedUserSession({
+      userId: "user_pro_active",
+      username: "pro_active",
+      tier: "Pro",
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const periodEnd = new Date(Date.now() + 30 * 86_400_000).toISOString();
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, status, current_period_end)
+         VALUES (?, 'sub_active', 'Pro', 'active', ?)`,
+      )
+      .bind("user_pro_active", periodEnd)
+      .run();
+
+    const res = await getJson("/v1/dashboard/keys", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Default" }),
+    });
+    expect(res.status).toBe(200);
+    type CreateBody = { tier: string; expires_at: string | null };
+    const body = res.body as CreateBody;
+    expect(body.tier).toBe("Pro");
+    expect(body.expires_at).toBe(periodEnd);
+
+    const row = await db
+      .prepare("SELECT expires_at FROM api_keys WHERE user_id = ?")
+      .bind("user_pro_active")
+      .first<{ expires_at: string | null }>();
+    expect(row?.expires_at).toBe(periodEnd);
+  });
+
+  it("cancelled-at-period-end subscription still stamps expires_at — cron must downgrade after period passes", async () => {
+    const { sessionToken } = await seedUserSession({
+      userId: "user_pro_cancelled",
+      username: "pro_cancelled",
+      tier: "Pro",
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const periodEnd = new Date(Date.now() + 10 * 86_400_000).toISOString();
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, status,
+            current_period_end, cancel_at_period_end, cancelled_at)
+         VALUES (?, 'sub_cancelled', 'Pro', 'active', ?, 1, datetime('now'))`,
+      )
+      .bind("user_pro_cancelled", periodEnd)
+      .run();
+
+    const res = await getJson("/v1/dashboard/keys", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Default" }),
+    });
+    const body = res.body as { expires_at: string };
+    // The key must still expire at period_end — that's the whole point of
+    // honor-until-period-end. Missing expires_at here is the bug.
+    expect(body.expires_at).toBe(periodEnd);
+  });
+
+  it("stale 'expired' subscription does NOT leak period_end onto a fresh key", async () => {
+    // A user whose previous Pro sub ended long ago and has been downgraded
+    // to Free. They generate a new key: it should be Free with expires_at
+    // NULL. Pulling the old sub's period_end would re-enable a now-deleted
+    // grace window.
+    const { sessionToken } = await seedUserSession({
+      userId: "user_expired",
+      username: "expired_user",
+      tier: "Free",
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const pastEnd = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, status, current_period_end)
+         VALUES (?, 'sub_expired', 'Pro', 'completed', ?)`,
+      )
+      .bind("user_expired", pastEnd)
+      .run();
+
+    const res = await getJson("/v1/dashboard/keys", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Default" }),
+    });
+    const body = res.body as { tier: string; expires_at: string | null };
+    expect(body.tier).toBe("Free");
+    expect(body.expires_at).toBeNull();
+  });
+});
