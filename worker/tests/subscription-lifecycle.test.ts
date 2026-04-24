@@ -416,6 +416,48 @@ describe("POST /v1/billing/subscribe — cancel-at-period-end unblocks new subsc
     });
   });
 
+  it("rejects currency:'INR' with 403 when cf.country is not 'IN' (PPP guard)", async () => {
+    // Non-Indian user trying to abuse the INR price (~75% cheaper for PPP
+    // reasons) by POSTing `currency: "INR"` directly. The test env's
+    // Request has no `cf` object attached, so getCfCountry() returns
+    // undefined and the guard fires the same way it would for a non-IN
+    // production caller. USD from the same caller still works — proved
+    // by the existing "blocks new /subscribe…" test above.
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const tokenHash = await (async () => {
+      const enc = new TextEncoder();
+      const buf = await crypto.subtle.digest("SHA-256", enc.encode("ses_ppp_probe"));
+      return Array.from(new Uint8Array(buf))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    })();
+    const expiry = new Date(Date.now() + 86_400_000).toISOString();
+    await db
+      .prepare(
+        "INSERT INTO users (id, github_id, github_username, tier) VALUES ('user_ppp_probe', 777777, 'ppp_probe', 'Free')",
+      )
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES ('user_ppp_probe', ?, ?)",
+      )
+      .bind(tokenHash, expiry)
+      .run();
+
+    const res = await getJson("/v1/billing/subscribe", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer ses_ppp_probe",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tier: "Pro", currency: "INR" }),
+    });
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({
+      error: expect.stringContaining("India"),
+    });
+  });
+
   it("passes the 409 guard when the existing sub has cancel_at_period_end=1", async () => {
     // This is the bug the user hit: they cancelled Pro, then clicked
     // Subscribe Team and got "cancel from dashboard" anyway. After the

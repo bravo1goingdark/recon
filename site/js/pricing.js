@@ -33,32 +33,54 @@ async function initPricing() {
     }
   });
 
-  // Currency resolution: user's explicit choice wins over geo default.
-  var saved = null;
+  // Geo first — we need the caller's country before we decide whether to
+  // expose the INR toggle at all. INR pricing is PPP for India only; a
+  // non-IN visitor must not be able to toggle INR and effectively pay
+  // ~75% less. Server-side /v1/billing/subscribe also rejects INR from
+  // non-IN IPs (403), but gating the UI keeps the UX honest.
+  var country = null;
   try {
-    saved = localStorage.getItem("recon.currency");
-  } catch (_) {
-    // localStorage blocked (private mode, strict settings) — fall through.
-  }
-  if (saved === "INR" || saved === "USD") {
-    applyCurrency(saved);
-  } else {
-    // Fetch geo hint from our Pages function. If it fails (offline, local
-    // dev), the page is already showing USD fallbacks, so no action needed.
-    try {
-      var resp = await fetch("/api/geo", { method: "GET" });
-      if (resp.ok) {
-        var data = await resp.json();
-        if (data && data.suggested_currency) {
-          applyCurrency(data.suggested_currency);
-        }
-      }
-    } catch (_) {
-      applyCurrency("USD");
+    var resp = await fetch("/api/geo", { method: "GET" });
+    if (resp.ok) {
+      var data = await resp.json();
+      country = data && data.country ? data.country : null;
     }
+  } catch (_) {
+    // Offline / local dev — leave country null, treat as non-IN.
+  }
+  var inrAllowed = country === "IN";
+
+  if (!inrAllowed) {
+    // Remove the INR toggle button entirely for non-IN visitors. A stale
+    // `recon.currency === "INR"` in localStorage (from a past VPN trip,
+    // testing, etc.) must also be wiped so we don't render INR prices to
+    // someone who can't actually subscribe in INR.
+    var inrBtn = document.querySelector('.currency-btn[data-currency="INR"]');
+    if (inrBtn && inrBtn.parentNode) inrBtn.parentNode.removeChild(inrBtn);
+    try {
+      if (localStorage.getItem("recon.currency") === "INR") {
+        localStorage.removeItem("recon.currency");
+      }
+    } catch (_) {}
   }
 
-  // Reveal the toggle now that we know the active currency.
+  // Currency resolution: user's explicit saved choice wins, BUT only if
+  // it's still a choice they're allowed to make. Non-IN users fall back
+  // to USD regardless.
+  var saved = null;
+  try { saved = localStorage.getItem("recon.currency"); } catch (_) {}
+
+  var chosen;
+  if (saved === "USD" || (saved === "INR" && inrAllowed)) {
+    chosen = saved;
+  } else {
+    chosen = inrAllowed ? "INR" : "USD";
+  }
+  applyCurrency(chosen);
+
+  // Reveal the (possibly-trimmed) toggle now that we know what to show.
+  // For non-IN users only the USD button remains, so this is effectively
+  // a read-only currency indicator rather than a choice.
   var toggle = document.getElementById("currency-toggle");
   if (toggle) toggle.style.display = "";
 }

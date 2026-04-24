@@ -10,19 +10,16 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 80 80'%3E%3Cstyle%3Ecircle,line%7Bstroke:%23333%7D.dot%7Bfill:%23333%7D@media(prefers-color-scheme:dark)%7Bcircle,line%7Bstroke:%23e5e5e5%7D.dot%7Bfill:%23e5e5e5%7D%7D%3C/style%3E%3Ccircle class='dot' cx='40' cy='40' r='4'/%3E%3Ccircle cx='40' cy='40' r='14' fill='none' stroke-width='1.5'/%3E%3Ccircle cx='40' cy='40' r='24' fill='none' stroke-width='1' opacity='.55'/%3E%3Ccircle cx='40' cy='40' r='34' fill='none' stroke-width='1' opacity='.25'/%3E%3Cline x1='40' y1='40' x2='68' y2='20' stroke='%23b07040' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='68' cy='20' r='3.5' fill='%23b07040'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/css/shared.css">
 <style>
-  .page-header{display:flex;align-items:center;justify-content:space-between;margin:40px 0 36px;flex-wrap:wrap;gap:12px}
+  /* Sticky-footer layout. Tab panels change height as the user switches
+     tabs (Danger is short, Keys is tall), which would otherwise cause
+     the footer to jump vertically. Making the body a flex column with
+     min-height: 100vh pins the footer to the bottom of the viewport
+     regardless of panel height, so it stops moving around. */
+  body{display:flex;flex-direction:column;min-height:100vh}
+  .wrap{flex:1 0 auto;width:100%}
+
+  .page-header{display:flex;align-items:center;justify-content:space-between;margin:40px 0 24px;flex-wrap:wrap;gap:12px}
   .page-header h1{font-size:clamp(28px, 4vw, 40px);letter-spacing:-0.03em}
-
-  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:32px}
-  @media (max-width:640px){.grid-2{grid-template-columns:1fr}}
-
-  .stat-card{border:1px solid var(--rule);border-radius:4px;padding:20px 24px}
-  .stat-card .label{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.14em;color:var(--ink-3);margin-bottom:6px}
-  .stat-card .value{font-size:1.6rem;font-weight:600;letter-spacing:-0.02em}
-  .stat-card .value .unit{font-size:.8rem;font-weight:400;color:var(--ink-2)}
-
-  .section-label{font-family:var(--mono);font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.14em;color:var(--ink-3);margin:36px 0 16px;display:flex;align-items:center;gap:12px}
-  .section-label::after{content:'';flex:1;height:1px;background:var(--rule)}
 
   .key-row{display:grid;grid-template-columns:auto 1fr auto auto auto;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--rule-soft);font-size:13px}
   .key-row.revoked{opacity:.3}
@@ -50,12 +47,14 @@
   .actions{margin:16px 0}
   .empty{font-family:var(--mono);font-size:12px;color:var(--ink-3);padding:12px 0}
 
-  /* Round-icon tab nav. Three circular buttons collapse the old long
-     stack (Keys → Billing → Danger) into a one-screen layout. Only the
-     active panel renders; others are `hidden`. Left-aligned so the icons
-     sit in the upper-left of the content column rather than floating
-     centered over an empty canvas. */
-  .tab-nav{display:flex;justify-content:flex-start;gap:24px;margin:24px 0 24px}
+  /* Round-icon tab nav — horizontal row placed where the old Plan stat
+     card sat. Three circular buttons select the visible panel; only one
+     panel renders at a time. Centered on the row so the nav reads as a
+     deliberate control strip rather than a left-aligned toolbar. */
+  .tab-nav{
+    display:flex;flex-direction:row;align-items:flex-start;justify-content:center;
+    gap:32px;margin-bottom:28px;
+  }
   .tab-group{display:flex;flex-direction:column;align-items:center;gap:6px}
   .tab-icon{
     width:56px;height:56px;border-radius:50%;
@@ -72,17 +71,12 @@
   .tab-label{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
   .tab-group:has(.active) .tab-label{color:var(--ink-2)}
   .tab-panel[hidden]{display:none}
-  @media (max-width:640px){
-    .tab-nav{gap:16px;margin:24px 0 20px}
-    .tab-icon{width:48px;height:48px}
-    .tab-icon svg{width:20px;height:20px}
-  }
 
   @media (max-width:640px){
+    .tab-nav{gap:18px;margin-bottom:20px}
+    .tab-icon{width:48px;height:48px}
+    .tab-icon svg{width:20px;height:20px}
     .page-header{margin:28px 0 24px}
-    .grid-2{grid-template-columns:1fr;gap:12px}
-    .stat-card{padding:16px 20px}
-    .stat-card .value{font-size:1.3rem}
     .quickstart{padding:20px}
     .quickstart pre{font-size:10px}
     .billing-row{flex-direction:column;align-items:flex-start;gap:12px}
@@ -114,29 +108,17 @@
   </div>
 </nav>
 
-<div class="wrap narrow">
+<div class="wrap">
 
   <!-- Header: avatar + name + tier -->
   <div class="page-header" id="profile">
     <h1>Dashboard</h1>
   </div>
 
-  <!-- Stats row -->
-  <div class="grid-2" id="stats-row">
-    <div class="stat-card">
-      <div class="label">Plan</div>
-      <div class="value" id="stat-tier">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">API Keys</div>
-      <div class="value" id="stat-keys">—</div>
-    </div>
-  </div>
-
-  <!-- Tabbed navigation: three round icon buttons. Keys is the default;
-       Billing holds the subscription state + cancel flow; Danger is the
-       account-delete. aria-label + title attrs carry the text name so
-       screen readers announce them correctly. -->
+  <!-- Tab nav placed where the "Plan" stat card used to live. Three
+       round icon buttons select the active panel (Keys / Billing /
+       Danger). Only the active panel renders; others are `hidden`.
+       aria-label + title carry the text name for screen readers. -->
   <nav class="tab-nav" role="tablist" aria-label="Dashboard sections">
     <div class="tab-group">
       <button type="button" role="tab" aria-selected="true" aria-controls="panel-keys"
@@ -212,6 +194,7 @@ recon init --mcp cc</pre>
       </div>
     </div>
   </section>
+
 
 </div>
 
