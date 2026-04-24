@@ -89,7 +89,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
-      - run: cargo deny check --all-features
+      # Flag goes BEFORE the subcommand — `cargo deny check --all-features`
+      # fails with "unexpected argument" because `--all-features` applies to
+      # the top-level `deny` invocation, not to `check`.
+      - run: cargo deny --all-features check
 
   # Worker test suite (Vitest + @cloudflare/vitest-pool-workers).
   # Typecheck + unit tests on every PR.
