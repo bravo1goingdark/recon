@@ -60,6 +60,15 @@
   <div class="wrap">
     <h1>Simple, <em>honest</em> pricing</h1>
     <p>Your code never leaves your machine — we only validate the license. Start free, upgrade when your codebase outgrows the limits, cancel any time.</p>
+
+    <!-- Currency toggle. Hidden by default; revealed after /api/geo
+         returns a country, so visitors with JS disabled still see the
+         USD prices baked into the HTML below. -->
+    <div id="currency-toggle" style="display:none;margin-top:20px;font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:.06em">
+      <span style="margin-right:10px">Currency</span>
+      <button type="button" data-currency="USD" class="currency-btn" style="background:none;border:1px solid var(--rule);color:inherit;padding:4px 12px;cursor:pointer;border-radius:2px;margin-right:4px">USD</button>
+      <button type="button" data-currency="INR" class="currency-btn" style="background:none;border:1px solid var(--rule);color:inherit;padding:4px 12px;cursor:pointer;border-radius:2px">INR</button>
+    </div>
   </div>
 </section>
 
@@ -80,7 +89,10 @@
 
     <div class="card featured">
       <h3>Pro</h3>
-      <div class="price">$3 <span>/month</span></div>
+      <!-- data-price-usd / data-price-inr are the canonical values that
+           pricing.js swaps into the visible .price block based on the
+           active currency. HTML fallback is USD for the JS-disabled case. -->
+      <div class="price" data-price-usd="$3" data-price-inr="₹249">$3 <span>/month</span></div>
       <div class="limits">
         <div><strong>10</strong> repos</div>
         <div><strong>5,000</strong> files per repo</div>
@@ -92,7 +104,7 @@
 
     <div class="card">
       <h3>Team</h3>
-      <div class="price">$7 <span>/month</span></div>
+      <div class="price" data-price-usd="$7" data-price-inr="₹599">$7 <span>/month</span></div>
       <div class="limits">
         <div><strong>25</strong> repos</div>
         <div><strong>50,000</strong> files per repo</div>

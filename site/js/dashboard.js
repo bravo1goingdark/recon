@@ -151,8 +151,7 @@ function renderBilling(billing) {
 
   el.innerHTML =
     '<div class="billing-row">' +
-    '<div><strong>' + escapeHtml(billing.tier) + "</strong> " +
-    '<span class="dim" style="font-family:var(--mono);font-size:11px">' + escapeHtml(tc.price_display) + "</span>" +
+    '<div><strong>' + escapeHtml(billing.tier) + "</strong>" +
     statusLine +
     "</div>" +
     '<div class="billing-limits">' + limitsHtml + "</div>" +
