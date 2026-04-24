@@ -1,0 +1,78 @@
+name: Cross-platform + embed (nightly)
+
+# Heavy tests that don't gate every PR:
+#   - macos-latest, windows-latest full test suite
+#   - `--features embed` (fastembed + sqlite-vec + ort-sys prebuilt download)
+#
+# Running these on every push was costing 40+ min per PR and blocking merges
+# on a flaky pyke.io CDN. Gating them here means:
+#   * A nightly cron catches drift between releases without blocking PRs.
+#   * `workflow_dispatch` lets a contributor trigger the heavy matrix on
+#     demand from the Actions UI when touching platform-specific code.
+#   * Tag-push coverage lives in release.yml itself (as a pre-build `test`
+#     job that `build` depends on) so a release can't ship if cross-platform
+#     tests fail. GitHub Actions doesn't support cross-workflow `needs:`,
+#     hence the inline gate there.
+
+on:
+  schedule:
+    # 04:00 UTC nightly — off-peak for GitHub runners, keeps the queue
+    # short. If this fails two nights in a row, investigate before the
+    # next release.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test-matrix:
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Windows Defender real-time scanning of every SQLite / Tantivy /
+      # tempfile the e2e tests produce is the single biggest reason Windows
+      # is slow. Exclude the workspace + toolchain + temp paths + processes;
+      # the exclusion is scoped to this job (runner is reset between jobs).
+      - name: Add Defender exclusions (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath  "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath  "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionPath  "$env:USERPROFILE\.rustup"
+          Add-MpPreference -ExclusionPath  "$env:TEMP"
+          Add-MpPreference -ExclusionProcess "cargo.exe"
+          Add-MpPreference -ExclusionProcess "rustc.exe"
+          Add-MpPreference -ExclusionProcess "recon.exe"
+
+      - run: cargo test --workspace --exclude recon-embed
+
+  embed:
+    name: Test (embed feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # ort-sys's build.rs downloads ~80 MB of prebuilt ONNX Runtime from
+      # cdn.pyke.io. That CDN returns transient 5xx responses a few times
+      # per week. Retry up to 3 times with a 30-second backoff — cheaper
+      # than re-running the whole job and avoids false-negative alerts.
+      - name: Test with embed feature (retry on pyke.io flakes)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 25
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: cargo test --workspace --features embed
