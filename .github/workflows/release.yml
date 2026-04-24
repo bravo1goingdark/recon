@@ -110,8 +110,18 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc --no-progress -y
 
+      # `-p recon-cli` scopes the build to the shipped binary + its
+      # transitive deps (recon-server, recon-storage, recon-search, ...).
+      # Without this, `cargo build --release` builds every workspace
+      # member including recon-embed, which pulls fastembed -> ort-sys
+      # -> openssl-sys. openssl-sys needs an arm64 libssl sysroot to
+      # cross-compile, which isn't installed on the GitHub runner, and
+      # the aarch64-unknown-linux-gnu target failed with "Could not
+      # find openssl via pkg-config". recon-cli does NOT depend on
+      # recon-embed (verified via `cargo tree -p recon-cli`), so
+      # building it alone skips the problem entirely.
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} -p recon-cli
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           RECON_LICENSE_HMAC_KEY: ${{ secrets.RECON_LICENSE_HMAC_KEY }}
