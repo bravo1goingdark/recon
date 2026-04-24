@@ -111,11 +111,16 @@ recon init --mcp cc</pre>
     <div class="note">Your code stays local. Only the key is validated against the server.</div>
   </div>
 
-  <!-- API Keys -->
+  <!-- API Keys. Only one active key per account — see POST /v1/dashboard/keys
+       on the worker. The two buttons are mutually exclusive: "Generate"
+       is shown when the user has none; "Rotate" (revoke + regenerate)
+       replaces it once they have one. dashboard.js toggles via display:none. -->
   <div class="section-label">API Keys</div>
   <div id="keys"><p class="empty">loading...</p></div>
   <div class="actions">
     <button id="generate-key-btn" class="btn primary sm">Generate new key →</button>
+    <button id="rotate-key-btn" class="btn ghost sm" style="display:none">Rotate key →</button>
+    <span id="key-hint" style="font-size:12px;color:var(--ink-3);margin-left:12px;display:none">One active key per account. Rotating revokes the current key immediately.</span>
   </div>
 
   <!-- Billing -->
@@ -138,6 +143,43 @@ recon init --mcp cc</pre>
     </div>
   </div>
 
+</div>
+
+<!-- Revoke / rotate key modal. Single modal serves both "revoke this one
+     row from the list" and "Rotate key" (which revokes + immediately
+     generates the replacement). The data-action attribute on the
+     triggering button tells dashboard.js which path to take. -->
+<div class="modal-overlay" id="revoke-key-modal">
+  <div class="modal">
+    <h3 id="revoke-key-title">Revoke API key?</h3>
+    <p id="revoke-key-body">
+      Any running <code>recon serve</code> using this key will lose access within 15 minutes, and
+      the key can't be used for new logins. This cannot be undone.
+    </p>
+    <p style="font-size:12px;color:var(--ink-3)">Rotating will generate a replacement key immediately after revocation.</p>
+    <div class="modal-actions">
+      <button id="revoke-key-confirm-btn" class="btn primary sm">Revoke</button>
+      <button id="revoke-key-cancel-btn" class="btn ghost sm">Keep key</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cancel subscription modal. Honor-until-period-end is explicit in the
+     body copy so the user isn't surprised by continued charges showing
+     up in an invoice they didn't expect. -->
+<div class="modal-overlay" id="cancel-sub-modal">
+  <div class="modal">
+    <h3>Cancel subscription?</h3>
+    <p>
+      You'll keep full access until the end of the current billing period, which is shown on your dashboard.
+      After that, your account drops to the Free tier.
+    </p>
+    <p style="font-size:12px;color:var(--ink-3)">You can resubscribe any time — your existing indexes stay on disk.</p>
+    <div class="modal-actions">
+      <button id="cancel-sub-confirm-btn" class="btn primary sm">Cancel subscription</button>
+      <button id="cancel-sub-cancel-btn" class="btn ghost sm">Keep subscription</button>
+    </div>
+  </div>
 </div>
 
 <!-- Account-delete confirmation modal. Requires the user to type their

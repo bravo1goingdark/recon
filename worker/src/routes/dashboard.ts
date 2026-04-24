@@ -49,10 +49,42 @@ dashboardRoutes.get("/keys", async (c) => {
   return c.json({ keys });
 });
 
-/** POST /v1/dashboard/keys — generate a new API key. */
+/**
+ * POST /v1/dashboard/keys — generate a new API key.
+ *
+ * One active key per account. If the user already has a non-revoked key,
+ * the request 409s with the existing key's prefix so the UI can prompt
+ * the user to rotate (revoke + regenerate) instead of silently stacking
+ * keys. Prevents a single subscriber from provisioning a key per
+ * team-mate and bypassing the per-account tier limits.
+ *
+ * Rotation path: DELETE /v1/dashboard/keys/:id → POST /v1/dashboard/keys
+ * in two calls. The dashboard's "Rotate key" button wraps both in a
+ * single modal confirmation.
+ */
 dashboardRoutes.post("/keys", async (c) => {
   const user = c.get("user");
   const db = c.env.RECON_DB;
+
+  const existing = await db
+    .prepare(
+      `SELECT id, key_prefix FROM api_keys
+       WHERE user_id = ? AND revoked_at IS NULL
+       LIMIT 1`,
+    )
+    .bind(user.id)
+    .first<{ id: string; key_prefix: string }>();
+  if (existing) {
+    return c.json(
+      {
+        error:
+          "One active key per account. Revoke the existing key before generating a new one.",
+        existing_key_id: existing.id,
+        existing_key_prefix: existing.key_prefix,
+      },
+      409,
+    );
+  }
 
   // Name is optional in the product UX but when provided must match the
   // Zod-constrained charset (letters/digits/space/_./-). Empty body → default.
