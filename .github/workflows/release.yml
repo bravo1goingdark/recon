@@ -10,9 +10,58 @@ permissions:
   # workflow's OIDC identity for a short-lived signing certificate.
   id-token: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  # Pre-build gate: run the cross-platform + embed test matrix before any
+  # release artifact is built. These tests are too slow to run on every PR
+  # (see .github/workflows/cross-platform.yml for the nightly schedule), but
+  # a tag-push that fails any of them must not publish a binary — hence
+  # running inline here and making `build` depend on it via `needs:`.
+  test:
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Add Defender exclusions (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath  "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath  "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionPath  "$env:USERPROFILE\.rustup"
+          Add-MpPreference -ExclusionPath  "$env:TEMP"
+          Add-MpPreference -ExclusionProcess "cargo.exe"
+          Add-MpPreference -ExclusionProcess "rustc.exe"
+          Add-MpPreference -ExclusionProcess "recon.exe"
+      - run: cargo test --workspace --exclude recon-embed
+
+  test-embed:
+    name: Test (embed feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Retry around pyke.io's flaky CDN — see cross-platform.yml for the
+      # rationale. No point failing a release over a transient 504.
+      - uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 25
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: cargo test --workspace --features embed
+
   build:
     name: Build ${{ matrix.target }}
+    needs: [test, test-embed]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

@@ -35,55 +35,21 @@ jobs:
       # Exclude recon-embed (lancedb pulls 2000+ crates, fills CI disk).
       - run: cargo clippy --workspace --exclude recon-embed --all-targets -- -D warnings
 
-  # Cross-platform test matrix. Previously only ubuntu-latest ran every PR;
-  # macOS and Windows were only exercised at tag time in release.yml, which
-  # meant platform-specific breakage shipped without a pre-merge signal.
-  # The matrix is a superset of the release targets we actually publish.
+  # Linux-only test pass on every PR. Matches the platform the majority
+  # of contributors develop on; the full cross-platform + embed matrix
+  # lives in cross-platform.yml and is gated on release tags + nightly
+  # schedule so PRs don't wait 40+ min for a Windows runner or on a
+  # flaky pyke.io CDN download of ort-sys prebuilts.
   test:
-    name: Test ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      # Windows Defender real-time scan on every file SQLite / Tantivy /
-      # the tempfile-based e2e tests create is what made Windows runs take
-      # 40+ minutes while Ubuntu finishes in 3. Excluding the workspace
-      # and the toolchain processes drops Windows test time to ~10 min
-      # with zero coverage loss; GitHub runners disable Defender between
-      # jobs so this doesn't leak across builds.
-      - name: Add Defender exclusions (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Add-MpPreference -ExclusionPath  "${{ github.workspace }}"
-          Add-MpPreference -ExclusionPath  "$env:USERPROFILE\.cargo"
-          Add-MpPreference -ExclusionPath  "$env:USERPROFILE\.rustup"
-          Add-MpPreference -ExclusionPath  "$env:TEMP"
-          Add-MpPreference -ExclusionProcess "cargo.exe"
-          Add-MpPreference -ExclusionProcess "rustc.exe"
-          Add-MpPreference -ExclusionProcess "recon.exe"
-
-      # Exclude recon-embed to stay within disk/time budget. The embed
-      # feature is exercised separately in the `embed` job below on Linux
-      # where disk space is abundant.
-      - run: cargo test --workspace --exclude recon-embed
-
-  embed:
-    name: Test (embed feature)
+    name: Test ubuntu-latest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Test the full workspace with the `embed` feature so recon-embed +
-      # semantic-search code paths don't regress silently between releases.
-      - run: cargo test --workspace --features embed
+      # Exclude recon-embed — covered in cross-platform.yml where the
+      # flaky ort-sys download can be retried without blocking PRs.
+      - run: cargo test --workspace --exclude recon-embed
 
   # Supply-chain gates. Run in parallel with the test matrix so a missing
   # RUSTSEC advisory or a license-boundary break blocks a PR the same way
