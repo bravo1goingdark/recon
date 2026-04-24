@@ -12,10 +12,15 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Fast per-PR gates — all on a self-hosted Linux runner to avoid GitHub
+# Actions minute costs while the project is private. The runner lives
+# locally and is registered to this repo only. Heavy matrix (macOS,
+# Windows, embed) stays on GitHub-hosted runners in release.yml and
+# cross-platform.yml because those platforms are unreachable from here.
 jobs:
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -25,7 +30,7 @@ jobs:
 
   check:
     name: Check + Clippy
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,8 +46,8 @@ jobs:
   # schedule so PRs don't wait 40+ min for a Windows runner or on a
   # flaky pyke.io CDN download of ort-sys prebuilts.
   test:
-    name: Test ubuntu-latest
-    runs-on: ubuntu-latest
+    name: Test self-hosted
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -56,33 +61,41 @@ jobs:
   # a failing test does.
   audit:
     name: cargo-audit (RUSTSEC)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `cargo install --locked` is idempotent on the self-hosted runner;
+      # after the first run the binary is cached under ~/.cargo/bin and
+      # subsequent jobs finish in seconds.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       # RUSTSEC-2024-0436: paste 1.0.15 unmaintained — tracked in deny.toml
       # with the same rationale; no drop-in replacement in our dep graph yet.
       - run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
 
+  # cargo-deny directly — the EmbarkStudios/cargo-deny-action@v2 runs
+  # inside a Docker container, and our self-hosted runner's user isn't in
+  # the docker group. Installing cargo-deny as a regular binary is
+  # equivalent, cacheable by Swatinem/rust-cache, and avoids the sudo
+  # dance of adding the runner to the docker group.
   deny:
     name: cargo-deny (licenses, bans, sources)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - run: cargo deny check --all-features
 
   # Worker test suite (Vitest + @cloudflare/vitest-pool-workers).
   # Typecheck + unit tests on every PR.
   worker:
     name: Worker typecheck + tests
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     defaults:
       run:
         working-directory: worker
