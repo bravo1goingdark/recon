@@ -4,6 +4,19 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.1.1] — 2026-04-25
+
+### Fixed
+- License HMAC secret mismatch between the CLI binary and the Cloudflare
+  Worker. v0.1.0 shipped with `RECON_LICENSE_HMAC_KEY` (embedded in the
+  binary at build time) and `LICENSE_HMAC_SECRET` (on the Worker)
+  holding different values, so every `recon login` failed with
+  `rejected: server response signature invalid or missing`. Both
+  secrets have been rotated to the same value and v0.1.1 binaries
+  validate licenses end-to-end.
+
+[0.1.1]: https://github.com/bravo1goingdark/recon/releases/tag/v0.1.1
+
 ## [0.1.0] — 2026-04-24
 
 First public release.

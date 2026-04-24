@@ -4076,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "recon-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4101,7 +4101,7 @@ dependencies = [
 
 [[package]]
 name = "recon-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aho-corasick",
  "compact_str",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "recon-embed"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "blake3",
@@ -4137,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "recon-indexer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -4161,7 +4161,7 @@ dependencies = [
 
 [[package]]
 name = "recon-parser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "blake3",
@@ -4185,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "recon-search"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -4216,7 +4216,7 @@ dependencies = [
 
 [[package]]
 name = "recon-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -4249,7 +4249,7 @@ dependencies = [
 
 [[package]]
 name = "recon-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "compact_str",
