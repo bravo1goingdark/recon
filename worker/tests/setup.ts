@@ -25,6 +25,9 @@ import migration0002 from "../migrations/0002_payment_events.sql?raw";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error vite `?raw` import — string, no type declaration
 import migration0003 from "../migrations/0003_subscription_lifecycle.sql?raw";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error vite `?raw` import — string, no type declaration
+import migration0004 from "../migrations/0004_currency_per_plan.sql?raw";
 
 /**
  * Split a SQL file into individual statements.
@@ -48,6 +51,10 @@ const MIGRATIONS = [
   {
     name: "0003_subscription_lifecycle",
     queries: splitSql(migration0003 as string),
+  },
+  {
+    name: "0004_currency_per_plan",
+    queries: splitSql(migration0004 as string),
   },
 ];
 

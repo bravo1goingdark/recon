@@ -6,7 +6,7 @@ import {
   cancelSubscription,
   verifyWebhookSignature,
 } from "../lib/razorpay";
-import { getTierConfig } from "../lib/tiers";
+import { getTierConfig, getTierPrice, type Currency } from "../lib/tiers";
 import { requireAuth } from "../middleware/auth";
 import { clientIp, rateLimit } from "../middleware/ratelimit";
 import {
@@ -50,7 +50,10 @@ billingRoutes.post(
     if (!parsed.ok) return c.json(parsed.error, 400);
 
     const tierConfig = getTierConfig(parsed.value.tier);
-    if (tierConfig.price_cents <= 0) {
+    // Legacy path only ever shipped USD one-time orders. Hard-pin to USD
+    // here; anyone who needs a different currency should use /subscribe.
+    const usdPrice = getTierPrice(tierConfig.name, "USD");
+    if (!usdPrice) {
       return c.json({ error: "This tier cannot be purchased online" }, 400);
     }
 
@@ -58,7 +61,7 @@ billingRoutes.post(
     const order = await createOrder(
       c.env.RAZORPAY_KEY_ID,
       c.env.RAZORPAY_KEY_SECRET,
-      tierConfig.price_cents,
+      usdPrice.amount,
       "USD",
       receipt,
       { user_id: user.id, tier: tierConfig.name },
@@ -69,16 +72,16 @@ billingRoutes.post(
         `INSERT INTO payments (user_id, razorpay_order_id, amount_paise, currency, status, tier)
          VALUES (?, ?, ?, 'USD', 'created', ?)`,
       )
-      .bind(user.id, order.id, tierConfig.price_cents, tierConfig.name)
+      .bind(user.id, order.id, usdPrice.amount, tierConfig.name)
       .run();
 
     return c.json({
       order_id: order.id,
-      amount: tierConfig.price_cents,
+      amount: usdPrice.amount,
       currency: "USD",
       key_id: c.env.RAZORPAY_KEY_ID,
       tier: tierConfig.name,
-      price_display: tierConfig.price_display,
+      price_display: usdPrice.display,
     });
   },
 );
@@ -117,9 +120,22 @@ billingRoutes.post(
     const parsed = parseBody(SubscribeBody, rawBody);
     if (!parsed.ok) return c.json(parsed.error, 400);
 
+    // Currency resolution. Explicit body override wins. Otherwise default
+    // from Cloudflare's IP-geolocation header: IN → INR (so UPI AutoPay +
+    // Net Banking eNACH work natively), everywhere else → USD. Tests and
+    // local dev lack the cf.country field, so fall back to USD there too.
+    const currency: Currency =
+      parsed.value.currency ?? resolveDefaultCurrency(c.req.raw);
+
     const tierConfig = getTierConfig(parsed.value.tier);
-    if (tierConfig.price_cents <= 0) {
-      return c.json({ error: "This tier cannot be subscribed to" }, 400);
+    const price = getTierPrice(tierConfig.name, currency);
+    if (!price) {
+      return c.json(
+        {
+          error: `Tier ${tierConfig.name} is not priced in ${currency}`,
+        },
+        400,
+      );
     }
 
     // Refuse to stack subscriptions. The user must cancel the current one
@@ -144,12 +160,14 @@ billingRoutes.post(
       );
     }
 
-    // Resolve (or lazily create) the Razorpay plan for this tier.
+    // Resolve (or lazily create) the Razorpay plan for this (tier, currency).
     const planId = await ensurePlanForTier(
       db,
       c.env.RAZORPAY_KEY_ID,
       c.env.RAZORPAY_KEY_SECRET,
-      tierConfig,
+      tierConfig.name,
+      currency,
+      price.amount,
     );
 
     // 120 cycles = 10 years of monthly charges. Effectively unbounded but
@@ -161,7 +179,11 @@ billingRoutes.post(
         plan_id: planId,
         total_count: 120,
         customer_notify: true,
-        notes: { user_id: user.id, tier: tierConfig.name },
+        notes: {
+          user_id: user.id,
+          tier: tierConfig.name,
+          currency,
+        },
       },
     );
 
@@ -181,7 +203,8 @@ billingRoutes.post(
       subscription_id: sub.id,
       short_url: sub.short_url,
       tier: tierConfig.name,
-      price_display: tierConfig.price_display,
+      currency,
+      price_display: price.display,
     });
   },
 );
@@ -576,33 +599,37 @@ async function handleSubscriptionHalted(
 }
 
 /**
- * Resolve a Razorpay plan_id for a tier, creating it in Razorpay (and caching
- * the ID in D1) on first use. Subsequent subscribers to the same tier reuse
- * the cached ID.
+ * Resolve a Razorpay plan_id for a (tier, currency) pair, creating it in
+ * Razorpay (and caching the ID in D1) on first use. Subsequent subscribers
+ * to the same (tier, currency) reuse the cached ID; a different currency
+ * triggers a fresh plan creation because Razorpay plans are
+ * currency-specific.
  *
- * There is a benign race: two simultaneous first-subscribers could each call
- * createPlan, yielding two Razorpay plans for the same tier. Whichever
- * INSERT OR IGNORE lands first wins; the other reads the winner's plan_id.
- * Razorpay keeps the orphan plan (no customer churn cost), we don't.
+ * There is a benign race: two simultaneous first-subscribers for the same
+ * (tier, currency) could each call createPlan, yielding two orphan plans
+ * upstream. The ON CONFLICT(tier, currency) DO NOTHING + re-read pattern
+ * settles the race so everyone sees the same plan_id on their next request.
  */
 async function ensurePlanForTier(
   db: D1Database,
   keyId: string,
   keySecret: string,
-  tier: { name: string; price_cents: number },
+  tierName: string,
+  currency: Currency,
+  amount: number,
 ): Promise<string> {
   const cached = await db
     .prepare(
-      "SELECT razorpay_plan_id FROM subscription_plans WHERE tier = ?",
+      "SELECT razorpay_plan_id FROM subscription_plans WHERE tier = ? AND currency = ?",
     )
-    .bind(tier.name)
+    .bind(tierName, currency)
     .first<{ razorpay_plan_id: string }>();
   if (cached?.razorpay_plan_id) return cached.razorpay_plan_id;
 
   const plan = await createPlan(keyId, keySecret, {
-    tier: tier.name,
-    amount: tier.price_cents,
-    currency: "USD",
+    tier: tierName,
+    amount,
+    currency,
     period: "monthly",
     interval: 1,
   });
@@ -610,22 +637,37 @@ async function ensurePlanForTier(
   await db
     .prepare(
       `INSERT INTO subscription_plans
-         (tier, razorpay_plan_id, amount, currency, interval_period, interval_count)
-       VALUES (?, ?, ?, 'USD', 'monthly', 1)
-       ON CONFLICT(tier) DO NOTHING`,
+         (tier, currency, razorpay_plan_id, amount, interval_period, interval_count)
+       VALUES (?, ?, ?, ?, 'monthly', 1)
+       ON CONFLICT(tier, currency) DO NOTHING`,
     )
-    .bind(tier.name, plan.id, tier.price_cents)
+    .bind(tierName, currency, plan.id, amount)
     .run();
 
   // Re-read to resolve the race described above — whoever actually inserted
   // wins, so everyone ends up seeing the same plan_id.
   const winner = await db
     .prepare(
-      "SELECT razorpay_plan_id FROM subscription_plans WHERE tier = ?",
+      "SELECT razorpay_plan_id FROM subscription_plans WHERE tier = ? AND currency = ?",
     )
-    .bind(tier.name)
+    .bind(tierName, currency)
     .first<{ razorpay_plan_id: string }>();
   return winner?.razorpay_plan_id ?? plan.id;
+}
+
+/**
+ * Choose the default billing currency for an incoming subscribe request
+ * when the body hasn't specified one. Cloudflare's `cf.country` field is
+ * populated in production; absent in tests and local dev, in which case
+ * we default to USD (matches the pricing page's non-IN default).
+ */
+function resolveDefaultCurrency(req: Request): Currency {
+  // Cloudflare attaches a non-standard `cf` object to incoming Requests at
+  // runtime. It's typed minimally by workers-types as `CfProperties`; we
+  // reach for `country` specifically.
+  const cf = (req as unknown as { cf?: { country?: string } }).cf;
+  if (cf?.country === "IN") return "INR";
+  return "USD";
 }
 
 function isoFromUnix(unixSeconds: number): string {

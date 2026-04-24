@@ -18,6 +18,13 @@ export type CheckoutBody = z.infer<typeof CheckoutBody>;
 /** POST /v1/billing/subscribe — start a recurring subscription for a tier. */
 export const SubscribeBody = z.object({
   tier: z.enum(["Pro", "Team"]),
+  /**
+   * Billing currency. Optional — when absent, the server defaults from the
+   * request's Cloudflare-IPCountry header: IN → INR, everything else → USD.
+   * Indian users default to INR so UPI AutoPay / Net Banking eNACH work;
+   * those rails don't support USD-denominated subscriptions.
+   */
+  currency: z.enum(["INR", "USD"]).optional(),
 });
 export type SubscribeBody = z.infer<typeof SubscribeBody>;
 

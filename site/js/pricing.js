@@ -1,14 +1,23 @@
 /**
- * Pricing page — starts a Razorpay subscription for the clicked tier,
- * then full-page redirects to Razorpay's hosted checkout (short_url).
+ * Pricing page — dual-currency subscribe flow.
  *
- * We use Razorpay Subscriptions (not Orders), so the user authorises a
- * recurring mandate and the first charge runs immediately. `subscription.
- * activated` fires back to our webhook and flips the tier; we then
- * redirect the browser to /dashboard.
+ * On load:
+ *   1. Fetch /api/geo → { country, suggested_currency }.
+ *   2. If user has a previous choice in localStorage, use that; otherwise
+ *      use the geo-suggested default. Indian users → INR (so UPI /
+ *      Net Banking eNACH work); everyone else → USD.
+ *   3. Render the active currency's prices into each .price block and
+ *      highlight the matching toggle button.
+ *   4. When the user clicks Subscribe, POST /v1/billing/subscribe with
+ *      { tier, currency } and full-page redirect to Razorpay's short_url.
+ *
+ * The HTML ships with USD baked in as a fallback so visitors with JS
+ * disabled still see a readable page; this script is a progressive
+ * enhancement.
  */
 
 var currentUser = null;
+var activeCurrency = "USD"; // overwritten after detect+load
 
 async function initPricing() {
   currentUser = await checkAuth();
@@ -22,6 +31,70 @@ async function initPricing() {
       btn.disabled = true;
       btn.classList.add("disabled");
     }
+  });
+
+  // Currency resolution: user's explicit choice wins over geo default.
+  var saved = null;
+  try {
+    saved = localStorage.getItem("recon.currency");
+  } catch (_) {
+    // localStorage blocked (private mode, strict settings) — fall through.
+  }
+  if (saved === "INR" || saved === "USD") {
+    applyCurrency(saved);
+  } else {
+    // Fetch geo hint from our Pages function. If it fails (offline, local
+    // dev), the page is already showing USD fallbacks, so no action needed.
+    try {
+      var resp = await fetch("/api/geo", { method: "GET" });
+      if (resp.ok) {
+        var data = await resp.json();
+        if (data && data.suggested_currency) {
+          applyCurrency(data.suggested_currency);
+        }
+      }
+    } catch (_) {
+      applyCurrency("USD");
+    }
+  }
+
+  // Reveal the toggle now that we know the active currency.
+  var toggle = document.getElementById("currency-toggle");
+  if (toggle) toggle.style.display = "";
+}
+
+function applyCurrency(currency) {
+  activeCurrency = currency;
+  var attr = "data-price-" + currency.toLowerCase();
+  document.querySelectorAll(".price[" + attr + "]").forEach(function (el) {
+    var value = el.getAttribute(attr);
+    if (!value) return;
+    // Keep the " /month" suffix visible; swap the amount before it.
+    el.innerHTML = value + ' <span>/month</span>';
+  });
+  // "Starter" card is hardcoded $0 — no attributes, no swap needed.
+
+  // Highlight the active toggle button.
+  document.querySelectorAll(".currency-btn").forEach(function (btn) {
+    var isActive = btn.getAttribute("data-currency") === currency;
+    btn.style.background = isActive ? "var(--ink)" : "none";
+    btn.style.color = isActive ? "var(--paper)" : "inherit";
+    btn.style.borderColor = isActive ? "var(--ink)" : "var(--rule)";
+  });
+}
+
+function wireCurrencyToggle() {
+  document.querySelectorAll(".currency-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var currency = btn.getAttribute("data-currency");
+      if (!currency) return;
+      applyCurrency(currency);
+      try {
+        localStorage.setItem("recon.currency", currency);
+      } catch (_) {
+        // Not fatal — just means the choice won't persist across loads.
+      }
+    });
   });
 }
 
@@ -41,7 +114,7 @@ async function subscribeToTier(tierName) {
     var resp = await authFetch("/v1/billing/subscribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tier: tierName }),
+      body: JSON.stringify({ tier: tierName, currency: activeCurrency }),
     });
 
     if (!resp.ok) {
@@ -60,8 +133,8 @@ async function subscribeToTier(tierName) {
 
     // Full-page redirect to Razorpay's hosted subscription page. The user
     // authorises the mandate there; on success Razorpay redirects back to
-    // our callback URL (configured in Razorpay dashboard → Subscriptions).
-    // The webhook is what actually grants the tier; this redirect is UX.
+    // our callback URL. The webhook is what actually grants the tier;
+    // this redirect is UX.
     if (data.short_url) {
       window.location.href = data.short_url;
       return;
@@ -93,5 +166,6 @@ function wireUpgradeButtons() {
 
 document.addEventListener("DOMContentLoaded", function () {
   wireUpgradeButtons();
+  wireCurrencyToggle();
   initPricing();
 });
