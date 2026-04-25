@@ -26,6 +26,7 @@ export interface Env {
   RL_WEBHOOK?: RateLimitBinding;
   RL_LICENSE?: RateLimitBinding;
   RL_DASHBOARD?: RateLimitBinding;
+  RL_ACCOUNT?: RateLimitBinding;
 }
 
 /** D1 row: users table. */

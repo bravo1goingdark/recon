@@ -5,6 +5,7 @@ import { licenseRoutes } from "./routes/license";
 import { authRoutes } from "./routes/auth";
 import { dashboardRoutes } from "./routes/dashboard";
 import { billingRoutes } from "./routes/billing";
+import { accountRoutes } from "./routes/account";
 import { handleScheduled } from "./scheduled";
 import type { Env } from "./types";
 
@@ -19,16 +20,24 @@ app.route("/api/v1/license", licenseRoutes);
 app.route("/api/v1/auth", authRoutes);
 app.route("/api/v1/dashboard", dashboardRoutes);
 app.route("/api/v1/billing", billingRoutes);
+app.route("/api/v1/account", accountRoutes);
 
 // Also mount without /api prefix for direct Worker access
 app.route("/v1/license", licenseRoutes);
 app.route("/v1/auth", authRoutes);
 app.route("/v1/dashboard", dashboardRoutes);
 app.route("/v1/billing", billingRoutes);
+app.route("/v1/account", accountRoutes);
 
-// Health check
-app.get("/health", (c) => c.json({ status: "ok", version: "1.0.0" }));
-app.get("/api/health", (c) => c.json({ status: "ok", version: "1.0.0" }));
+// Health check — three aliases. `/v1/health` is what `recon doctor`
+// hits; `/health` and `/api/health` are kept for the Pages proxy /
+// uptime monitors that already point at them.
+const health = (c: { json: (b: object) => Response }) =>
+  c.json({ status: "ok", version: "1.0.0" });
+app.get("/health", health);
+app.get("/api/health", health);
+app.get("/v1/health", health);
+app.get("/api/v1/health", health);
 
 // 404 fallback
 app.all("*", (c) => c.json({ error: "Not found" }, 404));

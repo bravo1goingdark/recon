@@ -1,6 +1,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod doctor;
 mod pretty;
 mod update;
 
@@ -266,6 +267,15 @@ enum Command {
     Stats,
     /// Force full re-index
     Reindex,
+    /// Manage repos registered with your recon account (server-side)
+    ///
+    /// As of v0.2.0, `max_repos` is enforced by the recon worker rather than
+    /// against a local file. Use `list` to see your registered repos and
+    /// `remove` to free a slot.
+    Repos {
+        #[command(subcommand)]
+        action: ReposAction,
+    },
     /// Delete recon's index and (optionally) its IDE wiring
     ///
     /// With no flag: removes only `.recon/` (index, merkle snapshot, caches).
@@ -298,6 +308,12 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Health check — verifies license, worker reachability, index, MCP wiring
+    Doctor {
+        /// Output as JSON instead of human-readable lines
+        #[arg(long)]
+        json: bool,
+    },
     /// Raw tool query (JSON args)
     Query {
         /// Tool name (e.g. code_find_symbol)
@@ -305,6 +321,23 @@ enum Command {
         /// Tool arguments as JSON
         #[arg(default_value = "{}")]
         args: String,
+    },
+}
+
+/// Subcommands of `recon repos`.
+#[derive(Subcommand)]
+enum ReposAction {
+    /// List repos currently registered with your recon account
+    List,
+    /// Remove a repo from your recon account, freeing a slot
+    ///
+    /// `target` may be a path (canonicalized + SHA-256'd) or a 64-char hex
+    /// fingerprint pulled from `recon repos list`. Paths to deleted
+    /// directories work too — fingerprinting falls back to the verbatim
+    /// path string when canonicalize fails.
+    Remove {
+        /// Path or fingerprint to release
+        target: String,
     },
 }
 
@@ -927,23 +960,65 @@ async fn main() -> Result<()> {
 
             // License must be present before we do any work.
             let license = validate_license_or_die()?;
-            let limits = license.tier.limits();
+            let _limits = license.tier.limits();
 
-            // Repo tracking — enforce max_repos for new repos.
+            // Server-side repo tracking (v0.2.0+). Replaces the prior
+            // local-only enforcement against `~/.config/recon/repos.json`,
+            // which a patched binary could trivially bypass.
+            //
+            // We need the raw API key to call /v1/account/repos; the cached
+            // license alone is signature-verified but doesn't expose the key.
+            // If credentials are missing the user upgraded across the v0.1→v0.2
+            // line and needs to re-login once.
             let config_dir = recon_server::license::global_config_dir();
-            let repos =
-                recon_server::repos::load_repos(&config_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
             let repo_path_str = repo.to_string_lossy().to_string();
-            if !recon_server::repos::is_indexed(&repos, &repo_path_str)
-                && repos.len() >= limits.max_repos
-            {
-                return Err(anyhow::anyhow!(
-                    "{} plan allows {} repo(s). You have {} registered.\n\
-                     Upgrade at https://mcprecon.pages.dev/pricing",
-                    license.tier.name(),
-                    limits.max_repos,
-                    repos.len(),
-                ));
+            let api_key =
+                recon_server::license::read_credentials(&config_dir).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "credentials not found at {}/credentials.json — run \
+                         `recon login <key>` first.",
+                        config_dir.display()
+                    )
+                })?;
+            let fingerprint = recon_server::account::fingerprint_path(&repo);
+            match recon_server::account::register_repo(&api_key, &fingerprint) {
+                Ok(resp) => {
+                    eprintln!(
+                        "Registered repo with recon ({}/{} on {})",
+                        match resp.status.as_str() {
+                            "registered" => "new",
+                            _ => "refreshed",
+                        },
+                        resp.limit,
+                        resp.tier,
+                    );
+                }
+                Err(recon_server::account::AccountError::OverQuota {
+                    limit,
+                    tier,
+                    message,
+                }) => {
+                    return Err(anyhow::anyhow!(
+                        "{tier} plan allows {limit} repo(s) — limit reached.\n\
+                         {message}\n\
+                         Run `recon repos list` to see what's registered, \
+                         `recon repos remove <path>` to free a slot, \
+                         or upgrade at https://mcprecon.pages.dev/pricing"
+                    ));
+                }
+                Err(recon_server::account::AccountError::Unauthorized(msg)) => {
+                    return Err(anyhow::anyhow!(
+                        "API key rejected by recon worker: {msg}.\n\
+                         Run `recon login <key>` to refresh."
+                    ));
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to register repo with recon worker: {e}.\n\
+                         Check your network and try again — re-running \
+                         `recon init` is safe (the call is idempotent)."
+                    ));
+                }
             }
 
             // 1. Index the repo
@@ -1382,20 +1457,120 @@ async fn main() -> Result<()> {
                     let config_dir = recon_server::license::global_config_dir();
                     let repo_path_str = repo.to_string_lossy().to_string();
                     match recon_server::repos::remove_repo(&config_dir, &repo_path_str) {
-                        Ok(true) => eprintln!("Released repo slot in {}", config_dir.display()),
+                        Ok(true) => eprintln!("Released local repo cache entry"),
                         Ok(false) => {}
-                        Err(e) => eprintln!("Failed to update repos registry: {e}"),
+                        Err(e) => eprintln!("Failed to update local repos cache: {e}"),
+                    }
+
+                    // v0.2.0+: also release the server-side slot. Best-effort —
+                    // a network failure here shouldn't block local teardown,
+                    // but we surface it so the user can re-run.
+                    if let Some(api_key) = recon_server::license::read_credentials(&config_dir) {
+                        let fp = recon_server::account::fingerprint_path(&repo);
+                        match recon_server::account::unregister_repo(&api_key, &fp) {
+                            Ok(()) => eprintln!("Released server-side repo slot"),
+                            Err(recon_server::account::AccountError::NotFound) => {
+                                // Slot wasn't registered server-side (pre-v0.2 repo) — silent.
+                            }
+                            Err(e) => eprintln!(
+                                "Could not release server-side slot: {e}\n\
+                                 Run `recon repos remove {}` once you have network.",
+                                repo.display()
+                            ),
+                        }
                     }
                 }
                 None => {
                     eprintln!(
-                        "Note: MCP config and agent rules left in place. \
+                        "Note: MCP config, agent rules, and server-side repo slot left in place. \
                          Run `recon purge --mcp <ide>` to fully reverse `recon init`."
                     );
                 }
             }
             Ok(())
         }
+        Command::Repos { action } => match action {
+            ReposAction::List => {
+                let config_dir = recon_server::license::global_config_dir();
+                let api_key =
+                    recon_server::license::read_credentials(&config_dir).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "credentials not found at {}/credentials.json — \
+                             run `recon login <key>` first.",
+                            config_dir.display()
+                        )
+                    })?;
+                let resp = recon_server::account::list_repos(&api_key)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!(
+                    "{} repo(s) registered ({}/{} on {})",
+                    resp.repos.len(),
+                    resp.repos.len(),
+                    resp.limit,
+                    resp.tier
+                );
+                for r in &resp.repos {
+                    println!(
+                        "  {}  first_seen={}  last_seen={}",
+                        &r.fingerprint[..16],
+                        r.first_seen_at,
+                        r.last_seen_at
+                    );
+                }
+                if resp.repos.is_empty() {
+                    println!("(Tip: `recon init` in a project will register that repo here.)");
+                }
+                Ok(())
+            }
+            ReposAction::Remove { target } => {
+                let config_dir = recon_server::license::global_config_dir();
+                let api_key =
+                    recon_server::license::read_credentials(&config_dir).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "credentials not found at {}/credentials.json — \
+                             run `recon login <key>` first.",
+                            config_dir.display()
+                        )
+                    })?;
+                // Accept either a 64-char lowercase hex fingerprint or a path.
+                let is_fp = target.len() == 64
+                    && target
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+                let fp = if is_fp {
+                    target.clone()
+                } else {
+                    let path = std::path::PathBuf::from(&target);
+                    recon_server::account::fingerprint_path(&path)
+                };
+                match recon_server::account::unregister_repo(&api_key, &fp) {
+                    Ok(()) => {
+                        println!("Removed {} from your account", &fp[..16]);
+                        // Best-effort local-cache cleanup. We don't have the
+                        // canonical path back from a fingerprint, so we walk
+                        // local entries and drop ones whose canonical path
+                        // hashes to the same fingerprint.
+                        if let Ok(repos) = recon_server::repos::load_repos(&config_dir) {
+                            for r in &repos {
+                                let local_fp = recon_server::account::fingerprint_path(
+                                    std::path::Path::new(&r.path),
+                                );
+                                if local_fp == fp {
+                                    let _ = recon_server::repos::remove_repo(&config_dir, &r.path);
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(recon_server::account::AccountError::NotFound) => Err(anyhow::anyhow!(
+                        "Fingerprint not registered. Run `recon repos list` to see what's tracked."
+                    )),
+                    Err(e) => Err(anyhow::anyhow!("{e}")),
+                }
+            }
+        },
+        Command::Doctor { json } => doctor::run(&repo, json),
         Command::Version => {
             println!("recon {}", env!("CARGO_PKG_VERSION"));
             Ok(())

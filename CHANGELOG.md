@@ -4,6 +4,57 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.2.0] — unreleased
+
+### Added
+
+- **Server-side repo enforcement.** `max_repos` is now enforced by the
+  recon worker. `recon init` registers each repo's canonical-path
+  SHA-256 fingerprint via atomic `POST /v1/account/repos` (single-statement
+  `INSERT … SELECT … WHERE` so concurrent inits at limit-1 cannot both
+  win). Replaces the prior local-file enforcement that a patched binary
+  trivially bypassed.
+- **`recon repos list / remove`** for managing slots from the CLI.
+  `remove` accepts either a path or a 64-char fingerprint pasted from
+  `list`. Best-effort cleans the local cache too.
+- **`recon doctor [--json]`** — health check across binary, repo dir,
+  global config dir, license cache, credentials file (mode 0600 on
+  Unix), worker `/v1/health`, authenticated worker repo list, index
+  state (read-only SQLite open — does not load `ReconServer`), MCP
+  wiring across cc / oc / cursor, and agent rules across CLAUDE.md /
+  AGENTS.md / cursor.mdc / windsurf.md. Exit 1 on any FAIL.
+- **Worker:** new `requireApiKey` middleware, `RL_ACCOUNT` rate-limit
+  binding (60 / min / key-prefix), `/v1/health` (and `/api/v1/health`)
+  endpoint for the doctor to ping.
+- **Docs:** new `Account & repos` and `Troubleshooting` sections in
+  `site/Docs.html` covering server-side enforcement, slot management,
+  common failure modes, and `recon doctor` output.
+
+### Changed
+
+- **`recon purge --mcp <ide>`** now also calls
+  `DELETE /v1/account/repos/:fingerprint` to release the server-side
+  slot. Best-effort; idempotent for pre-v0.2 repos that were never
+  registered.
+- **`recon init` requires credentials.** v0.2 needs the raw API key
+  for the registration POST, not just the cached signed license. Users
+  who upgraded from v0.1 may need to run `recon login <key>` once to
+  regenerate the credentials file.
+- **Parser unit tests.** Added `tsx_basic` and `javascript_basic`
+  covering the two of nine indexed languages that previously had only
+  transitive coverage via the multi-language e2e test.
+
+### Migration notes
+
+There's no automatic migration of the old local `repos.json` to the
+worker. Existing entries continue to record indexing stats (files,
+symbols) as before; new repos register with the worker on the next
+`recon init`. If you're already over your tier's `max_repos`, the
+worker will reject new registrations until you `recon repos remove`
+slots you no longer need.
+
+[0.2.0]: https://github.com/bravo1goingdark/recon/releases/tag/v0.2.0
+
 ## [0.1.1] — 2026-04-25
 
 ### Fixed

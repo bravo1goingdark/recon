@@ -203,6 +203,8 @@
     <h4>Reference</h4>
     <ul>
       <li><a href="#tools">The 12 tools</a></li>
+      <li><a href="#account">Account &amp; repos</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
       <li><a href="#security">Security</a></li>
       <li><a href="#performance">Performance</a></li>
     </ul>
@@ -537,8 +539,165 @@ allow_sensitive = <span class="h">false</span></pre>
       </tbody>
     </table>
 
+    <!-- ACCOUNT & REPOS -->
+    <h2 id="account"><span class="no">11</span>Account &amp; repos</h2>
+    <p>
+      Every recon account has a tier-defined <code>max_repos</code> — the
+      number of distinct repositories one license can index concurrently.
+      As of <b>v0.2.0</b> the limit is enforced server-side: each
+      <code>recon init</code> registers the repo's canonical-path SHA-256
+      fingerprint with the worker, and a <code>403</code> there blocks
+      indexing rather than a local file the agent could overwrite.
+    </p>
+
+    <h3>How registration works</h3>
+    <ul class="bul">
+      <li>On <code>recon init</code> the CLI canonicalises the repo path,
+        SHA-256s the result to a 64-char hex fingerprint, and POSTs it to
+        <code>/v1/account/repos</code>.</li>
+      <li>The worker accepts atomically — even at limit-1, two concurrent
+        <code>init</code>s with different fingerprints can't both succeed.</li>
+      <li>Repeat POSTs (same fingerprint) refresh <code>last_seen_at</code>
+        and return <code>200 status: refreshed</code> rather than burning
+        a slot.</li>
+      <li>The worker only sees the digest. Your filesystem layout never
+        leaves the machine.</li>
+    </ul>
+
+    <h3>Managing slots</h3>
+    <pre><code>$ recon repos list
+3 repo(s) registered (3/5 on Pro)
+  a3f1c8b2e6d4710f  first_seen=2026-04-22T10:14:33Z  last_seen=2026-04-25T07:11:09Z
+  ...
+
+$ recon repos remove /home/me/old-project
+Removed a3f1c8b2e6d4710f from your account
+
+$ recon repos remove a3f1c8b2e6d4710f9c2e6d4710fc8b2e6d4710fc8b2e6d4710fc8b2e6d4710f
+# also accepts a 64-char fingerprint pasted from `recon repos list`</code></pre>
+    <p>
+      <b>Moving a repo directory burns a slot.</b> The fingerprint is
+      path-based, so renaming or relocating a project produces a new
+      fingerprint. Run <code>recon repos remove &lt;old-path&gt;</code>
+      first, then <code>recon init</code> at the new location. Git-remote
+      dedup is on the post-v0.4 roadmap.
+    </p>
+
+    <h3><code>recon purge --mcp &lt;ide&gt;</code> frees the slot</h3>
+    <p>
+      <code>recon purge</code> is the inverse of <code>recon init</code>.
+      With <code>--mcp &lt;ide&gt;</code> it removes the IDE's MCP entry,
+      strips the agent rules, deletes the local index, <em>and</em> calls
+      <code>DELETE /v1/account/repos/:fingerprint</code> to release the
+      server slot. Network failures during the DELETE are best-effort;
+      re-run later or use <code>recon repos remove</code>.
+    </p>
+
+    <!-- TROUBLESHOOTING -->
+    <h2 id="troubleshooting"><span class="no">12</span>Troubleshooting</h2>
+    <p>
+      Start with <code>recon doctor</code>. It runs a battery of probes
+      across every surface a stuck install can fail on and returns
+      exit-code 1 when anything's broken.
+    </p>
+    <pre><code>$ recon doctor
+recon doctor — 0.2.0 (x86_64-unknown-linux-gnu)
+repo: /home/me/proj
+
+[OK]    binary                        recon 0.2.0 (x86_64-unknown-linux-gnu)
+[OK]    repo dir                      /home/me/proj writable
+[OK]    global config                 /home/me/.config/recon writable
+[OK]    license                       Pro (expires unix=1798761600)
+[OK]    credentials                   present, mode 0600
+[OK]    worker /v1/health             reachable
+[OK]    worker repo list              3/5 on Pro
+[OK]    index                         1834 files, 87421 symbols
+[OK]    cc mcp                        /home/me/proj/.mcp.json → recon entry present
+[WARN]  oc mcp                        /home/me/proj/opencode.jsonc not present
+[WARN]  cursor mcp                    /home/me/proj/.cursor/mcp.json not present
+[OK]    CLAUDE.md rules               /home/me/proj/CLAUDE.md → recon block present
+[WARN]  AGENTS.md rules               /home/me/proj/AGENTS.md not present
+
+Summary: 9 ok, 3 warn, 0 fail</code></pre>
+
+    <p>
+      <code>--json</code> emits the same data as a structured envelope
+      so monitoring scripts and CI can consume it directly.
+    </p>
+
+    <h3>Common failure modes</h3>
+    <table class="tools" style="margin-top:.6rem">
+      <thead>
+        <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>API key rejected: server response signature invalid</code></td>
+          <td>Worker's <code>LICENSE_HMAC_SECRET</code> doesn't match the binary's
+            embedded <code>RECON_LICENSE_HMAC_KEY</code>. Hit during the v0.1.0
+            release, fixed in v0.1.1.</td>
+          <td>Upgrade to ≥v0.1.1: <code>recon update</code></td>
+        </tr>
+        <tr>
+          <td><code>credentials not found at … — run `recon login`</code></td>
+          <td>v0.2.0 needs the raw API key (not just the cached signed license)
+            so it can call <code>/v1/account/repos</code>.</td>
+          <td><code>recon login &lt;sk-recon-...&gt;</code> once per machine.</td>
+        </tr>
+        <tr>
+          <td><code>Pro plan allows 5 repo(s) — limit reached</code></td>
+          <td>You're at <code>max_repos</code>. The current repo's not yet
+            registered; the worker won't add it.</td>
+          <td><code>recon repos list</code> → <code>recon repos remove
+            &lt;path-or-fingerprint&gt;</code>, then re-run <code>recon init</code>.
+            Or upgrade your plan.</td>
+        </tr>
+        <tr>
+          <td><code>No valid license. Run 'recon login &lt;key&gt;'</code></td>
+          <td>License cache missing or older than the 24 h TTL with no network.</td>
+          <td>Re-validate: <code>recon login &lt;key&gt;</code>. Behind a firewall?
+            Whitelist <code>recon-api.kumarashutosh34169.workers.dev</code>.</td>
+        </tr>
+        <tr>
+          <td><code>could not reach recon worker</code></td>
+          <td>DNS / TCP / TLS to the worker failing. The license cache covers
+            you for 24 h; after that, <code>recon serve</code> hard-fails.</td>
+          <td><code>recon doctor</code> → look at <code>worker /v1/health</code>.
+            Check corporate proxy / firewall.</td>
+        </tr>
+        <tr>
+          <td><code>schema unreadable — try `recon reindex`</code></td>
+          <td>Index DB schema mismatch (rare; usually means an upgrade
+            interrupted mid-migration).</td>
+          <td><code>recon purge</code> then <code>recon init</code>. Index
+            rebuild on a 500K-LOC repo takes about 60 seconds.</td>
+        </tr>
+        <tr>
+          <td>MCP tools not appearing in Claude Code / Cursor / Windsurf</td>
+          <td>IDE caches the server list at startup.</td>
+          <td>Restart the IDE. <code>recon doctor</code> verifies the MCP
+            wiring file points at the current binary.</td>
+        </tr>
+        <tr>
+          <td>Agent still uses Read/Grep/Glob despite the rules file</td>
+          <td>Some agents need the rules block to be loaded explicitly.</td>
+          <td>Confirm <code>recon doctor</code> shows <code>recon block
+            present</code> on the agent's rules file. Restart the agent
+            session so it re-reads the rules.</td>
+        </tr>
+        <tr>
+          <td><code>tantivy lock</code> errors during indexing</td>
+          <td>Two <code>recon</code> processes wrote to the same
+            <code>.recon/tantivy</code> directory.</td>
+          <td>Kill stray processes, then <code>rm .recon/tantivy/.tantivy-meta.lock</code>
+            and re-index. Single-writer is enforced; you should never
+            see this in steady state.</td>
+        </tr>
+      </tbody>
+    </table>
+
     <!-- ADRS -->
-    <h2 id="adrs"><span class="no">11</span>ADRs</h2>
+    <h2 id="adrs"><span class="no">13</span>ADRs</h2>
     <ul class="bul">
       <li><b>000</b> — Symbol-first architecture.</li>
       <li><b>001</b> — Text-search backend (fff-grep vs. ripgrep, why fff).</li>
@@ -546,7 +705,21 @@ allow_sensitive = <span class="h">false</span></pre>
       <li><b>003</b> — Stdio transport hygiene (stderr-only logging, CI guard).</li>
     </ul>
 
-    <h2 id="changelog"><span class="no">12</span>Changelog</h2>
+    <h2 id="changelog"><span class="no">14</span>Changelog</h2>
+    <p><b>v0.2.0</b> — Server-side repo enforcement.</p>
+    <ul class="bul">
+      <li>Server-side <code>max_repos</code>: <code>recon init</code> now
+        registers each repo's canonical-path SHA-256 fingerprint with the
+        worker via atomic <code>POST /v1/account/repos</code>. Replaces
+        the prior local-file enforcement that a patched binary trivially
+        bypassed.</li>
+      <li><code>recon repos list / remove</code> for managing slots.</li>
+      <li><code>recon doctor [--json]</code> — health check across binary,
+        license, credentials, worker reachability, index, MCP wiring, and
+        agent rules. Exit 1 on any FAIL.</li>
+      <li><code>recon purge --mcp &lt;ide&gt;</code> now also frees the
+        server-side slot.</li>
+    </ul>
     <p><b>v0.1.0</b> — Initial release.</p>
     <ul class="bul">
       <li>Local-first MCP server, 24 MB Rust binary, signed with SHA256 + cosign keyless sigstore</li>
@@ -563,7 +736,7 @@ allow_sensitive = <span class="h">false</span></pre>
       <li>Tested on Zed (1.3M LOC) and the Rust compiler (3.8M LOC)</li>
     </ul>
 
-    <h2 id="license"><span class="no">13</span>License</h2>
+    <h2 id="license"><span class="no">15</span>License</h2>
     <p><b>recon</b> is proprietary software. © 2026. All rights reserved. Use is governed by the recon Terms of Service.</p>
 
     <div class="next">
@@ -590,6 +763,8 @@ allow_sensitive = <span class="h">false</span></pre>
       <li><a href="#incremental">Incremental indexing</a></li>
       <li><a href="#filter-dsl">Filter DSL</a></li>
       <li><a href="#tools">The 12 tools</a></li>
+      <li><a href="#account">Account &amp; repos</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
       <li><a href="#security">Security</a></li>
       <li><a href="#performance">Performance</a></li>
       <li><a href="#adrs">ADRs</a></li>

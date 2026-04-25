@@ -61,6 +61,15 @@ type = "ratelimit"
 namespace_id = "1004"
 simple = { limit = 120, period = 60 }
 
+# /v1/account/* — 60 per minute per API-key prefix. The CLI hits this
+# once per `recon init` (POST) and `recon repos {list,remove}`. Legitimate
+# load is well under the cap; this only kicks in if a misbehaving CLI loops.
+[[unsafe.bindings]]
+name = "RL_ACCOUNT"
+type = "ratelimit"
+namespace_id = "1005"
+simple = { limit = 60, period = 60 }
+
 # Secrets (set via `wrangler secret put`):
 # GITHUB_CLIENT_ID
 # GITHUB_CLIENT_SECRET
