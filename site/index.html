@@ -105,6 +105,25 @@
   code{word-break:break-word;overflow-wrap:anywhere}
   p,li,td,th,summary{overflow-wrap:anywhere;word-break:break-word}
 
+  /* Copy-to-clipboard control. Sits top-right of every <pre>. Ghosted
+     until the pre is hovered or focused so it doesn't compete with the
+     code text visually; flips to a clay accent on success. */
+  .copy-btn{
+    position:absolute;top:6px;right:6px;
+    background:var(--paper);border:1px solid var(--rule);
+    color:var(--ink-3);font-family:var(--mono);font-size:10px;
+    letter-spacing:0.12em;text-transform:uppercase;
+    padding:4px 9px;border-radius:3px;cursor:pointer;line-height:1;
+    opacity:0;transition:opacity .15s, color .15s, border-color .15s;
+  }
+  pre:hover .copy-btn,pre:focus-within .copy-btn,.copy-btn:focus-visible{opacity:1}
+  .copy-btn:hover{color:var(--ink);border-color:var(--ink-3)}
+  .copy-btn.copied{color:var(--clay);border-color:var(--clay);opacity:1}
+  /* Touch devices have no hover — show the button at a softer opacity. */
+  @media (hover:none){ .copy-btn{opacity:.55} }
+  /* Elements with data-copy (the IDE-matrix flags) flash on click. */
+  [data-copy].copied{outline:1px solid var(--clay);outline-offset:2px}
+
   .wrap{max-width:1180px;margin:0 auto;padding:0 40px}
   @media (max-width:720px){ .wrap{padding:0 24px} }
 
@@ -473,7 +492,7 @@
       <div class="ide">
         <div class="glyph">cc</div>
         <h3 class="name">Claude Code</h3>
-        <div class="flag">recon init --mcp cc</div>
+        <div class="flag" data-copy="recon init --mcp cc">recon init --mcp cc</div>
         <div class="meta">
           MCP: <b>./.mcp.json</b><br/>
           Rules: <b>./CLAUDE.md</b>
@@ -482,7 +501,7 @@
       <div class="ide">
         <div class="glyph">oc</div>
         <h3 class="name">OpenCode</h3>
-        <div class="flag">recon init --mcp oc</div>
+        <div class="flag" data-copy="recon init --mcp oc">recon init --mcp oc</div>
         <div class="meta">
           MCP: <b>./opencode.jsonc</b><br/>
           Rules: <b>./AGENTS.md</b>
@@ -491,7 +510,7 @@
       <div class="ide">
         <div class="glyph">cur</div>
         <h3 class="name">Cursor</h3>
-        <div class="flag">recon init --mcp cursor</div>
+        <div class="flag" data-copy="recon init --mcp cursor">recon init --mcp cursor</div>
         <div class="meta">
           MCP: <b>./.cursor/mcp.json</b><br/>
           Rules: <b>./.cursor/rules/recon.mdc</b>
@@ -500,7 +519,7 @@
       <div class="ide">
         <div class="glyph">win</div>
         <h3 class="name">Windsurf</h3>
-        <div class="flag">recon init --mcp windsurf</div>
+        <div class="flag" data-copy="recon init --mcp windsurf">recon init --mcp windsurf</div>
         <div class="meta">
           MCP: <b>~/.codeium/windsurf/mcp_config.json</b><br/>
           Rules: <b>./.windsurf/rules/recon.md</b>
@@ -644,14 +663,20 @@
 <span class="h">code_find_symbol</span>("render_map")
 <span class="c">→ 1 hit, 3 ranked callers  ·  ~140 tokens</span>
 
+<span class="h">code_find_refs</span>("render_map")
+<span class="c">→ 7 sites in 3 files  ·  ~280 tokens</span>
+
 <span class="h">code_read_symbol</span>("…/map.rs", "render_map")
 <span class="c">→ body + 7 call sites  ·  ~780 tokens</span>
+
+<span class="h">code_outline</span>("…/server.rs")
+<span class="c">→ 32 symbols, one line each  ·  ~280 tokens</span>
 
 <span class="h">code_skeleton</span>("…/page_rank.rs")
 <span class="c">→ signatures + docs  ·  ~340 tokens</span>
 
-<span class="h">code_repo_map</span>(focus=<span class="h">"…/map.rs"</span>, budget=<span class="h">2000</span>)
-<span class="c">→ pageranked overview  ·  ~1,840 tokens</span>
+<span class="h">code_repo_map</span>(focus=<span class="h">"…/map.rs"</span>, budget=<span class="h">1500</span>)
+<span class="c">→ pageranked overview  ·  ~1,280 tokens</span>
 
 <span class="c">subtotal</span> <span class="h">≈ 3,100 tokens</span></pre>
         <div class="meter">
@@ -978,5 +1003,6 @@ recon init --mcp windsurf  <span class="c"># Windsurf</span></pre>
 <script src="/js/theme.js"></script>
 <script src="/js/auth.js"></script>
 <script src="/js/os-tabs.js"></script>
+<script src="/js/copy-buttons.js"></script>
 </body>
 </html>
