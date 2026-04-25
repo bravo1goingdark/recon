@@ -136,9 +136,24 @@ billingRoutes.post(
     }
 
     if (existing && existing.status === "created") {
+      // Concurrent /subscribe still in flight from another request: the
+      // placeholder is here but razorpay_subscription_id hasn't been
+      // stamped yet (createSubscription is mid-call). Deleting it now
+      // would orphan the upstream Razorpay sub. Tell the caller to retry.
+      if (!existing.razorpay_subscription_id) {
+        return c.json(
+          {
+            error:
+              "A subscribe attempt is already in flight. Please retry in a moment.",
+            existing_tier: existing.tier,
+            existing_status: existing.status,
+          },
+          409,
+        );
+      }
       const sameTierCurrency =
         existing.tier === tierConfig.name && existing.currency === currency;
-      if (sameTierCurrency && existing.razorpay_subscription_id) {
+      if (sameTierCurrency) {
         let upstream:
           | Awaited<ReturnType<typeof fetchSubscription>>
           | null = null;
@@ -168,17 +183,15 @@ billingRoutes.post(
       // atomic INSERT below can claim a fresh slot. Failures from Razorpay
       // (sub already expired/cancelled) are non-fatal — we proceed with
       // the local cleanup either way.
-      if (existing.razorpay_subscription_id) {
-        try {
-          await cancelSubscription(
-            c.env.RAZORPAY_KEY_ID,
-            c.env.RAZORPAY_KEY_SECRET,
-            existing.razorpay_subscription_id,
-            false,
-          );
-        } catch (_) {
-          // Already-cancelled or expired upstream — fine.
-        }
+      try {
+        await cancelSubscription(
+          c.env.RAZORPAY_KEY_ID,
+          c.env.RAZORPAY_KEY_SECRET,
+          existing.razorpay_subscription_id,
+          false,
+        );
+      } catch (_) {
+        // Already-cancelled or expired upstream — fine.
       }
       await db
         .prepare("DELETE FROM subscriptions WHERE id = ?")
