@@ -178,39 +178,43 @@
       justify-content:center;color:var(--ink-3);transition:border-color .15s,color .15s;
       font-size:14px;
     "><span id="theme-icon">◑</span></button>
-    <div class="ship">v0.1.0 · <span>shipping</span></div>
+    <div class="ship">v0.2.0 · <span>shipping</span></div>
   </div>
 </nav>
 
 <div class="shell">
 
+
   <!-- LEFT SIDEBAR -->
   <aside class="side">
-    <h4>Start here</h4>
+    <h4>Get started</h4>
     <ul>
-      <li><a class="on" href="#introduction">Introduction</a></li>
-      <li><a href="#install">Installation</a></li>
-      <li><a href="#quickstart">Quickstart</a></li>
-      <li><a href="#configuration">Configuration</a></li>
+      <li><a class="on" href="#quickstart">Quickstart</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#ide-setup">IDE setup</a></li>
     </ul>
-    <h4>Concepts</h4>
+    <h4>CLI</h4>
     <ul>
-      <li><a href="#shapes">Output shapes</a></li>
-      <li><a href="#tiers">Search tiers</a></li>
-      <li><a href="#incremental">Incremental indexing</a></li>
-      <li><a href="#filter-dsl">Filter DSL</a></li>
+      <li><a href="#cli-account">Account</a></li>
+      <li><a href="#cli-project">Project</a></li>
+      <li><a href="#cli-server">Server</a></li>
+      <li><a href="#cli-query">Direct query</a></li>
     </ul>
     <h4>Reference</h4>
     <ul>
-      <li><a href="#tools">The 12 tools</a></li>
+      <li><a href="#tools">MCP tools</a></li>
+      <li><a href="#filter-dsl">Filter DSL</a></li>
+      <li><a href="#configuration">Configuration</a></li>
       <li><a href="#account">Account &amp; repos</a></li>
+    </ul>
+    <h4>Help</h4>
+    <ul>
       <li><a href="#troubleshooting">Troubleshooting</a></li>
       <li><a href="#security">Security</a></li>
       <li><a href="#performance">Performance</a></li>
     </ul>
     <h4>Project</h4>
     <ul>
-      <li><a href="#adrs">ADRs</a></li>
       <li><a href="#changelog">Changelog</a></li>
       <li><a href="#license">License</a></li>
     </ul>
@@ -218,44 +222,35 @@
 
   <!-- MAIN -->
   <main>
-    <div class="crumb"><em>Docs</em> &nbsp;/ &nbsp;Introduction</div>
-    <h1>The <em>manual.</em></h1>
+    <div class="crumb"><em>Docs</em> &nbsp;/ &nbsp;Quickstart</div>
+    <h1>Get <em>going.</em></h1>
     <p class="lede">
-      <b>recon</b> is a local-first Rust MCP server that gives AI coding agents symbol-aware tools
-      in place of <code>Read</code>, <code>Grep</code>, and <code>Glob</code>. This
-      document explains what it is, how to install it, and the ideas that shape its API.
+      Three commands to get <b>recon</b> wired into your editor and serving symbol-aware tools to your AI agent. The rest of this page is a complete reference for every CLI command — pick what you need.
     </p>
 
-    <!-- INTRO -->
-    <h2 id="introduction"><span class="no">01</span>Introduction</h2>
-    <p>
-      Coding agents spend a surprising fraction of their context window just <i>looking</i>
-      at code — reading whole files to find a single function, grepping a repo for a name
-      that a language server already knows. recon treats that as a workflow bug, not a
-      fact of life.
-    </p>
-    <p>
-      recon is a <b>local-first MCP server</b>, shipped as a signed 24 MB Rust binary.
-      Your IDE auto-spawns it over stdio; indexing, watching, ranking, and search all
-      run on your machine. The only thing that touches the network is a one-time license
-      validation — your source code never leaves.
-    </p>
-    <p>
-      Under the hood it is tree-sitter for structure, SQLite + FTS5 for exact and fuzzy
-      symbol lookup, Tantivy with a camelCase/snake_case tokenizer for structured BM25,
-      and fff-grep for SIMD-accelerated raw text. On top of that sits an MCP server
-      exposing twelve tools, each returning one of five canonical <a href="#shapes">output shapes</a>.
-    </p>
+    <!-- QUICKSTART -->
+    <h2 id="quickstart"><span class="no">01</span>Quickstart</h2>
+    <p>One-time setup per machine, then per project.</p>
+<pre><span class="c"># 1. install (Linux / macOS)</span>
+curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+
+<span class="c"># 2. authenticate (caches license globally at ~/.config/recon/)</span>
+recon login <span class="h">sk-recon-your-key</span>
+
+<span class="c"># 3. in each project: index + write the IDE's MCP config</span>
+cd your-project
+recon init --mcp <span class="h">cc</span>        <span class="c"># Claude Code</span></pre>
+
+    <p>Restart your IDE. The 12 <code>code_*</code> tools are now available. <code>recon serve</code> is auto-spawned over stdio — you never run it by hand.</p>
 
     <div class="callout">
-      <div class="tag">Design note</div>
-      <p>If a response can't be mapped to one of the five shapes, that's a signal the
-      tool is doing too much. Split it, don't widen the schema.</p>
+      <div class="tag">Verify</div>
+      <p>Run <code>recon doctor</code>. If everything's green, you're done. If anything's red, the <a href="#troubleshooting">Troubleshooting</a> section maps every failure to a fix.</p>
     </div>
 
     <!-- INSTALL -->
-    <h2 id="install"><span class="no">02</span>Installation</h2>
-    <p>recon ships as a single 24 MB Rust binary. The installer verifies the artifact's SHA256 against a co-signed manifest before extraction — and, when <code>cosign</code> is present on the machine, also verifies the manifest's sigstore signature against our GitHub Actions release workflow.</p>
+    <h2 id="install"><span class="no">02</span>Install</h2>
+    <p>recon ships as a single 24 MB Rust binary. The installer verifies a SHA-256 manifest and (when <code>cosign</code> is on the machine) the manifest's sigstore signature against our GitHub Actions release workflow.</p>
 
 <pre><span class="c"># Linux · macOS</span>
 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
@@ -263,46 +258,276 @@ curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 <span class="c"># Windows (PowerShell)</span>
 iwr https://mcprecon.pages.dev/install.ps1 | iex
 
-<span class="c"># pin a specific version (default is the latest release)</span>
-VERSION=v0.1.0 curl -fsSL https://mcprecon.pages.dev/install.sh | bash</pre>
+<span class="c"># pin a specific version</span>
+VERSION=v0.2.0 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
-    <p>If piping a script into a shell isn't your style, grab the tarball and <code>SHA256SUMS.txt</code> from the release page and verify by hand:</p>
-<pre><span class="c"># manual verification</span>
-cosign verify-blob \
+<span class="c"># upgrade in place (lands the latest published release)</span>
+recon update</pre>
+
+    <h3>Manual install &amp; signature verification</h3>
+    <p>Don't want to pipe a script into your shell? Grab the tarball and <code>SHA256SUMS.txt</code> from the <a href="https://github.com/bravo1goingdark/recon/releases">releases page</a> and verify by hand:</p>
+<pre>cosign verify-blob \
   --certificate SHA256SUMS.txt.pem \
   --signature SHA256SUMS.txt.sig \
   --certificate-identity-regexp '^https://github.com/.*/.github/workflows/release.yml@' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS.txt
 
-sha256sum -c SHA256SUMS.txt</pre>
+sha256sum -c SHA256SUMS.txt
+tar -xzf recon-x86_64-unknown-linux-gnu.tar.gz
+sudo mv recon /usr/local/bin/</pre>
 
-    <h3 id="quickstart">Quickstart</h3>
-    <p>Authenticate once per machine, then configure each repo. Your IDE auto-spawns <code>recon serve</code> over stdio — you never run it by hand.</p>
-<pre><span class="c"># 1. authenticate once (caches license globally)</span>
-recon login <span class="h">sk-recon-your-key</span>
+    <h3>Build from source</h3>
+<pre>git clone https://github.com/bravo1goingdark/recon
+cd recon
+RECON_LICENSE_HMAC_KEY=&lt;your-secret&gt; cargo build -p recon-cli --release
+./target/release/recon --version</pre>
 
-<span class="c"># 2. in each project: index + write MCP config</span>
-cd your-project
-recon init --mcp <span class="h">cc</span>        <span class="c"># Claude Code  → .mcp.json</span>
-recon init --mcp <span class="h">cursor</span>    <span class="c"># Cursor       → .cursor/mcp.json</span>
-recon init --mcp <span class="h">windsurf</span>  <span class="c"># Windsurf     → .windsurf/mcp.json</span>
-recon init --mcp <span class="h">oc</span>        <span class="c"># OpenCode     → .opencode/mcp.json</span></pre>
+    <p class="muted" style="font-size:13px;color:var(--ink-3)">
+      Note: <code>RECON_LICENSE_HMAC_KEY</code> is required for release builds — it must match the worker's <code>LICENSE_HMAC_SECRET</code>. Building without it fails on purpose so dev binaries can't accidentally validate against production licenses.
+    </p>
 
-    <p>Then nudge the agent to prefer symbol-aware tools. Add this to <code>CLAUDE.md</code> or your agent's system prompt:</p>
-<pre><span class="c"># agent rules</span>
-Use <span class="h">code_*</span> tools (code_outline, code_skeleton, code_find_symbol,
-code_search, code_repo_map) before Read/Grep/Glob when
-exploring code. They return structured, token-efficient results.</pre>
+    <!-- IDE SETUP -->
+    <h2 id="ide-setup"><span class="no">03</span>IDE setup</h2>
+    <p><code>recon init --mcp &lt;ide&gt;</code> indexes the repo, writes the IDE's MCP config, and drops a strict-policy agent rules file so the agent uses recon's <code>code_*</code> tools instead of <code>Read</code>/<code>Grep</code>/<code>Glob</code>.</p>
 
+    <table>
+      <thead>
+        <tr><th>IDE</th><th>Flag</th><th>MCP config written to</th><th>Agent rules written to</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Claude Code</td><td><code>--mcp cc</code></td><td><code>./.mcp.json</code></td><td><code>./CLAUDE.md</code> (appended)</td></tr>
+        <tr><td>OpenCode</td><td><code>--mcp oc</code></td><td><code>./opencode.jsonc</code></td><td><code>./AGENTS.md</code> (created or appended)</td></tr>
+        <tr><td>Cursor</td><td><code>--mcp cursor</code></td><td><code>./.cursor/mcp.json</code></td><td><code>./.cursor/rules/recon.mdc</code></td></tr>
+        <tr><td>Windsurf</td><td><code>--mcp windsurf</code></td><td><code>~/.codeium/windsurf/mcp_config.json</code></td><td><code>./.windsurf/rules/recon.md</code></td></tr>
+      </tbody>
+    </table>
+
+    <p>The agent rules file is the difference between "agent uses recon when it remembers" and "agent uses recon by default." It's a strict policy: Read/Grep/Glob on source files require explicit user permission and an explanation.</p>
+
+    <h3>Reverse the wiring</h3>
+<pre><span class="c"># the symmetric inverse of `recon init --mcp cc`</span>
+recon purge --mcp cc</pre>
+    <p>Removes the local index (<code>.recon/</code>), the IDE's MCP entry (preserves any other servers in the config), the agent rules block, and frees the server-side repo slot. <code>recon purge</code> with no flag deletes only the index.</p>
+
+    <!-- ── CLI ───────────────────────────────────────────────────── -->
+    <h2 id="cli-account"><span class="no">04</span>CLI · Account</h2>
+    <p>Commands that talk to your recon account on the worker. All of them need <code>recon login</code> to have run at least once on this machine.</p>
+
+    <h3 id="cmd-login"><code>recon login &lt;key&gt;</code></h3>
+    <p>Validate an API key against the recon worker, persist a signed license cache, and store the raw key for future calls (chmod 0600 on Unix).</p>
+<pre>$ recon login sk-recon-XXXXXXXXXXXXXX
+✓ Authenticated — Pro tier (5 repos, 10000 files, 1000K LOC)
+License cached at /home/me/.config/recon/license.json (TTL 24h)
+Credentials saved to /home/me/.config/recon/credentials.json (mode 0600)</pre>
+    <p>Behind a corporate proxy? Set <code>RECON_API_URL=&lt;your-staging-worker&gt;</code> to override the default endpoint.</p>
+
+    <h3 id="cmd-logout"><code>recon logout</code></h3>
+    <p>Delete the cached license and the credentials file. <code>recon serve</code> will refuse to start until you log in again.</p>
+<pre>$ recon logout
+Removed /home/me/.config/recon/license.json
+Removed /home/me/.config/recon/credentials.json</pre>
+
+    <h3 id="cmd-license"><code>recon license</code></h3>
+    <p>Show the currently cached license — tier, limits, expiry, source (remote vs cached).</p>
+<pre>$ recon license
+Tier: Pro
+Max repos: 5
+Max files: 10000
+Max LOC:   1000000
+Expires:   2026-12-31
+Source:    cache (refreshed 11h ago)</pre>
+
+    <h3 id="cmd-repos-list"><code>recon repos list</code></h3>
+    <p>List the repos this account has registered with the worker. As of v0.2.0, <code>max_repos</code> is enforced server-side: each <code>recon init</code> POSTs the repo's canonical-path SHA-256 fingerprint to the worker, and registrations beyond your tier limit are rejected.</p>
+<pre>$ recon repos list
+3 repo(s) registered (3/5 on Pro)
+  a3f1c8b2e6d4710f  first_seen=2026-04-22T10:14:33Z  last_seen=2026-04-25T07:11:09Z
+  e7d2a9c44e10bb22  first_seen=2026-04-23T09:01:18Z  last_seen=2026-04-24T19:42:00Z
+  19f0c7884c2b8e6f  first_seen=2026-04-25T07:14:41Z  last_seen=2026-04-25T07:14:41Z</pre>
+
+    <h3 id="cmd-repos-remove"><code>recon repos remove &lt;target&gt;</code></h3>
+    <p>Free a slot. <code>target</code> may be either a path (the CLI canonicalizes and hashes it) or a 64-char fingerprint pasted from <code>recon repos list</code>. Paths to deleted directories work — fingerprinting falls back to the verbatim string when canonicalize fails.</p>
+<pre>$ recon repos remove /home/me/old-project
+Removed a3f1c8b2e6d4710f from your account
+
+$ recon repos remove a3f1c8b2e6d4710f9c2e6d4710fc8b2e6d4710fc8b2e6d4710fc8b2e6d4710f
+# also accepts the full fingerprint</pre>
     <div class="callout">
-      <div class="tag">Privacy</div>
-      <p>The only network traffic recon ever makes is a short license check against our auth API — it carries your key and returns your tier. Your source, your search queries, and every tool response stay on your machine.</p>
+      <div class="tag">Heads up</div>
+      <p>Moving or renaming a repo directory burns a slot — the fingerprint is path-based, so the new location produces a new fingerprint. Run <code>recon repos remove &lt;old-path&gt;</code> first, then <code>recon init</code> at the new location.</p>
     </div>
 
-    <!-- CONFIG -->
-    <h2 id="configuration"><span class="no">03</span>Configuration</h2>
-    <p>Per-repo settings live in <code>.recon/config.toml</code> at your project root. The file is local — it ships with your repo if you choose, never with your license. Defaults are conservative; override only what you need.</p>
+    <!-- PROJECT -->
+    <h2 id="cli-project"><span class="no">05</span>CLI · Project</h2>
+    <p>Commands that operate on a single repository. They take an optional <code>--repo &lt;path&gt;</code> (default: the current directory).</p>
+
+    <h3 id="cmd-init"><code>recon init [--mcp &lt;ide&gt;]</code></h3>
+    <p>The setup command. Builds the index, registers the repo with your account, and (with <code>--mcp</code>) writes the IDE's MCP config and agent rules. Idempotent — re-running on the same project refreshes the index without burning a slot.</p>
+<pre>$ recon init --mcp cc
+Registered repo with recon (new/5 on Pro)
+Indexed 1834 files, 87421 symbols (0 errors)
+Wrote /home/me/proj/.mcp.json
+Wrote recon rules block to /home/me/proj/CLAUDE.md
+Added .recon/ to .gitignore
+Done. Restart your IDE to activate recon tools.</pre>
+    <p>If you've hit your tier's <code>max_repos</code>, <code>recon init</code> aborts before indexing and tells you what to do:</p>
+<pre>$ recon init --mcp cc
+Pro plan allows 5 repo(s) — limit reached.
+Your Pro plan allows 5 repos. Free a slot with `recon repos remove &lt;path&gt;` or upgrade your plan.
+Run `recon repos list` to see what's registered, `recon repos remove &lt;path&gt;` to free a slot, or upgrade at https://mcprecon.pages.dev/pricing</pre>
+
+    <h3 id="cmd-purge"><code>recon purge [--mcp &lt;ide&gt;]</code></h3>
+    <p>Reverse <code>recon init</code>. Without flags it removes only the local <code>.recon/</code> directory. With <code>--mcp &lt;ide&gt;</code> it also strips the IDE's MCP entry (preserving sibling servers), removes the agent rules block, and frees the server-side repo slot.</p>
+<pre>$ recon purge --mcp cc
+Purged /home/me/proj/.recon
+Removed recon entry from /home/me/proj/.mcp.json
+Removed recon rules block from /home/me/proj/CLAUDE.md
+Released local repo cache entry
+Released server-side repo slot</pre>
+
+    <h3 id="cmd-doctor"><code>recon doctor [--json]</code></h3>
+    <p>Run a battery of probes covering every surface a stuck install can fail on. Exit code is 1 if anything's broken — wire it into CI to catch regressions.</p>
+<pre>$ recon doctor
+recon doctor — 0.2.0 (x86_64-unknown-linux-gnu)
+repo: /home/me/proj
+
+[OK]    binary                        recon 0.2.0 (x86_64-unknown-linux-gnu)
+[OK]    repo dir                      /home/me/proj writable
+[OK]    global config                 /home/me/.config/recon writable
+[OK]    license                       Pro (expires unix=1798761600)
+[OK]    credentials                   present, mode 0600
+[OK]    worker /v1/health             reachable
+[OK]    worker repo list              3/5 on Pro
+[OK]    index                         1834 files, 87421 symbols
+[OK]    cc mcp                        /home/me/proj/.mcp.json → recon entry present
+[WARN]  oc mcp                        /home/me/proj/opencode.jsonc not present
+[WARN]  cursor mcp                    /home/me/proj/.cursor/mcp.json not present
+[OK]    CLAUDE.md rules               /home/me/proj/CLAUDE.md → recon block present
+[WARN]  AGENTS.md rules               /home/me/proj/AGENTS.md not present
+
+Summary: 9 ok, 3 warn, 0 fail</pre>
+    <p><code>--json</code> emits the same data as a structured envelope — feed it to <code>jq</code> or pipe it into a monitoring script. The probes that aren't your IDE turning into <code>WARN</code> is expected; only <code>FAIL</code> blocks your install.</p>
+
+    <h3 id="cmd-update"><code>recon update [--check] [--force]</code></h3>
+    <p>Self-upgrade to the latest published release. Verifies the SHA-256 manifest and (with cosign present) the sigstore signature before swapping the binary.</p>
+<pre>$ recon update --check
+Latest: v0.2.0  (you're on v0.1.1)
+
+$ recon update
+Downloading recon-x86_64-unknown-linux-gnu.tar.gz...
+Verifying signature... OK
+Replacing /usr/local/bin/recon... OK
+Now on v0.2.0.</pre>
+
+    <h3 id="cmd-version"><code>recon version</code></h3>
+    <p>Print the binary's semver tag. Identical to <code>recon --version</code>; provided for shell scripts that want a stable subcommand.</p>
+
+    <!-- SERVER -->
+    <h2 id="cli-server"><span class="no">06</span>CLI · Server</h2>
+
+    <h3 id="cmd-serve"><code>recon serve [--port &lt;n&gt;] [--log &lt;level&gt;]</code></h3>
+    <p>Start the MCP server. With no flags it speaks JSON-RPC over stdio — the form your IDE auto-spawns. <code>--port</code> switches to Streamable HTTP for browser-based MCP clients or remote use.</p>
+<pre><span class="c"># stdio (your IDE auto-spawns this — you never run it manually)</span>
+recon serve
+
+<span class="c"># Streamable HTTP on localhost:7777, debug logging</span>
+recon serve --port 7777 --log debug</pre>
+    <div class="callout">
+      <div class="tag">Stdio hygiene</div>
+      <p>All logging goes to <b>stderr</b>. A stray <code>println!</code> anywhere in the server breaks the stdio JSON-RPC channel silently. CI guards this with a subprocess test.</p>
+    </div>
+
+    <h3 id="cmd-index"><code>recon index</code></h3>
+    <p>Index a repository without starting the server. Same indexing path <code>recon init</code> uses, but doesn't touch MCP configs or agent rules. Useful if you want to seed the index from a script before the IDE first boots.</p>
+
+    <h3 id="cmd-reindex"><code>recon reindex</code></h3>
+    <p>Force a full re-index, discarding the Merkle snapshot. Use when the index is corrupt, after a major upgrade that bumps the schema, or when symbols seem stale despite the live watcher.</p>
+<pre>$ recon reindex
+Cleared snapshot
+Indexed 1834 files, 87421 symbols (0 errors)</pre>
+
+    <h3 id="cmd-stats"><code>recon stats</code></h3>
+    <p>Print a one-screen index health report: file count, symbol count, last indexed time, schema version, on-disk size.</p>
+
+    <!-- DIRECT QUERY -->
+    <h2 id="cli-query"><span class="no">07</span>CLI · Direct query</h2>
+    <p>Mirrors of the MCP tools, callable from the shell. Useful for debugging, scripting, or pasting recon output into a chat without the agent in the loop. Every command supports <code>--json</code> for structured output.</p>
+
+    <table>
+      <thead>
+        <tr><th>Command</th><th>Mirrors</th><th>Use it for</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>recon find &lt;name&gt; [--kind] [--lang]</code></td><td><code>code_find_symbol</code></td><td>Find a function, struct, class, etc. by name (3-tier exact → BM25 → fuzzy).</td></tr>
+        <tr><td><code>recon search &lt;query&gt; [--mode] [--filter]</code></td><td><code>code_search</code></td><td>Free-text search. <code>--mode</code> = <code>exact</code> (default), <code>regex</code>, <code>hybrid</code>.</td></tr>
+        <tr><td><code>recon outline &lt;path&gt;</code></td><td><code>code_outline</code></td><td>One line per symbol in a file.</td></tr>
+        <tr><td><code>recon skeleton &lt;path&gt; [--depth]</code></td><td><code>code_skeleton</code></td><td>File API at a glance: signatures + docs, bodies elided.</td></tr>
+        <tr><td><code>recon symbol &lt;path&gt; &lt;name&gt;</code></td><td><code>code_read_symbol</code></td><td>Full source of one symbol plus its callers.</td></tr>
+        <tr><td><code>recon refs &lt;symbol&gt;</code></td><td><code>code_find_refs</code></td><td>All call sites of a symbol.</td></tr>
+        <tr><td><code>recon ls [--glob] [--lang] [--filter]</code></td><td><code>code_list</code></td><td>Indexed files with their top symbols.</td></tr>
+        <tr><td><code>recon map [--budget] [--focus]</code></td><td><code>code_repo_map</code></td><td>PageRank-ranked repo overview under a token budget.</td></tr>
+        <tr><td><code>recon strings &lt;pattern&gt; [--kind] [--filter]</code></td><td><code>code_find_strings</code></td><td>Search inside string literals and comments only.</td></tr>
+        <tr><td><code>recon multi &lt;p1&gt; &lt;p2&gt; …</code></td><td><code>code_multi_find</code></td><td>Fan-out search for many patterns in one pass.</td></tr>
+        <tr><td><code>recon query &lt;tool&gt; &lt;json-args&gt;</code></td><td>any tool</td><td>Raw tool call. Useful for testing custom shapes.</td></tr>
+      </tbody>
+    </table>
+
+<pre>$ recon find Server --kind struct --lang rust --json | jq '.[] | .qualified_name'
+"recon_server::server::ReconServer"
+"recon_server::router::RepoRouter"
+
+$ recon search "TODO" --filter "*.rs status:modified" | head
+crates/recon-cli/src/main.rs:1428:    // TODO: streaming HTTP transport progress
+crates/recon-search/src/text.rs:97:   // TODO: pluggable scorer
+
+$ recon map --budget 800 --focus crates/recon-server/src/server.rs
+[ranked overview, ~800 tokens, focused on server.rs callees and callers]</pre>
+
+    <!-- MCP TOOLS -->
+    <h2 id="tools"><span class="no">08</span>MCP tools</h2>
+    <p>The 12 tools your AI agent calls when recon is wired up. Each is documented in the agent's tool listing — these are summarised here so you can audit what the agent has access to.</p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>Replaces</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>code_outline</code></td><td>Read</td><td>One line per symbol in a file.</td></tr>
+        <tr><td><code>code_skeleton</code></td><td>Read</td><td>Signatures + docs; bodies as <code>…</code>.</td></tr>
+        <tr><td><code>code_read_symbol</code></td><td>Read</td><td>Single symbol + its callers.</td></tr>
+        <tr><td><code>code_find_symbol</code></td><td>Grep</td><td>Three-tier exact → BM25 → fuzzy.</td></tr>
+        <tr><td><code>code_find_refs</code></td><td>Grep</td><td>Ref count + top-k call sites.</td></tr>
+        <tr><td><code>code_search</code></td><td>Grep</td><td>Exact, regex, hybrid.</td></tr>
+        <tr><td><code>code_list</code></td><td>Glob</td><td>Files with their top symbols.</td></tr>
+        <tr><td><code>code_repo_map</code></td><td>—</td><td>PageRank overview under a budget.</td></tr>
+        <tr><td><code>code_find_strings</code></td><td>—</td><td>Literals and comments only.</td></tr>
+        <tr><td><code>code_multi_find</code></td><td>—</td><td>Multi-pattern fan-out.</td></tr>
+        <tr><td><code>code_reindex</code></td><td>—</td><td>Agent-triggered reindex.</td></tr>
+        <tr><td><code>code_stats</code></td><td>—</td><td>Index health report.</td></tr>
+      </tbody>
+    </table>
+
+    <!-- FILTER DSL -->
+    <h2 id="filter-dsl"><span class="no">09</span>Filter DSL</h2>
+    <p>Search-shaped tools (<code>code_search</code>, <code>code_find_strings</code>, <code>code_list</code>) and their CLI mirrors accept an optional <code>--filter</code> / <code>filter:</code> argument. The DSL is small on purpose — these are the supported terms:</p>
+
+    <table>
+      <thead><tr><th>Term</th><th>Matches</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td><code>*.rs</code> / <code>*.{ts,tsx}</code></td><td>file extension glob</td><td><code>code_search "retry" filter:"*.rs"</code></td></tr>
+        <tr><td><code>type:rust</code></td><td>language by name</td><td><code>type:python</code></td></tr>
+        <tr><td><code>status:modified</code></td><td>git status flag</td><td><code>status:modified</code> or <code>status:staged</code></td></tr>
+        <tr><td><code>!test</code></td><td>negative path-substring</td><td><code>!test</code> — excludes paths containing "test"</td></tr>
+        <tr><td><code>/src/</code></td><td>positive path-segment</td><td><code>/crates/recon-server/</code></td></tr>
+      </tbody>
+    </table>
+
+    <p>Terms compose with whitespace (logical AND):</p>
+<pre>recon search "TODO" --filter "<span class="h">*.rs status:modified !test</span>"
+<span class="c"># → TODOs in modified Rust files outside test/ paths</span></pre>
+
+    <!-- CONFIGURATION -->
+    <h2 id="configuration"><span class="no">10</span>Configuration</h2>
+    <p>Per-repo settings live in <code>.recon/config.toml</code> at your project root. The file is local — commit it if you want shared defaults, never your license. Every setting has a conservative default; override only what you need.</p>
 
 <pre><span class="c"># .recon/config.toml</span>
 
@@ -322,167 +547,127 @@ default_map_budget = <span class="h">2000</span>
 redact_secrets = <span class="h">true</span>
 allow_sensitive = <span class="h">false</span></pre>
 
-    <!-- SHAPES -->
-    <h2 id="shapes"><span class="no">04</span>Output shapes</h2>
-    <p>Every tool response is exactly one of five shapes. This keeps the agent's parser simple and the token budget honest.</p>
-
+    <h3>Environment variables</h3>
     <table>
-      <thead><tr><th>Shape</th><th>Returned by</th><th>Shape of the thing</th></tr></thead>
+      <thead><tr><th>Variable</th><th>What it controls</th></tr></thead>
       <tbody>
-        <tr><td><code>Outline</code></td><td><code>code_outline</code>, <code>code_list</code></td><td>Flat rows — kind, name, line.</td></tr>
-        <tr><td><code>Skeleton</code></td><td><code>code_skeleton</code></td><td>Signatures and doc comments; bodies collapse to <code>…</code>.</td></tr>
-        <tr><td><code>Symbol</code></td><td><code>code_read_symbol</code></td><td>One symbol's full source plus its callers.</td></tr>
-        <tr><td><code>Matches</code></td><td><code>code_search</code>, <code>code_find_*</code></td><td>Ranked hits with path, line, and a trimmed snippet.</td></tr>
-        <tr><td><code>Map</code></td><td><code>code_repo_map</code></td><td>PageRank-ordered symbol overview under a token budget.</td></tr>
+        <tr><td><code>RECON_API_URL</code></td><td>Worker base URL (defaults to the production endpoint).</td></tr>
+        <tr><td><code>RECON_CONFIG_DIR</code></td><td>Override the global config dir (defaults to <code>~/.config/recon/</code>).</td></tr>
+        <tr><td><code>RECON_REQUEST_TIMEOUT_SECS</code></td><td>Per-request deadline for tool calls (default 30, range 1–600).</td></tr>
+        <tr><td><code>RECON_WINDSURF_CONFIG_PATH</code></td><td>Override Windsurf's global MCP config path (test-only).</td></tr>
       </tbody>
     </table>
 
-    <!-- TIERS -->
-    <h2 id="tiers"><span class="no">05</span>Search tiers</h2>
-    <p><code>code_find_symbol</code> and <code>code_search</code> fan out across five backends, picking the cheapest tier that can answer the question.</p>
+    <!-- ACCOUNT & REPOS -->
+    <h2 id="account"><span class="no">11</span>Account &amp; repos</h2>
+    <p>Every recon account has a tier-defined <code>max_repos</code> — the number of distinct repositories one license can index concurrently. As of <b>v0.2.0</b> the limit is enforced by the worker: each <code>recon init</code> registers the repo's canonical-path SHA-256 fingerprint, and a <code>403</code> there blocks indexing rather than a local file the agent could overwrite.</p>
 
-    <div class="tiers">
-      <div class="t">
-        <div class="k">T0 · Symbol exact</div>
-        <h4>SQLite btree</h4>
-        <p>Direct index hit on the symbol name. Used for known identifiers.</p>
-        <span class="lat">&lt; 1 ms</span>
-      </div>
-      <div class="t">
-        <div class="k">T1 · Symbol fuzzy</div>
-        <h4>FTS5 + nucleo</h4>
-        <p>Trigram prefilter, nucleo rescore. Survives typos and partial names.</p>
-        <span class="lat">2 – 8 ms</span>
-      </div>
-      <div class="t">
-        <div class="k">T2 · Structured BM25</div>
-        <h4>Tantivy · CodeTokenizer</h4>
-        <p>Splits camelCase and snake_case so <code>renderMap</code> matches <code>render_map</code>.</p>
-        <span class="lat">5 – 15 ms</span>
-      </div>
-      <div class="t">
-        <div class="k">T3 · Raw text / regex</div>
-        <h4>fff-grep</h4>
-        <p>SIMD + memmap2 fallback when the query escapes the symbol table.</p>
-        <span class="lat">3 – 20 ms</span>
-      </div>
-      <div class="t">
-        <div class="k">T4 · Semantic</div>
-        <h4>fastembed + LanceDB</h4>
-        <p>Local ONNX embeddings. Feature-gated behind <code>--features embed</code>.</p>
-        <span class="lat">50 – 150 ms</span>
-      </div>
-      <div class="t">
-        <div class="k">Hybrid</div>
-        <h4>Reciprocal rank fusion</h4>
-        <p>Tantivy and text backends interleaved via RRF for mixed-intent queries.</p>
-        <span class="lat">varies</span>
-      </div>
-    </div>
-
-    <!-- INCREMENTAL -->
-    <h2 id="incremental"><span class="no">06</span>Incremental indexing</h2>
-    <p>recon is aggressive about never reparsing a file it doesn't need to. Four layers:</p>
+    <h3>How registration works</h3>
     <ul class="bul">
-      <li><b>ColdStart.</b> <code>gix</code> reads the HEAD SHA. If it matches the last indexed commit, the whole pass is skipped.</li>
-      <li><b>Merkle diff.</b> A <code>blake3</code> hash tree of file contents is snapshotted per index. On HEAD change, only the diff is reparsed.</li>
-      <li><b>Full index.</b> First run or missing snapshot falls back to a rayon-parallel parse with chunked bulk SQLite inserts (500 files/tx). Zed (80K symbols): 19s. Rust compiler (320K symbols): 53s.</li>
-      <li><b>Live watcher.</b> <code>notify-debouncer-full</code> flushes per-file reindex after a 250 ms quiet window. On overflow, falls back to <code>gix status</code>.</li>
+      <li>On <code>recon init</code> the CLI canonicalises the repo path, SHA-256s the result to a 64-char hex fingerprint, and POSTs it to <code>/v1/account/repos</code>.</li>
+      <li>The worker accepts atomically — even at limit-1, two concurrent <code>init</code>s with different fingerprints can't both succeed.</li>
+      <li>Repeat POSTs (same fingerprint) refresh <code>last_seen_at</code> and return <code>200 status: refreshed</code> rather than burning a slot.</li>
+      <li>The worker only sees the digest. Your filesystem layout never leaves the machine.</li>
     </ul>
 
-    <!-- FILTER DSL -->
-    <h2 id="filter-dsl"><span class="no">07</span>Filter DSL</h2>
-    <p>All search tools accept an optional <code>filter</code> argument. The grammar is the same one used across the fff- family:</p>
+    <h3>Managing slots</h3>
+<pre>$ recon repos list
+3 repo(s) registered (3/5 on Pro)
+  a3f1c8b2e6d4710f  first_seen=2026-04-22T10:14:33Z  last_seen=2026-04-25T07:11:09Z
+  ...
+
+$ recon repos remove /home/me/old-project
+Removed a3f1c8b2e6d4710f from your account</pre>
+
+    <h3>Pricing &amp; limits</h3>
+    <p>Tier limits are summarised on the <a href="pricing/">pricing page</a>. <code>recon license</code> shows what your current key entitles you to.</p>
+
+    <!-- TROUBLESHOOTING -->
+    <h2 id="troubleshooting"><span class="no">12</span>Troubleshooting</h2>
+    <p>Start with <code>recon doctor</code>. It runs a battery of probes across every surface a stuck install can fail on and returns exit-code 1 when anything's broken. Match the failing probe to the row below:</p>
 
     <table>
-      <thead><tr><th>Example</th><th>Effect</th></tr></thead>
+      <thead>
+        <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+      </thead>
       <tbody>
-        <tr><td><code>*.rs</code></td><td>Extension filter.</td></tr>
-        <tr><td><code>type:rust</code></td><td>Language match (independent of extension).</td></tr>
-        <tr><td><code>status:modified</code></td><td>Only git-modified files.</td></tr>
-        <tr><td><code>!test</code></td><td>Exclude paths containing <code>test</code>.</td></tr>
-        <tr><td><code>/src/</code></td><td>Path-segment match.</td></tr>
-        <tr><td><code>*.rs status:modified !test</code></td><td>Composes with implicit <code>AND</code>.</td></tr>
+        <tr>
+          <td><code>API key rejected: server response signature invalid</code></td>
+          <td>Worker's <code>LICENSE_HMAC_SECRET</code> doesn't match the binary's embedded <code>RECON_LICENSE_HMAC_KEY</code>. Hit during the v0.1.0 release, fixed in v0.1.1.</td>
+          <td>Upgrade: <code>recon update</code></td>
+        </tr>
+        <tr>
+          <td><code>credentials not found at … — run `recon login`</code></td>
+          <td>v0.2.0 needs the raw API key (not just the cached signed license) so it can call <code>/v1/account/repos</code>.</td>
+          <td><code>recon login &lt;sk-recon-...&gt;</code> once per machine.</td>
+        </tr>
+        <tr>
+          <td><code>Pro plan allows 5 repo(s) — limit reached</code></td>
+          <td>You're at <code>max_repos</code>. The current repo isn't registered; the worker won't add it.</td>
+          <td><code>recon repos list</code> → <code>recon repos remove &lt;path&gt;</code>, then re-run <code>recon init</code>. Or upgrade your plan.</td>
+        </tr>
+        <tr>
+          <td><code>No valid license. Run 'recon login &lt;key&gt;'</code></td>
+          <td>License cache missing or older than the 24 h TTL with no network.</td>
+          <td>Re-validate: <code>recon login &lt;key&gt;</code>. Behind a firewall? Whitelist the worker host.</td>
+        </tr>
+        <tr>
+          <td><code>could not reach recon worker</code></td>
+          <td>DNS / TCP / TLS to the worker failing. The license cache covers you for 24 h; after that, <code>recon serve</code> hard-fails.</td>
+          <td><code>recon doctor</code> → look at <code>worker /v1/health</code>. Check corporate proxy / firewall.</td>
+        </tr>
+        <tr>
+          <td><code>schema unreadable — try `recon reindex`</code></td>
+          <td>Index DB schema mismatch (rare; usually means an upgrade interrupted mid-migration).</td>
+          <td><code>recon purge</code> then <code>recon init</code>. Index rebuild on a 500K-LOC repo takes ≈ 60 seconds.</td>
+        </tr>
+        <tr>
+          <td>MCP tools not appearing in your IDE</td>
+          <td>IDE caches the server list at startup.</td>
+          <td>Restart the IDE. <code>recon doctor</code> verifies the MCP wiring file points at the current binary.</td>
+        </tr>
+        <tr>
+          <td>Agent still uses Read/Grep/Glob despite the rules file</td>
+          <td>Some agents need the rules block to be loaded explicitly.</td>
+          <td>Confirm <code>recon doctor</code> shows <code>recon block present</code> on the agent's rules file. Restart the agent session so it re-reads the rules.</td>
+        </tr>
+        <tr>
+          <td><code>tantivy lock</code> errors during indexing</td>
+          <td>Two <code>recon</code> processes wrote to the same <code>.recon/tantivy</code> directory.</td>
+          <td>Kill stray processes, then <code>rm .recon/tantivy/.tantivy-meta.lock</code> and re-index. Single-writer is enforced; you should never see this in steady state.</td>
+        </tr>
       </tbody>
     </table>
-
-    <!-- TOOLS REFERENCE -->
-    <h2 id="tools"><span class="no">08</span>The 12 tools</h2>
-    <p>Every tool description is under 2 KB (Claude Code truncates above this) and maps to exactly one <a href="#shapes">output shape</a>.</p>
-
-    <table>
-      <thead><tr><th>Tool</th><th>Replaces</th><th>Shape</th><th>What it does</th></tr></thead>
-      <tbody>
-        <tr><td><code>code_outline</code></td><td>Read</td><td>Outline</td><td>One line per symbol in a file.</td></tr>
-        <tr><td><code>code_skeleton</code></td><td>Read</td><td>Skeleton</td><td>Signatures + docs; bodies as <code>…</code>.</td></tr>
-        <tr><td><code>code_read_symbol</code></td><td>Read</td><td>Symbol</td><td>Single symbol + its callers.</td></tr>
-        <tr><td><code>code_find_symbol</code></td><td>Grep</td><td>Matches</td><td>Three-tier exact → BM25 → fuzzy.</td></tr>
-        <tr><td><code>code_find_refs</code></td><td>Grep</td><td>Matches</td><td>Ref count + top-k call sites.</td></tr>
-        <tr><td><code>code_search</code></td><td>Grep</td><td>Matches</td><td>Exact, regex, hybrid, semantic.</td></tr>
-        <tr><td><code>code_list</code></td><td>Glob</td><td>Outline</td><td>Files with their top symbols.</td></tr>
-        <tr><td><code>code_repo_map</code></td><td>—</td><td>Map</td><td>PageRank overview under a budget.</td></tr>
-        <tr><td><code>code_find_strings</code></td><td>—</td><td>Matches</td><td>Literals and comments only.</td></tr>
-        <tr><td><code>code_multi_find</code></td><td>—</td><td>Matches</td><td>Fan-out multi-pattern search.</td></tr>
-        <tr><td><code>code_reindex</code></td><td>—</td><td>—</td><td>Agent-triggered reindex.</td></tr>
-        <tr><td><code>code_stats</code></td><td>—</td><td>—</td><td>Index health report.</td></tr>
-      </tbody>
-    </table>
-
-    <h3>Example: code_read_symbol</h3>
-<pre><span class="c">// request</span>
-{
-  <span class="h">"tool"</span>: "code_read_symbol",
-  <span class="h">"path"</span>: "crates/recon-search/src/map.rs",
-  <span class="h">"symbol"</span>: "render_map"
-}
-
-<span class="c">// response · Symbol shape</span>
-{
-  <span class="h">"kind"</span>: "fn",
-  <span class="h">"name"</span>: "render_map",
-  <span class="h">"signature"</span>: "pub fn render_map(budget: usize) -> Map",
-  <span class="h">"doc"</span>: "Render a tiktoken-budgeted repo overview.",
-  <span class="h">"body"</span>: "…",
-  <span class="h">"callers"</span>: [
-    { "path": "crates/recon-server/src/tools/repo_map.rs", "line": 84 },
-    { "path": "crates/recon-cli/src/commands/map.rs",      "line": 37 }
-  ]
-}</pre>
 
     <!-- SECURITY -->
-    <h2 id="security"><span class="no">09</span>Security</h2>
+    <h2 id="security"><span class="no">13</span>Security</h2>
     <ul class="bul">
-      <li><b>No cloud embeddings by default.</b> The <code>embed</code> feature is opt-in and runs ONNX locally.</li>
-      <li><b>Secret redaction</b> runs on every response: 13 regex patterns, PEM blocks, and blocked paths.</li>
-      <li><b>Path traversal guard.</b> Every tool call canonicalizes and prefix-checks against the repo root.</li>
-      <li><b>Sensitive file gate.</b> <code>.env</code>, <code>.pem</code>, <code>.key</code> are skipped unless <code>allow_sensitive = true</code>.</li>
+      <li><b>Code stays local.</b> Source files are indexed on your machine; recon never uploads them. The only network call it makes is the license check (key in, tier out).</li>
+      <li><b>Credentials chmod 0600.</b> The raw API key is stored at <code>~/.config/recon/credentials.json</code> with mode 0600 on Unix. <code>recon doctor</code> verifies the mode.</li>
+      <li><b>Secret redaction.</b> Every tool response that includes file bytes is scanned for AWS keys, OpenAI keys, PEM blocks, and 10+ other patterns before being returned. Override only with explicit <code>allow_sensitive = true</code>.</li>
+      <li><b>Path traversal guard.</b> Every tool call canonicalizes its path argument and prefix-checks against the repo root.</li>
+      <li><b>Sensitive file gate.</b> <code>.env*</code>, <code>*.pem</code>, <code>*.key</code>, <code>id_rsa*</code> are skipped by default.</li>
       <li><b>Stdout hygiene.</b> All logging goes to stderr; a CI test spawns the server and rejects any stray <code>println!</code>.</li>
+      <li><b>Signed binaries.</b> Every release ships a SHA-256 manifest signed via cosign keyless against our GitHub Actions release workflow.</li>
     </ul>
 
     <!-- PERFORMANCE -->
-    <h2 id="performance"><span class="no">10</span>Performance</h2>
-    <p>Benchmarked on real codebases. Release build, warm cache, mimalloc, fat LTO.</p>
+    <h2 id="performance"><span class="no">14</span>Performance</h2>
+    <p>Benchmarked on real codebases. Release build, warm cache, mimalloc, fat LTO. Numbers from the <code>bench-real</code> harness in the repo.</p>
 
-    <h3>Query latency</h3>
+    <h3>Query latency (p50)</h3>
     <table>
-      <thead><tr><th>Tool</th><th>Zed (80K sym)</th><th>Rust compiler (320K sym)</th></tr></thead>
+      <thead><tr><th>Tool</th><th>Zed (80K symbols)</th><th>Rust compiler (320K symbols)</th></tr></thead>
       <tbody>
-        <tr><td>stats</td><td>10 ms</td><td>29 ms</td></tr>
-        <tr><td>find</td><td>8 ms</td><td>8 ms</td></tr>
-        <tr><td>search</td><td>11 ms</td><td>33 ms</td></tr>
-        <tr><td>outline</td><td>14 ms</td><td>13 ms</td></tr>
-        <tr><td>skeleton</td><td>11 ms</td><td>11 ms</td></tr>
-        <tr><td>refs</td><td>8 ms</td><td>12 ms</td></tr>
-        <tr><td>map (cached)</td><td>8 ms</td><td>19 ms</td></tr>
-      </tbody>
-    </table>
-
-    <h3>Indexing</h3>
-    <table>
-      <thead><tr><th>Repo</th><th>Files</th><th>Symbols</th><th>Cold index</th><th>Index size</th></tr></thead>
-      <tbody>
-        <tr><td>Zed (1.3M LOC)</td><td>1,780</td><td>80,427</td><td>19 s</td><td>96 MB</td></tr>
-        <tr><td>Rust compiler (3.8M LOC)</td><td>36,030</td><td>320,161</td><td>53 s</td><td>291 MB</td></tr>
+        <tr><td><code>code_stats</code></td><td>10 ms</td><td>29 ms</td></tr>
+        <tr><td><code>code_find_symbol</code></td><td>8 ms</td><td>8 ms</td></tr>
+        <tr><td><code>code_search</code></td><td>11 ms</td><td>33 ms</td></tr>
+        <tr><td><code>code_outline</code></td><td>14 ms</td><td>13 ms</td></tr>
+        <tr><td><code>code_skeleton</code></td><td>11 ms</td><td>11 ms</td></tr>
+        <tr><td><code>code_find_refs</code></td><td>8 ms</td><td>12 ms</td></tr>
+        <tr><td><code>code_repo_map</code> (cached)</td><td>8 ms</td><td>19 ms</td></tr>
+        <tr><td><code>code_repo_map</code> (cold)</td><td>405 ms</td><td>2.0 s</td></tr>
+        <tr><td>cold index</td><td>19 s</td><td>53 s</td></tr>
       </tbody>
     </table>
 
@@ -490,263 +675,39 @@ allow_sensitive = <span class="h">false</span></pre>
     <table>
       <thead><tr><th>Scenario</th><th>Read/Grep/Glob</th><th>recon</th><th>Reduction</th></tr></thead>
       <tbody>
-        <tr><td>Read one function</td><td>~23,838 tok</td><td>~111 tok</td><td>215×</td></tr>
-        <tr><td>Find a symbol</td><td>~17,500 tok</td><td>~226 tok</td><td>77×</td></tr>
-        <tr><td>Repo orientation</td><td>~52,500 tok</td><td>~2,170 tok</td><td>24×</td></tr>
-        <tr><td>Find references</td><td>~15,000 tok</td><td>~638 tok</td><td>24×</td></tr>
-        <tr><td>Typical bug-fix task</td><td>~109,000 tok</td><td>~3,100 tok</td><td>35×</td></tr>
+        <tr><td>Read one function</td><td>~23,838 tok</td><td>~111 tok</td><td><b>215×</b></td></tr>
+        <tr><td>Find a symbol</td><td>~17,500 tok</td><td>~226 tok</td><td><b>77×</b></td></tr>
+        <tr><td>Repo orientation</td><td>~52,500 tok</td><td>~2,170 tok</td><td><b>24×</b></td></tr>
+        <tr><td>Find references</td><td>~15,000 tok</td><td>~638 tok</td><td><b>24×</b></td></tr>
+        <tr><td>Outline a file</td><td>~23,838 tok</td><td>~1,350 tok</td><td><b>18×</b></td></tr>
       </tbody>
     </table>
+    <p>A typical "find and fix a bug" task: <b>~3.2K tokens</b> with recon vs <b>~100K+</b> with Read/Grep/Glob.</p>
 
-    <h3>Real-world billed cost</h3>
-    <p>
-      Per-operation reductions are real for <b>fresh input tokens</b>, but
-      Anthropic's prompt caching absorbs most of the obvious savings on warm
-      sessions. The honest end-to-end number is smaller than the headline.
-      From an independent third-party benchmark
-      (<a href="https://yoanbernabeu.github.io/grepai/blog/benchmark-grepai-vs-grep-claude-code" target="_blank" rel="noopener" style="color:var(--clay);text-decoration:underline">grepai vs Claude Code</a>,
-      155K-LOC TypeScript codebase, 5 questions × 5 runs):
-    </p>
-    <table>
-      <thead><tr><th>Axis</th><th>Without recon</th><th>With recon</th><th>Reduction</th></tr></thead>
-      <tbody>
-        <tr><td>Fresh input tokens</td><td>51,147</td><td>1,326</td><td><b>−97%</b></td></tr>
-        <tr><td>Tool calls</td><td>139</td><td>62</td><td>−55%</td></tr>
-        <tr><td>Subagents launched</td><td>5</td><td>0</td><td>−100%</td></tr>
-        <tr><td>Cache-creation tokens</td><td>563,883</td><td>162,289</td><td>−71%</td></tr>
-        <tr><td><b>Total billed cost</b></td><td>$6.78</td><td>$4.92</td><td><b>−27%</b></td></tr>
-      </tbody>
-    </table>
-    <div class="callout">
-      <div class="tag">Where it shines</div>
-      <p>Cold sessions, large repos (&gt;50K LOC), tasks the agent would otherwise solve by spawning subagents. These are where the <b>−97% fresh-input</b> number dominates.</p>
-    </div>
-    <div class="callout">
-      <div class="tag">Where it shrinks</div>
-      <p>Warm sessions where prompt caching already covers most reads, and small codebases (&lt;5K LOC) the agent would pull wholesale anyway. Expect closer to the <b>−27% billed cost</b> floor here.</p>
-    </div>
-
-    <h3>System</h3>
-    <table>
-      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
-      <tbody>
-        <tr><td>Binary size (release, stripped)</td><td>24 MB</td></tr>
-        <tr><td>Languages</td><td>9 (Rust, Python, TS, TSX, JS, Go, Java, C, C++)</td></tr>
-        <tr><td>Tests</td><td>107 across 19 suites</td></tr>
-        <tr><td>Allocator</td><td>mimalloc</td></tr>
-        <tr><td>Mutex</td><td>parking_lot (not tokio::sync)</td></tr>
-        <tr><td>Hash maps</td><td>ahash::AHashMap in hot paths</td></tr>
-      </tbody>
-    </table>
-
-    <!-- ACCOUNT & REPOS -->
-    <h2 id="account"><span class="no">11</span>Account &amp; repos</h2>
-    <p>
-      Every recon account has a tier-defined <code>max_repos</code> — the
-      number of distinct repositories one license can index concurrently.
-      As of <b>v0.2.0</b> the limit is enforced server-side: each
-      <code>recon init</code> registers the repo's canonical-path SHA-256
-      fingerprint with the worker, and a <code>403</code> there blocks
-      indexing rather than a local file the agent could overwrite.
-    </p>
-
-    <h3>How registration works</h3>
-    <ul class="bul">
-      <li>On <code>recon init</code> the CLI canonicalises the repo path,
-        SHA-256s the result to a 64-char hex fingerprint, and POSTs it to
-        <code>/v1/account/repos</code>.</li>
-      <li>The worker accepts atomically — even at limit-1, two concurrent
-        <code>init</code>s with different fingerprints can't both succeed.</li>
-      <li>Repeat POSTs (same fingerprint) refresh <code>last_seen_at</code>
-        and return <code>200 status: refreshed</code> rather than burning
-        a slot.</li>
-      <li>The worker only sees the digest. Your filesystem layout never
-        leaves the machine.</li>
-    </ul>
-
-    <h3>Managing slots</h3>
-    <pre><code>$ recon repos list
-3 repo(s) registered (3/5 on Pro)
-  a3f1c8b2e6d4710f  first_seen=2026-04-22T10:14:33Z  last_seen=2026-04-25T07:11:09Z
-  ...
-
-$ recon repos remove /home/me/old-project
-Removed a3f1c8b2e6d4710f from your account
-
-$ recon repos remove a3f1c8b2e6d4710f9c2e6d4710fc8b2e6d4710fc8b2e6d4710fc8b2e6d4710f
-# also accepts a 64-char fingerprint pasted from `recon repos list`</code></pre>
-    <p>
-      <b>Moving a repo directory burns a slot.</b> The fingerprint is
-      path-based, so renaming or relocating a project produces a new
-      fingerprint. Run <code>recon repos remove &lt;old-path&gt;</code>
-      first, then <code>recon init</code> at the new location. Git-remote
-      dedup is on the post-v0.4 roadmap.
-    </p>
-
-    <h3><code>recon purge --mcp &lt;ide&gt;</code> frees the slot</h3>
-    <p>
-      <code>recon purge</code> is the inverse of <code>recon init</code>.
-      With <code>--mcp &lt;ide&gt;</code> it removes the IDE's MCP entry,
-      strips the agent rules, deletes the local index, <em>and</em> calls
-      <code>DELETE /v1/account/repos/:fingerprint</code> to release the
-      server slot. Network failures during the DELETE are best-effort;
-      re-run later or use <code>recon repos remove</code>.
-    </p>
-
-    <!-- TROUBLESHOOTING -->
-    <h2 id="troubleshooting"><span class="no">12</span>Troubleshooting</h2>
-    <p>
-      Start with <code>recon doctor</code>. It runs a battery of probes
-      across every surface a stuck install can fail on and returns
-      exit-code 1 when anything's broken.
-    </p>
-    <pre><code>$ recon doctor
-recon doctor — 0.2.0 (x86_64-unknown-linux-gnu)
-repo: /home/me/proj
-
-[OK]    binary                        recon 0.2.0 (x86_64-unknown-linux-gnu)
-[OK]    repo dir                      /home/me/proj writable
-[OK]    global config                 /home/me/.config/recon writable
-[OK]    license                       Pro (expires unix=1798761600)
-[OK]    credentials                   present, mode 0600
-[OK]    worker /v1/health             reachable
-[OK]    worker repo list              3/5 on Pro
-[OK]    index                         1834 files, 87421 symbols
-[OK]    cc mcp                        /home/me/proj/.mcp.json → recon entry present
-[WARN]  oc mcp                        /home/me/proj/opencode.jsonc not present
-[WARN]  cursor mcp                    /home/me/proj/.cursor/mcp.json not present
-[OK]    CLAUDE.md rules               /home/me/proj/CLAUDE.md → recon block present
-[WARN]  AGENTS.md rules               /home/me/proj/AGENTS.md not present
-
-Summary: 9 ok, 3 warn, 0 fail</code></pre>
-
-    <p>
-      <code>--json</code> emits the same data as a structured envelope
-      so monitoring scripts and CI can consume it directly.
-    </p>
-
-    <h3>Common failure modes</h3>
-    <table class="tools" style="margin-top:.6rem">
-      <thead>
-        <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><code>API key rejected: server response signature invalid</code></td>
-          <td>Worker's <code>LICENSE_HMAC_SECRET</code> doesn't match the binary's
-            embedded <code>RECON_LICENSE_HMAC_KEY</code>. Hit during the v0.1.0
-            release, fixed in v0.1.1.</td>
-          <td>Upgrade to ≥v0.1.1: <code>recon update</code></td>
-        </tr>
-        <tr>
-          <td><code>credentials not found at … — run `recon login`</code></td>
-          <td>v0.2.0 needs the raw API key (not just the cached signed license)
-            so it can call <code>/v1/account/repos</code>.</td>
-          <td><code>recon login &lt;sk-recon-...&gt;</code> once per machine.</td>
-        </tr>
-        <tr>
-          <td><code>Pro plan allows 5 repo(s) — limit reached</code></td>
-          <td>You're at <code>max_repos</code>. The current repo's not yet
-            registered; the worker won't add it.</td>
-          <td><code>recon repos list</code> → <code>recon repos remove
-            &lt;path-or-fingerprint&gt;</code>, then re-run <code>recon init</code>.
-            Or upgrade your plan.</td>
-        </tr>
-        <tr>
-          <td><code>No valid license. Run 'recon login &lt;key&gt;'</code></td>
-          <td>License cache missing or older than the 24 h TTL with no network.</td>
-          <td>Re-validate: <code>recon login &lt;key&gt;</code>. Behind a firewall?
-            Whitelist <code>recon-api.kumarashutosh34169.workers.dev</code>.</td>
-        </tr>
-        <tr>
-          <td><code>could not reach recon worker</code></td>
-          <td>DNS / TCP / TLS to the worker failing. The license cache covers
-            you for 24 h; after that, <code>recon serve</code> hard-fails.</td>
-          <td><code>recon doctor</code> → look at <code>worker /v1/health</code>.
-            Check corporate proxy / firewall.</td>
-        </tr>
-        <tr>
-          <td><code>schema unreadable — try `recon reindex`</code></td>
-          <td>Index DB schema mismatch (rare; usually means an upgrade
-            interrupted mid-migration).</td>
-          <td><code>recon purge</code> then <code>recon init</code>. Index
-            rebuild on a 500K-LOC repo takes about 60 seconds.</td>
-        </tr>
-        <tr>
-          <td>MCP tools not appearing in Claude Code / Cursor / Windsurf</td>
-          <td>IDE caches the server list at startup.</td>
-          <td>Restart the IDE. <code>recon doctor</code> verifies the MCP
-            wiring file points at the current binary.</td>
-        </tr>
-        <tr>
-          <td>Agent still uses Read/Grep/Glob despite the rules file</td>
-          <td>Some agents need the rules block to be loaded explicitly.</td>
-          <td>Confirm <code>recon doctor</code> shows <code>recon block
-            present</code> on the agent's rules file. Restart the agent
-            session so it re-reads the rules.</td>
-        </tr>
-        <tr>
-          <td><code>tantivy lock</code> errors during indexing</td>
-          <td>Two <code>recon</code> processes wrote to the same
-            <code>.recon/tantivy</code> directory.</td>
-          <td>Kill stray processes, then <code>rm .recon/tantivy/.tantivy-meta.lock</code>
-            and re-index. Single-writer is enforced; you should never
-            see this in steady state.</td>
-        </tr>
-      </tbody>
-    </table>
-
-    <!-- ADRS -->
-    <h2 id="adrs"><span class="no">13</span>ADRs</h2>
-    <ul class="bul">
-      <li><b>000</b> — Symbol-first architecture.</li>
-      <li><b>001</b> — Text-search backend (fff-grep vs. ripgrep, why fff).</li>
-      <li><b>002</b> — Output-shape discipline (the five canonical shapes).</li>
-      <li><b>003</b> — Stdio transport hygiene (stderr-only logging, CI guard).</li>
-    </ul>
-
-    <h2 id="changelog"><span class="no">14</span>Changelog</h2>
+    <!-- CHANGELOG -->
+    <h2 id="changelog"><span class="no">15</span>Changelog</h2>
     <p><b>v0.2.0</b> — Server-side repo enforcement.</p>
     <ul class="bul">
-      <li>Server-side <code>max_repos</code>: <code>recon init</code> now
-        registers each repo's canonical-path SHA-256 fingerprint with the
-        worker via atomic <code>POST /v1/account/repos</code>. Replaces
-        the prior local-file enforcement that a patched binary trivially
-        bypassed.</li>
+      <li>Server-side <code>max_repos</code>: <code>recon init</code> now registers each repo's canonical-path SHA-256 fingerprint with the worker via atomic <code>POST /v1/account/repos</code>.</li>
       <li><code>recon repos list / remove</code> for managing slots.</li>
-      <li><code>recon doctor [--json]</code> — health check across binary,
-        license, credentials, worker reachability, index, MCP wiring, and
-        agent rules. Exit 1 on any FAIL.</li>
-      <li><code>recon purge --mcp &lt;ide&gt;</code> now also frees the
-        server-side slot.</li>
+      <li><code>recon doctor [--json]</code> — health check across binary, license, credentials, worker reachability, index, MCP wiring, and agent rules.</li>
+      <li><code>recon purge --mcp &lt;ide&gt;</code> now also frees the server-side slot.</li>
     </ul>
-    <p><b>v0.1.0</b> — Initial release.</p>
-    <ul class="bul">
-      <li>Local-first MCP server, 24 MB Rust binary, signed with SHA256 + cosign keyless sigstore</li>
-      <li>GitHub OAuth sign-in, license issued via <code>recon login</code>, cached per machine</li>
-      <li>stdio MCP transport — the IDE spawns <code>recon serve</code>, no inbound ports</li>
-      <li>12 tools, 9 languages, 5 canonical output shapes</li>
-      <li>3-tier symbol search: exact SQLite → Tantivy BM25 → FTS5 trigram + nucleo fuzzy</li>
-      <li>Tantivy-first text search with fff-grep SIMD fallback</li>
-      <li>PageRank repo map with early convergence, cached in SQLite</li>
-      <li>Merkle incremental indexing, chunked bulk inserts (500 files/tx)</li>
-      <li>Secret redaction on every code-returning tool response</li>
-      <li>mimalloc, parking_lot::Mutex, ahash::AHashMap, fat LTO</li>
-      <li>367 Rust tests + 22 worker tests; zero unwrap in production code; <code>#[deny(missing_docs)]</code> on every crate root</li>
-      <li>Tested on Zed (1.3M LOC) and the Rust compiler (3.8M LOC)</li>
-    </ul>
+    <p><b>v0.1.1</b> — Fixed license HMAC secret mismatch between CLI and worker.</p>
+    <p><b>v0.1.0</b> — Initial release. 12 tools, 9 languages, signed 24 MB Rust binary.</p>
 
-    <h2 id="license"><span class="no">15</span>License</h2>
+    <!-- LICENSE -->
+    <h2 id="license"><span class="no">16</span>License</h2>
     <p><b>recon</b> is proprietary software. © 2026. All rights reserved. Use is governed by the recon Terms of Service.</p>
 
     <div class="next">
-      <a href="index.html#install">
-        <div class="k">Up next</div>
-        <div class="t">Install → <span class="arr">→</span></div>
+      <a href="#quickstart">
+        <div class="k">Back to top</div>
+        <div class="t">Quickstart <span class="arr">↑</span></div>
       </a>
-      <a href="index.html#tools">
-        <div class="k">Explore</div>
-        <div class="t">The 12 tools <span class="arr">→</span></div>
+      <a href="https://github.com/bravo1goingdark/recon/issues">
+        <div class="k">Stuck?</div>
+        <div class="t">Open an issue <span class="arr">→</span></div>
       </a>
     </div>
   </main>
@@ -755,19 +716,20 @@ Summary: 9 ok, 3 warn, 0 fail</code></pre>
   <aside class="toc" aria-label="On this page">
     <div class="lbl">On this page</div>
     <ul>
-      <li><a href="#introduction">Introduction</a></li>
-      <li><a href="#install">Installation</a></li>
-      <li><a href="#configuration">Configuration</a></li>
-      <li><a href="#shapes">Output shapes</a></li>
-      <li><a href="#tiers">Search tiers</a></li>
-      <li><a href="#incremental">Incremental indexing</a></li>
+      <li><a href="#quickstart">Quickstart</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#ide-setup">IDE setup</a></li>
+      <li><a href="#cli-account">CLI · Account</a></li>
+      <li><a href="#cli-project">CLI · Project</a></li>
+      <li><a href="#cli-server">CLI · Server</a></li>
+      <li><a href="#cli-query">CLI · Direct query</a></li>
+      <li><a href="#tools">MCP tools</a></li>
       <li><a href="#filter-dsl">Filter DSL</a></li>
-      <li><a href="#tools">The 12 tools</a></li>
+      <li><a href="#configuration">Configuration</a></li>
       <li><a href="#account">Account &amp; repos</a></li>
       <li><a href="#troubleshooting">Troubleshooting</a></li>
       <li><a href="#security">Security</a></li>
       <li><a href="#performance">Performance</a></li>
-      <li><a href="#adrs">ADRs</a></li>
       <li><a href="#changelog">Changelog</a></li>
       <li><a href="#license">License</a></li>
     </ul>
