@@ -39,6 +39,20 @@ async function loadDashboard() {
     var billing = await billingResp.json();
     renderBilling(billing);
   }
+
+  await loadRepos();
+}
+
+/**
+ * Fetch the user's registered-repo list (server-side max_repos
+ * enforcement) and render it into the Repos tab. Pulled out as its own
+ * function so the Remove handler can re-fetch after a delete.
+ */
+async function loadRepos() {
+  var reposResp = await authFetch("/v1/dashboard/repos");
+  if (!reposResp.ok) return;
+  var data = await reposResp.json();
+  renderRepos(data);
 }
 
 function renderProfile(user) {
@@ -117,6 +131,96 @@ function renderKeys(keys) {
       );
     })
     .join("");
+}
+
+/**
+ * Render the user's registered-repo list (v0.2.0+).
+ *
+ * Each row shows a truncated fingerprint, first/last seen, and a
+ * Remove button. Rows are session-tracked server-side via
+ * /v1/dashboard/repos so the dashboard and the CLI see the same
+ * authoritative state.
+ */
+function renderRepos(payload) {
+  var el = document.getElementById("repos");
+  if (!el) return;
+
+  var repos = (payload && payload.repos) || [];
+  var limit = (payload && payload.limit) || 1;
+  var tier = (payload && payload.tier) || "Free";
+
+  var header =
+    '<div class="repos-header">' +
+    "<span><b>" +
+    repos.length +
+    "</b> / " +
+    limit +
+    " repos used" +
+    "</span>" +
+    '<span class="dim">' +
+    escapeHtml(tier) +
+    " plan" +
+    "</span>" +
+    "</div>";
+
+  if (repos.length === 0) {
+    el.innerHTML =
+      header +
+      '<p class="empty">No repos registered yet. Run <code>recon init --mcp &lt;ide&gt;</code> in a project to register one.</p>';
+    return;
+  }
+
+  // Delegated Remove buttons via [data-action='remove-repo'] +
+  // data-fingerprint. CSP blocks inline onclick, so we wire one
+  // listener on #repos in wireControls.
+  var rows = repos
+    .map(function (r) {
+      return (
+        '<div class="repo-row">' +
+        '<code class="repo-fp" title="' +
+        escapeHtml(r.fingerprint) +
+        '">' +
+        escapeHtml(r.fingerprint.slice(0, 16)) +
+        "…</code>" +
+        '<span class="dim">first ' +
+        formatDate(r.first_seen_at) +
+        "</span>" +
+        '<span class="dim">last ' +
+        formatDate(r.last_seen_at) +
+        "</span>" +
+        '<button class="btn ghost sm" data-action="remove-repo" data-fingerprint="' +
+        escapeHtml(r.fingerprint) +
+        '">Remove</button>' +
+        "</div>"
+      );
+    })
+    .join("");
+
+  el.innerHTML = header + rows;
+}
+
+/**
+ * Remove a server-side repo slot from the dashboard. Re-fetches the
+ * list on success so the count + tier badge stay accurate.
+ */
+async function removeRepo(fingerprint) {
+  if (!fingerprint) return;
+  if (!confirm("Remove this repo from your account? Re-running `recon init` from that project will register it again (if you're under your tier limit).")) {
+    return;
+  }
+  var resp = await authFetch("/v1/dashboard/repos/" + encodeURIComponent(fingerprint), {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 204) {
+    var msg = "Failed to remove repo.";
+    try {
+      var body = await resp.json();
+      if (body && body.error) msg = body.error;
+    } catch {}
+    alert(msg);
+    return;
+  }
+  await loadRepos();
 }
 
 function renderBilling(billing) {
@@ -574,6 +678,18 @@ function wireControls() {
       if (!btn) return;
       var id = btn.getAttribute("data-key-id");
       if (id) openRevokeForRowKey(id);
+    });
+  }
+
+  // Same pattern for the Repos tab: one listener for every Remove
+  // button rendered by renderRepos().
+  var reposContainer = document.getElementById("repos");
+  if (reposContainer) {
+    reposContainer.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-action='remove-repo']");
+      if (!btn) return;
+      var fp = btn.getAttribute("data-fingerprint");
+      if (fp) removeRepo(fp);
     });
   }
 }

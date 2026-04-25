@@ -29,6 +29,15 @@
   .billing-row{display:flex;align-items:center;gap:20px;padding:16px 0;flex-wrap:wrap}
   .billing-limits{font-family:var(--mono);font-size:11px;color:var(--ink-2);display:flex;gap:16px;flex-wrap:wrap}
 
+  /* Repos tab — list of fingerprints registered server-side via
+     `recon init`. Mirrors .key-row layout so the dashboard reads
+     consistently across tabs. */
+  .repos-header{display:flex;align-items:center;justify-content:space-between;padding:8px 0 12px;border-bottom:1px solid var(--rule);margin-bottom:8px;font-size:13px}
+  .repos-header b{color:var(--ink);font-weight:500}
+  .repo-row{display:grid;grid-template-columns:auto 1fr 1fr auto;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--rule-soft);font-size:13px}
+  .repo-row .repo-fp{font-family:var(--mono);font-size:11px;background:var(--paper-2);padding:4px 10px;border-radius:2px;letter-spacing:.03em}
+  @media (max-width:640px){.repo-row{grid-template-columns:1fr;gap:6px}}
+
   .quickstart{position:relative;border:1px solid var(--rule);border-radius:4px;padding:24px;margin-bottom:32px;background:var(--paper-2)}
   .quickstart h3{font-size:14px;font-weight:600;margin-bottom:8px}
   .quickstart pre{font-family:var(--mono);font-size:11px;line-height:1.7;color:var(--ink-2);margin:0;white-space:pre-wrap}
@@ -137,6 +146,15 @@
     </div>
 
     <div class="tab-group">
+      <button type="button" role="tab" aria-selected="false" aria-controls="panel-repos"
+              class="tab-icon" data-tab="repos" title="Repos" aria-label="Repos">
+        <!-- Stylised stack-of-repos glyph: three layered rectangles. -->
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="14" width="18" height="6" rx="1"/><rect x="5" y="9" width="14" height="4" rx="1"/><rect x="7" y="4" width="10" height="3" rx="1"/></svg>
+      </button>
+      <div class="tab-label">Repos</div>
+    </div>
+
+    <div class="tab-group">
       <button type="button" role="tab" aria-selected="false" aria-controls="panel-danger"
               class="tab-icon danger" data-tab="danger" title="Delete account" aria-label="Delete account">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
@@ -175,6 +193,22 @@ recon init --mcp cc</pre>
        rendered by dashboard.js renderBilling(). -->
   <section class="tab-panel" id="panel-billing" role="tabpanel" aria-labelledby="tab-billing" hidden>
     <div id="billing"><p class="empty">loading...</p></div>
+  </section>
+
+  <!-- Panel: Repos. Server-side max_repos enforcement (v0.2.0+).
+       Each row is a SHA-256 fingerprint of a canonical repo path that
+       `recon init` registered with the worker. The Remove button
+       calls DELETE /v1/dashboard/repos/:fingerprint and re-fetches
+       the list. -->
+  <section class="tab-panel" id="panel-repos" role="tabpanel" aria-labelledby="tab-repos" hidden>
+    <div id="repos"><p class="empty">loading...</p></div>
+    <p style="font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5;max-width:640px">
+      Each row is a project you've run <code>recon init</code> in. The fingerprint
+      is a SHA-256 of the canonical absolute path — the worker only sees the
+      digest, never the path itself. Removing a row frees a slot toward your
+      tier's <code>max_repos</code> limit; running <code>recon init</code> in
+      that project again will register it back.
+    </p>
   </section>
 
   <!-- Panel: Danger zone. Account delete is the only thing here — kept

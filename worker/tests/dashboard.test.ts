@@ -515,3 +515,207 @@ describe("DELETE /v1/dashboard/account — cascade delete all user data", () => 
     expect(bobKey).not.toBeNull();
   });
 });
+
+// ─── /v1/dashboard/repos ───────────────────────────────────────────────────────
+//
+// Session-cookie endpoint that mirrors /v1/account/repos (which is API-key
+// Bearer). The dashboard JS uses these so users with revoked-by-quota repos
+// can manage slots without dropping to the CLI.
+
+describe("GET /v1/dashboard/repos", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it("401 when unauthenticated", async () => {
+    const res = await getJson("/v1/dashboard/repos");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns empty list + tier limits for a fresh account", async () => {
+    const { sessionToken } = await seedUserWithKey({
+      userId: "user_repos_empty",
+      username: "ralph",
+      keyId: "key_repos_empty",
+      keyValue: "sk-recon-emptyrepos1",
+    });
+    const res = await getJson("/v1/dashboard/repos", {
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ repos: [], tier: "Pro", limit: 10 });
+  });
+
+  it("returns the user's repos sorted by last_seen desc", async () => {
+    const { sessionToken } = await seedUserWithKey({
+      userId: "user_repos_list",
+      username: "lila",
+      keyId: "key_repos_list",
+      keyValue: "sk-recon-listrepos1",
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    // Seed three repos with deterministic last_seen so we can assert order.
+    await db
+      .prepare(
+        `INSERT INTO user_repos (user_id, fingerprint, first_seen_at, last_seen_at)
+         VALUES (?, ?, '2026-04-01T00:00:00', '2026-04-10T00:00:00'),
+                (?, ?, '2026-04-02T00:00:00', '2026-04-25T00:00:00'),
+                (?, ?, '2026-04-03T00:00:00', '2026-04-15T00:00:00')`,
+      )
+      .bind(
+        "user_repos_list", "a".repeat(64),
+        "user_repos_list", "b".repeat(64),
+        "user_repos_list", "c".repeat(64),
+      )
+      .run();
+
+    const res = await getJson("/v1/dashboard/repos", {
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    expect(res.status).toBe(200);
+    type Body = {
+      repos: Array<{ fingerprint: string; last_seen_at: string }>;
+      limit: number;
+      tier: string;
+    };
+    const body = res.body as Body;
+    expect(body.repos.length).toBe(3);
+    expect(body.repos[0].fingerprint).toBe("b".repeat(64)); // newest last_seen
+    expect(body.repos[2].fingerprint).toBe("a".repeat(64)); // oldest last_seen
+    expect(body.limit).toBe(10);
+    expect(body.tier).toBe("Pro");
+  });
+
+  it("does not leak repos from other users", async () => {
+    const { sessionToken: aliceToken } = await seedUserWithKey({
+      userId: "user_repos_a",
+      username: "alice_repos",
+      keyId: "key_repos_a",
+      keyValue: "sk-recon-aliceisolation1",
+    });
+    await seedUserWithKey({
+      userId: "user_repos_b",
+      username: "bob_repos",
+      keyId: "key_repos_b",
+      keyValue: "sk-recon-bobisolation1",
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    await db
+      .prepare(
+        `INSERT INTO user_repos (user_id, fingerprint) VALUES (?, ?), (?, ?)`,
+      )
+      .bind(
+        "user_repos_a", "a".repeat(64),
+        "user_repos_b", "b".repeat(64),
+      )
+      .run();
+
+    const res = await getJson("/v1/dashboard/repos", {
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    type Body = { repos: Array<{ fingerprint: string }> };
+    const body = res.body as Body;
+    expect(body.repos.length).toBe(1);
+    expect(body.repos[0].fingerprint).toBe("a".repeat(64));
+  });
+});
+
+describe("DELETE /v1/dashboard/repos/:fingerprint", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it("401 when unauthenticated", async () => {
+    const res = await getJson(`/v1/dashboard/repos/${"0".repeat(64)}`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("400 on a malformed fingerprint", async () => {
+    const { sessionToken } = await seedUserWithKey({
+      userId: "user_repo_bad_fp",
+      username: "bad_fp",
+      keyId: "key_repo_bad_fp",
+      keyValue: "sk-recon-badfp1",
+    });
+    const res = await getJson("/v1/dashboard/repos/not-hex", {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("404 when the fingerprint is not in the user's set", async () => {
+    const { sessionToken } = await seedUserWithKey({
+      userId: "user_repo_404",
+      username: "fournotfour",
+      keyId: "key_repo_404",
+      keyValue: "sk-recon-404repos1",
+    });
+    const res = await getJson(`/v1/dashboard/repos/${"d".repeat(64)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("204 + frees the slot for the next register", async () => {
+    const { sessionToken } = await seedUserWithKey({
+      userId: "user_repo_del",
+      username: "delly",
+      keyId: "key_repo_del",
+      keyValue: "sk-recon-deletekeep1",
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    await db
+      .prepare("INSERT INTO user_repos (user_id, fingerprint) VALUES (?, ?)")
+      .bind("user_repo_del", "f".repeat(64))
+      .run();
+
+    const res = await getJson(`/v1/dashboard/repos/${"f".repeat(64)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    expect(res.status).toBe(204);
+
+    const row = await db
+      .prepare("SELECT 1 AS one FROM user_repos WHERE user_id = ? AND fingerprint = ?")
+      .bind("user_repo_del", "f".repeat(64))
+      .first();
+    expect(row).toBeNull();
+  });
+
+  it("user A cannot delete user B's fingerprint", async () => {
+    const { sessionToken: aliceToken } = await seedUserWithKey({
+      userId: "user_repo_xa",
+      username: "alice_xrepo",
+      keyId: "key_repo_xa",
+      keyValue: "sk-recon-xrepoalice1",
+    });
+    await seedUserWithKey({
+      userId: "user_repo_xb",
+      username: "bob_xrepo",
+      keyId: "key_repo_xb",
+      keyValue: "sk-recon-xrepobob1",
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    await db
+      .prepare("INSERT INTO user_repos (user_id, fingerprint) VALUES (?, ?)")
+      .bind("user_repo_xb", "9".repeat(64))
+      .run();
+
+    const res = await getJson(`/v1/dashboard/repos/${"9".repeat(64)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(res.status).toBe(404);
+
+    // Bob's row must still be present.
+    const row = await db
+      .prepare("SELECT 1 AS one FROM user_repos WHERE user_id = ? AND fingerprint = ?")
+      .bind("user_repo_xb", "9".repeat(64))
+      .first();
+    expect(row).not.toBeNull();
+  });
+});

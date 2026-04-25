@@ -190,6 +190,97 @@ dashboardRoutes.delete("/keys/:id", async (c) => {
 });
 
 /**
+ * GET /v1/dashboard/repos — list repos the user has registered with the
+ * worker via `recon init` (server-side `max_repos` enforcement,
+ * v0.2.0+).
+ *
+ * Mirrors the API-key-Bearer endpoint at `/v1/account/repos` but uses
+ * the dashboard's session-cookie auth instead — so the dashboard JS
+ * (browser session) and the CLI (Bearer token) read the same data
+ * through different doors.
+ *
+ * Limit comes from the user's most recent non-revoked api_key's
+ * `limits_json.max_repos` so the displayed N / limit always matches
+ * what the worker is actually enforcing for that user. Falls back to
+ * the user's `users.tier` config if no live key is found (rare —
+ * happens only for users mid-rotation or just after delete-then-create).
+ */
+dashboardRoutes.get("/repos", async (c) => {
+  const user = c.get("user");
+  const db = c.env.RECON_DB;
+
+  const [reposResult, keyRow] = await Promise.all([
+    db
+      .prepare(
+        `SELECT fingerprint, first_seen_at, last_seen_at
+         FROM user_repos
+         WHERE user_id = ?
+         ORDER BY last_seen_at DESC`,
+      )
+      .bind(user.id)
+      .all<{ fingerprint: string; first_seen_at: string; last_seen_at: string }>(),
+    db
+      .prepare(
+        `SELECT tier, limits_json FROM api_keys
+         WHERE user_id = ? AND revoked_at IS NULL
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .bind(user.id)
+      .first<{ tier: string; limits_json: string }>(),
+  ]);
+
+  let limit = 1;
+  let tier = user.tier;
+  if (keyRow) {
+    tier = keyRow.tier;
+    try {
+      const parsed = JSON.parse(keyRow.limits_json) as { max_repos?: number };
+      if (typeof parsed.max_repos === "number" && parsed.max_repos > 0) {
+        limit = parsed.max_repos;
+      }
+    } catch {
+      // Fall through to tier config below.
+    }
+  }
+  if (!keyRow || limit === 1) {
+    // No live key, or limits_json was malformed — fall back to the
+    // canonical tier config so the dashboard never under-reports.
+    const cfg = getTierConfig(tier);
+    if (cfg.limits?.max_repos) limit = cfg.limits.max_repos;
+  }
+
+  return c.json({
+    repos: reposResult.results ?? [],
+    limit,
+    tier,
+  });
+});
+
+/**
+ * DELETE /v1/dashboard/repos/:fingerprint — release a repo slot from the
+ * dashboard. Same atomicity guarantees as the Bearer-auth endpoint:
+ * row scoped to user_id so one user can't delete another's slot.
+ */
+dashboardRoutes.delete("/repos/:fingerprint", async (c) => {
+  const user = c.get("user");
+  const db = c.env.RECON_DB;
+  const fp = c.req.param("fingerprint");
+  if (!/^[0-9a-f]{64}$/.test(fp)) {
+    return c.json({ error: "fingerprint must be 64-char lowercase hex (SHA-256)" }, 400);
+  }
+
+  const result = await db
+    .prepare("DELETE FROM user_repos WHERE user_id = ? AND fingerprint = ?")
+    .bind(user.id, fp)
+    .run();
+
+  if (!result.meta.changes || result.meta.changes === 0) {
+    return c.json({ error: "fingerprint not registered" }, 404);
+  }
+  return new Response(null, { status: 204 });
+});
+
+/**
  * DELETE /v1/dashboard/account — permanently delete the user's account and
  * every row that references it.
  *
