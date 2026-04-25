@@ -1,139 +1,115 @@
-/* docs/Docs.html — collapsible sections + sidebar/anchor sync.
+/* docs/Docs.html — sidebar scroll-spy + group-state persistence.
  *
- * Each major section is a <details class="section" id="X">. This script:
- *  1. Opens the section matching the URL hash on page load (deep links).
- *  2. Opens a section when its sidebar/anchor link is clicked.
- *  3. Updates the URL hash + sidebar highlight as sections open/close.
- *  4. Wires the "Expand all / Collapse all" toggle.
+ * Sidebar groups are <details class="group" open> by default. Users may
+ * collapse groups they don't need; we remember the open/closed state in
+ * localStorage so it survives navigation.
  *
- * Graceful degradation: with JS off, every <details> still opens/closes
- * via the browser's native control. This script just adds nicer flow.
+ * Active link highlight: an IntersectionObserver tracks which <h2 id>
+ * is currently in the viewport's reading band and toggles `.on` on the
+ * matching sidebar link. Clicking a sidebar link scrolls to that section
+ * and (if its parent group is collapsed) opens the group so the user
+ * can see they landed in the right place.
  */
 (function () {
   function $$(sel, root) {
     return Array.from((root || document).querySelectorAll(sel));
   }
 
-  function openById(id) {
-    if (!id) return null;
-    var el = document.getElementById(id);
-    if (!el) return null;
-    var details =
-      el.tagName === "DETAILS" ? el : el.closest("details.section");
-    if (details) details.open = true;
-    return el;
+  // ── Persist sidebar group open/closed state ────────────────────────
+  var STORAGE_KEY = "recon-docs-sidebar-groups-v1";
+
+  function loadGroupState() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    } catch {
+      return {};
+    }
   }
 
-  function scrollIntoViewSmooth(el) {
-    if (!el) return;
-    requestAnimationFrame(function () {
-      el.scrollIntoView({ behavior: "smooth", block: "start" });
+  function saveGroupState() {
+    var state = {};
+    $$("aside.side details.group").forEach(function (d, i) {
+      // Use the first <h4> text as a stable-ish key; if missing, fall
+      // back to index. A heading rename invalidates the cached state,
+      // which is fine — old preference reverts to the HTML default.
+      var h = d.querySelector("h4");
+      var key = h ? h.textContent.trim() : "group-" + i;
+      state[key] = d.open;
     });
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch {}
   }
 
-  // ── Sidebar highlight ──────────────────────────────────────────────
-  // Highlights the sidebar entry whose target is currently open. If
-  // multiple are open (after Expand all), highlights the one most
-  // recently opened by the user — tracked via a click handler below.
-  var lastInteractedId = null;
-
-  function refreshSidebar() {
-    var openSections = $$("details.section[open]");
-    var activeId =
-      lastInteractedId &&
-      document.getElementById(lastInteractedId) &&
-      document.getElementById(lastInteractedId).open
-        ? lastInteractedId
-        : openSections.length
-        ? openSections[0].id
-        : null;
-    $$("aside.side a").forEach(function (a) {
-      a.classList.toggle(
-        "on",
-        activeId && a.getAttribute("href") === "#" + activeId,
-      );
+  (function applyStoredState() {
+    var state = loadGroupState();
+    $$("aside.side details.group").forEach(function (d, i) {
+      var h = d.querySelector("h4");
+      var key = h ? h.textContent.trim() : "group-" + i;
+      if (Object.prototype.hasOwnProperty.call(state, key)) d.open = !!state[key];
     });
-  }
+  })();
 
-  // ── Anchor / hash handling ─────────────────────────────────────────
-  document.addEventListener("click", function (e) {
-    var link = e.target.closest("a[href^='#']");
-    if (!link) return;
-    var id = link.getAttribute("href").slice(1);
-    if (!id) return;
-    var el = openById(id);
-    if (!el) return;
-    lastInteractedId = el.id || lastInteractedId;
-    // Let the browser handle the smooth scroll via :target; ensure the
-    // section had time to expand before scroll lands.
-    scrollIntoViewSmooth(el);
-    refreshSidebar();
+  $$("aside.side details.group").forEach(function (d) {
+    d.addEventListener("toggle", saveGroupState);
   });
 
-  window.addEventListener("hashchange", function () {
-    var id = location.hash.slice(1);
-    var el = openById(id);
-    if (el) {
-      lastInteractedId = el.id || lastInteractedId;
-      scrollIntoViewSmooth(el);
-      refreshSidebar();
-    }
+  // ── Click handler: ensure the parent group is open when a link is
+  //    clicked, so the user sees their target's group expand if needed. ─
+  $$("aside.side a[href^='#']").forEach(function (a) {
+    a.addEventListener("click", function () {
+      var group = a.closest("details.group");
+      if (group && !group.open) {
+        group.open = true;
+        saveGroupState();
+      }
+    });
   });
 
-  // ── Toggle event keeps sidebar in sync as users open/close manually ─
-  document.addEventListener(
-    "toggle",
-    function (e) {
-      var t = e.target;
-      if (!(t instanceof HTMLDetailsElement)) return;
-      if (!t.classList.contains("section")) return;
-      if (t.open) lastInteractedId = t.id;
-      refreshSidebar();
-    },
-    true,
-  );
+  // ── Scroll-spy: highlight whichever <h2 id> is currently in the
+  //    viewport's reading band, and auto-open its sidebar group if the
+  //    user happened to scroll into a section whose group is collapsed. ─
+  var sectionIds = $$("main h2[id]").map(function (h) {
+    return h.id;
+  });
+  var links = sectionIds.map(function (id) {
+    return {
+      id: id,
+      anchor: document.querySelector('aside.side a[href="#' + id + '"]'),
+    };
+  });
 
-  // ── Expand / Collapse all ──────────────────────────────────────────
-  var btn = document.getElementById("expand-all");
-  if (btn) {
-    function syncBtn() {
-      var sections = $$("details.section");
-      var anyClosed = sections.some(function (d) {
-        return !d.open;
-      });
-      btn.textContent = anyClosed ? "Expand all" : "Collapse all";
-    }
-    btn.addEventListener("click", function () {
-      var sections = $$("details.section");
-      var anyClosed = sections.some(function (d) {
-        return !d.open;
-      });
-      sections.forEach(function (d) {
-        d.open = anyClosed;
-      });
-      syncBtn();
-      refreshSidebar();
+  function clearActive() {
+    links.forEach(function (l) {
+      if (l.anchor) l.anchor.classList.remove("on");
     });
-    document.addEventListener("toggle", syncBtn, true);
-    syncBtn();
   }
 
-  // ── Initial state ──────────────────────────────────────────────────
-  // If the URL has a hash, open that section. Otherwise open the first
-  // (Quickstart) so the page isn't a wall of closed accordions on first
-  // visit.
-  if (location.hash) {
-    var initial = openById(location.hash.slice(1));
-    if (initial) {
-      lastInteractedId = initial.id || initial.closest("details.section")?.id;
-      scrollIntoViewSmooth(initial);
-    }
-  } else {
-    var first = document.querySelector("details.section");
-    if (first) {
-      first.open = true;
-      lastInteractedId = first.id;
-    }
+  if ("IntersectionObserver" in window && sectionIds.length) {
+    var io = new IntersectionObserver(
+      function (entries) {
+        entries.forEach(function (e) {
+          if (!e.isIntersecting) return;
+          clearActive();
+          var match = links.find(function (l) {
+            return l.id === e.target.id;
+          });
+          if (!match || !match.anchor) return;
+          match.anchor.classList.add("on");
+          // If user scrolled into a section whose sidebar group is
+          // collapsed, expand it so the highlight is visible.
+          var group = match.anchor.closest("details.group");
+          if (group && !group.open) {
+            group.open = true;
+            saveGroupState();
+          }
+        });
+      },
+      { rootMargin: "-96px 0px -70% 0px", threshold: 0 },
+    );
+    sectionIds.forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) io.observe(el);
+    });
   }
-  refreshSidebar();
 })();
