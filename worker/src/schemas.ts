@@ -8,13 +8,6 @@
 
 import { z } from "zod";
 
-/** POST /v1/billing/checkout — purchase a tier (legacy one-time, kept for backcompat). */
-export const CheckoutBody = z.object({
-  /** Canonical tier name: "Free", "Pro", or "Team". Free is rejected at the handler. */
-  tier: z.enum(["Free", "Pro", "Team"]),
-});
-export type CheckoutBody = z.infer<typeof CheckoutBody>;
-
 /** POST /v1/billing/subscribe — start a recurring subscription for a tier. */
 export const SubscribeBody = z.object({
   tier: z.enum(["Pro", "Team"]),
@@ -38,6 +31,15 @@ export type SubscribeBody = z.infer<typeof SubscribeBody>;
 export const RazorpayWebhookBody = z
   .object({
     event: z.string().min(1),
+    /**
+     * Unix-second timestamp Razorpay sets when the event was emitted. Used
+     * by the worker's replay-window guard (rejects events older than 5 min).
+     * Optional in the schema because we want malformed/missing-timestamp
+     * deliveries to fall through to a clear `invalid request body` error
+     * elsewhere if the rest of the payload is bad — the timestamp guard
+     * itself rejects missing values explicitly.
+     */
+    created_at: z.number().int().nonnegative().optional(),
     // Razorpay shapes `payload` differently depending on event:
     // - payment.captured  → { payment: { entity } }
     // - subscription.*    → { subscription: { entity }, payment?: { entity } }

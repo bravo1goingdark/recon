@@ -234,24 +234,51 @@ function renderBilling(billing) {
     " · " + (tc.limits.max_loc / 1000).toLocaleString() + "K LOC";
 
   // Pick the status line + right-hand CTA based on subscription state.
-  // Four states the dashboard has to reflect:
-  //   1. Free + no sub  → show Subscribe CTA
-  //   2. Paid + active + not cancelled → show "Next billing: DATE" + Cancel
-  //   3. Paid + cancel_at_period_end → show "Ends DATE" + Resubscribe
-  //   4. Paid + cancelled/halted/expired → show "Access until DATE" + Resubscribe
+  // The states the dashboard has to reflect:
+  //   1. Free + no sub                              → Subscribe CTA
+  //   2. Subscribed + cancel_at_period_end OR
+  //      status='cancelled'                          → "Access until DATE" + Resubscribe
+  //   3. Subscribed + status='halted'                 → "Payment failed" + Resubscribe
+  //   4. Subscribed + status in (active, authenticated, pending, created)
+  //      AND cancel_at_period_end=0                   → status copy + Cancel button
+  //
+  // The Cancel button has to render for the in-between states too —
+  // 'created' / 'authenticated' / 'pending' is the window between the user
+  // clicking Subscribe and Razorpay confirming the first charge. The
+  // backend's POST /v1/billing/cancel accepts all of these, so locking the
+  // UI out of them stranded users with no self-serve cancel path.
   var statusLine = "";
   var actionHtml = "";
   var sub = billing.subscription;
+
+  // States we treat as "subscription is live or about to become live" and
+  // therefore eligible for a Cancel button. Mirrors the WHERE-status list
+  // in /v1/billing/cancel and /v1/billing/subscribe's stack-prevention
+  // guard so the three never disagree about what "active-ish" means.
+  var ACTIVEISH = ["created", "authenticated", "active", "pending"];
 
   if (sub && sub.tier !== "Free") {
     var endDate = sub.current_period_end
       ? formatDate(sub.current_period_end)
       : "unknown";
 
-    if (sub.status === "active" && !sub.cancel_at_period_end) {
+    if (
+      ACTIVEISH.indexOf(sub.status) !== -1 &&
+      !sub.cancel_at_period_end
+    ) {
+      // status copy varies a bit so the user can tell whether their first
+      // charge has landed yet. The Cancel CTA is the same in all cases.
+      var statusText;
+      if (sub.status === "active") {
+        statusText = "Next billing: " + endDate;
+      } else if (sub.status === "pending") {
+        statusText = "Awaiting payment confirmation";
+      } else {
+        statusText = "Awaiting first charge from Razorpay";
+      }
       statusLine =
-        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px">Next billing: ' +
-        escapeHtml(endDate) +
+        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px">' +
+        escapeHtml(statusText) +
         "</div>";
       actionHtml =
         '<button id="cancel-sub-btn" class="btn ghost sm" style="margin-left:auto">Cancel subscription</button>';

@@ -13,7 +13,7 @@
  * the api_keys row. These tests pin both halves of that contract.
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { env, getJson, resetDb } from "./setup";
 import { downgradeExpired } from "../src/scheduled";
 
@@ -38,9 +38,13 @@ function subWebhook(opts: {
   status?: string;
   currentStart?: number;
   currentEnd?: number;
+  createdAt?: number;
 }): string {
   return JSON.stringify({
     event: opts.event,
+    // `created_at` defaults to "now" so the replay-window guard passes.
+    // Tests that want to exercise the guard pass an explicit value.
+    created_at: opts.createdAt ?? Math.floor(Date.now() / 1000),
     payload: {
       subscription: {
         entity: {
@@ -481,6 +485,529 @@ describe("POST /v1/billing/subscribe — cancel-at-period-end unblocks new subsc
       body: JSON.stringify({ tier: "Team", currency: "USD" }),
     });
     expect(res.status).not.toBe(409);
+  });
+});
+
+describe("subscription webhook: halted → charged recovery (card update)", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it("subscription.charged after halted re-promotes the sub to active", async () => {
+    // Flow: Razorpay charges fail repeatedly → status='halted'. The user
+    // updates their card on Razorpay's portal → next charge succeeds → a
+    // `subscription.charged` event arrives. The handler must promote the
+    // halted row back to 'active' and extend expires_at.
+    //
+    // This is the recovery path we deliberately do NOT block in the
+    // status-guard fix (only cancelled / completed / expired are terminal).
+    // The test pins that decision so a future "tighten the guard" change
+    // doesn't accidentally strand users with a halted row that no event
+    // can rescue.
+    await seedSubscriber({
+      userId: "user_halt_recover",
+      githubId: 601,
+      tier: "Pro",
+      subId: "sub_halt_recover",
+      subStatus: "halted",
+    });
+
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    // Before recovery: api_keys are still on a previously-paid period_end
+    // (honor-until-end after the halt — the handleSubscriptionHalted path
+    // doesn't expire the key, the cron downgrades after period_end passes).
+    const oldEnd = Math.floor(Date.now() / 1000) + 2 * 86_400;
+    const oldEndISO = new Date(oldEnd * 1000).toISOString();
+    await db
+      .prepare(
+        `UPDATE api_keys SET tier = 'Pro', expires_at = ? WHERE user_id = ?`,
+      )
+      .bind(oldEndISO, "user_halt_recover")
+      .run();
+
+    // Card update succeeds — Razorpay retries the charge, fires charged.
+    const newEnd = Math.floor(Date.now() / 1000) + 30 * 86_400;
+    const body = subWebhook({
+      event: "subscription.charged",
+      subscriptionId: "sub_halt_recover",
+      currentEnd: newEnd,
+    });
+    const sig = await hmacHex("test-webhook-secret", body);
+    const res = await getJson("/v1/billing/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Razorpay-Signature": sig,
+      },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: "ok",
+      subscription_id: "sub_halt_recover",
+    });
+
+    // Subscription row: halted → active, expires_at extended.
+    const subRow = await db
+      .prepare(
+        "SELECT status, current_period_end FROM subscriptions WHERE razorpay_subscription_id = ?",
+      )
+      .bind("sub_halt_recover")
+      .first<{ status: string; current_period_end: string }>();
+    expect(subRow?.status).toBe("active");
+    expect(subRow?.current_period_end).toBe(
+      new Date(newEnd * 1000).toISOString(),
+    );
+
+    // api_keys: tier remains Pro (cascade ran), expires_at extended to new end.
+    const keyRow = await db
+      .prepare("SELECT tier, expires_at FROM api_keys WHERE user_id = ?")
+      .bind("user_halt_recover")
+      .first<{ tier: string; expires_at: string }>();
+    expect(keyRow?.tier).toBe("Pro");
+    expect(keyRow?.expires_at).toBe(new Date(newEnd * 1000).toISOString());
+  });
+});
+
+describe("billing critical bugs — race + status guard + null current_end", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  /**
+   * Seed a session-only user (no subscription, no api_key). Used by the
+   * /subscribe race test below: the test only needs an authenticated caller,
+   * not pre-existing billing state.
+   */
+  async function seedSession(userId: string, sessionToken: string): Promise<void> {
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const enc = new TextEncoder();
+    const buf = await crypto.subtle.digest("SHA-256", enc.encode(sessionToken));
+    const tokenHash = Array.from(new Uint8Array(buf))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const expiry = new Date(Date.now() + 86_400_000).toISOString();
+    await db
+      .prepare(
+        "INSERT INTO users (id, github_id, github_username, tier) VALUES (?, ?, ?, 'Free')",
+      )
+      .bind(userId, Math.floor(Math.random() * 1_000_000_000), `user_${userId}`)
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
+      )
+      .bind(userId, tokenHash, expiry)
+      .run();
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("race: 3 concurrent /subscribe call Razorpay AT MOST once", async () => {
+    // Bug: the old SELECT-then-Razorpay-then-INSERT pattern lets concurrent
+    // calls all pass the SELECT, all call createSubscription (double-charging
+    // the user upstream), then all INSERT duplicate subscription rows.
+    //
+    // Fix: an atomic INSERT-WHERE-NOT-EXISTS placeholder runs *before* the
+    // Razorpay call. Only one of the N wins the placeholder; the rest see
+    // it via the WHERE-NOT-EXISTS guard and return 409 without ever touching
+    // Razorpay.
+    //
+    // We stub `fetch` so Razorpay calls (a) succeed deterministically and
+    // (b) park long enough that the winner is still in-flight when the
+    // losers run their INSERT-WHERE-NOT-EXISTS — which is the exact race
+    // window where the bug exists in production.
+    //
+    // We use 3 concurrent calls because the RL_CHECKOUT rate-limit binding
+    // is configured at 3/min in wrangler.toml. Anything above 3 hits 429
+    // (which is also a useful defense-in-depth signal but not what this
+    // test is pinning).
+    await seedSession("user_race", "ses_race");
+
+    const razorpayCalls: { url: string; body: unknown }[] = [];
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (!url.startsWith("https://api.razorpay.com")) {
+          return realFetch(input, init);
+        }
+        const body =
+          typeof init?.body === "string" ? JSON.parse(init.body) : null;
+        razorpayCalls.push({ url, body });
+        // Hold the response long enough that all five /subscribe handlers
+        // have run their atomic INSERT-WHERE-NOT-EXISTS before the winner's
+        // Razorpay call resolves. 200ms is way longer than D1 statement
+        // dispatch (sub-ms) so the losers all see the placeholder.
+        await new Promise((r) => setTimeout(r, 200));
+        if (url.endsWith("/plans")) {
+          return new Response(
+            JSON.stringify({
+              id: "plan_stub",
+              entity: "plan",
+              period: "monthly",
+              interval: 1,
+              item: {
+                id: "item_stub",
+                name: "recon Pro",
+                amount: 300,
+                currency: "USD",
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.endsWith("/subscriptions")) {
+          return new Response(
+            JSON.stringify({
+              id: "sub_stub_winner",
+              entity: "subscription",
+              plan_id: "plan_stub",
+              status: "created",
+              short_url: "https://rzp.io/i/stub",
+              current_start: null,
+              current_end: null,
+              ended_at: null,
+              quantity: 1,
+              notes: body?.notes ?? {},
+              charge_at: null,
+              start_at: null,
+              end_at: null,
+              auth_attempts: 0,
+              total_count: body?.total_count ?? 120,
+              paid_count: 0,
+              customer_notify: !!body?.customer_notify,
+              created_at: Math.floor(Date.now() / 1000),
+              has_scheduled_changes: false,
+              change_scheduled_at: null,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("not stubbed", { status: 500 });
+      },
+    );
+
+    const launch = () =>
+      getJson("/v1/billing/subscribe", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer ses_race",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ tier: "Pro", currency: "USD" }),
+      });
+
+    const results = await Promise.all([launch(), launch(), launch()]);
+
+    const okCount = results.filter((r) => r.status === 200).length;
+    const conflictCount = results.filter((r) => r.status === 409).length;
+    // Exactly one wins the placeholder and reaches Razorpay; the other two
+    // are blocked by the WHERE NOT EXISTS guard before the upstream call.
+    expect(okCount).toBe(1);
+    expect(conflictCount).toBe(2);
+
+    // Critical user-impact assertion: Razorpay was called AT MOST once.
+    // Under the bug this number is 5 (one per concurrent click), each
+    // creating a subscription and an upcoming charge.
+    const subscriptionCalls = razorpayCalls.filter((c) =>
+      c.url.endsWith("/subscriptions"),
+    ).length;
+    expect(subscriptionCalls).toBeLessThanOrEqual(1);
+
+    // Exactly one subscriptions row exists, stamped with the Razorpay sub_id.
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const rows = await db
+      .prepare(
+        "SELECT razorpay_subscription_id, status FROM subscriptions WHERE user_id = ?",
+      )
+      .bind("user_race")
+      .all<{ razorpay_subscription_id: string | null; status: string }>();
+    expect(rows.results.length).toBe(1);
+    expect(rows.results[0].razorpay_subscription_id).toBe("sub_stub_winner");
+  });
+
+  it("status guard: subscription.charged on a cancelled sub does NOT resurrect it", async () => {
+    // Bug: handleSubscriptionCharged blindly UPDATEs status='active' and
+    // overwrites api_keys.tier + expires_at. Razorpay delivers webhooks at
+    // least once, in any order — a delayed `charged` arriving after a
+    // `cancelled` would silently flip the user back to Pro and extend
+    // service for another billing period they didn't pay for.
+    //
+    // Fix: the UPDATE filters `WHERE status NOT IN ('cancelled','completed','expired')`.
+    // If meta.changes === 0 we skip the cascading user/api_keys updates and
+    // return a non-200 reason so the dropped event is auditable.
+    await seedSubscriber({
+      userId: "user_resurrect",
+      githubId: 401,
+      tier: "Pro",
+      subId: "sub_resurrect",
+      subStatus: "cancelled",
+    });
+
+    // Pre-state mirrors a freshly cancelled sub still inside its paid period:
+    // status=cancelled, expires_at stamped at cycle end (honor-until-end).
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const originalEnd = Math.floor(Date.now() / 1000) + 5 * 86_400;
+    const originalEndISO = new Date(originalEnd * 1000).toISOString();
+    await db
+      .prepare(
+        `UPDATE subscriptions
+         SET current_period_end = ?,
+             cancelled_at = datetime('now')
+         WHERE razorpay_subscription_id = ?`,
+      )
+      .bind(originalEndISO, "sub_resurrect")
+      .run();
+    // api_keys keep Free tier here (per seedSubscriber default) — the test
+    // is about whether a stale `charged` webhook can promote them back.
+
+    // Out-of-order webhook: a `subscription.charged` arrives AFTER cancellation
+    // with a "new" period_end far in the future.
+    const lateRenewalEnd = Math.floor(Date.now() / 1000) + 90 * 86_400;
+    const body = subWebhook({
+      event: "subscription.charged",
+      subscriptionId: "sub_resurrect",
+      currentEnd: lateRenewalEnd,
+    });
+    const sig = await hmacHex("test-webhook-secret", body);
+    const res = await getJson("/v1/billing/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Razorpay-Signature": sig,
+      },
+      body,
+    });
+
+    // Webhook must 2xx so Razorpay stops retrying — but the side-effects
+    // must NOT have flipped the user back to active.
+    expect(res.status).toBe(200);
+
+    const subRow = await db
+      .prepare(
+        "SELECT status, current_period_end FROM subscriptions WHERE razorpay_subscription_id = ?",
+      )
+      .bind("sub_resurrect")
+      .first<{ status: string; current_period_end: string }>();
+    expect(subRow?.status).toBe("cancelled");
+    expect(subRow?.current_period_end).toBe(originalEndISO);
+
+    const userRow = await db
+      .prepare("SELECT tier FROM users WHERE id = ?")
+      .bind("user_resurrect")
+      .first<{ tier: string }>();
+    expect(userRow?.tier).toBe("Free");
+
+    const keyRow = await db
+      .prepare("SELECT tier, expires_at FROM api_keys WHERE user_id = ?")
+      .bind("user_resurrect")
+      .first<{ tier: string; expires_at: string | null }>();
+    expect(keyRow?.tier).toBe("Free");
+    expect(keyRow?.expires_at).toBeNull();
+
+    // Audit row: the dropped event must record reason='subscription_terminal'.
+    const dropped = await db
+      .prepare(
+        "SELECT reason FROM webhook_events_dropped WHERE razorpay_subscription_id = ?",
+      )
+      .bind("sub_resurrect")
+      .first<{ reason: string }>();
+    expect(dropped?.reason).toBe("subscription_terminal");
+  });
+
+  it("self-heal: webhook with notes.placeholder_id stamps the orphan placeholder", async () => {
+    // Defends the recovery path: if /subscribe successfully creates a
+    // Razorpay subscription but the post-Razorpay UPDATE fails (D1 hiccup,
+    // worker isolate killed, etc), we end up with a placeholder row whose
+    // razorpay_subscription_id is NULL. The eventual subscription.activated
+    // webhook carries notes.placeholder_id and uses it to find our row,
+    // stamp the sub_id, and proceed with the activation cascade.
+    //
+    // Without this test, a regression in the self-heal lookup would ship
+    // silently — the bug would only surface when a real production hiccup
+    // hit the UPDATE.
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    await db
+      .prepare(
+        "INSERT INTO users (id, github_id, github_username, tier) VALUES (?, ?, ?, 'Free')",
+      )
+      .bind("user_heal", 501, "user_heal")
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, tier, limits_json)
+         VALUES (?, ?, ?, 'Default', 'Free', '{"max_repos":1,"max_files":250,"max_loc":10000}')`,
+      )
+      .bind("user_heal", "hash_user_heal", "sk-recon-heal")
+      .run();
+    // Orphan placeholder: status='created', razorpay_subscription_id NULL.
+    // Mirrors the post-/subscribe state where the UPDATE failed.
+    const inserted = await db
+      .prepare(
+        `INSERT INTO subscriptions (user_id, tier, status)
+         VALUES (?, 'Pro', 'created')
+         RETURNING id`,
+      )
+      .bind("user_heal")
+      .first<{ id: string }>();
+    expect(inserted?.id).toBeTruthy();
+    const placeholderId = inserted!.id;
+
+    // Webhook arrives with notes.placeholder_id pointing at our orphan.
+    const periodEnd = Math.floor(Date.now() / 1000) + 30 * 86_400;
+    const body = JSON.stringify({
+      event: "subscription.activated",
+      created_at: Math.floor(Date.now() / 1000),
+      payload: {
+        subscription: {
+          entity: {
+            id: "sub_healed",
+            plan_id: "plan_test",
+            status: "active",
+            current_start: Math.floor(Date.now() / 1000),
+            current_end: periodEnd,
+            notes: {
+              user_id: "user_heal",
+              tier: "Pro",
+              currency: "USD",
+              placeholder_id: placeholderId,
+            },
+          },
+        },
+      },
+    });
+    const sig = await hmacHex("test-webhook-secret", body);
+    const res = await getJson("/v1/billing/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Razorpay-Signature": sig,
+      },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: "ok",
+      subscription_id: "sub_healed",
+    });
+
+    // The orphan row was stamped with the new sub_id and promoted to active.
+    const subRow = await db
+      .prepare(
+        "SELECT id, razorpay_subscription_id, status, current_period_end FROM subscriptions WHERE user_id = ?",
+      )
+      .bind("user_heal")
+      .first<{
+        id: string;
+        razorpay_subscription_id: string;
+        status: string;
+        current_period_end: string;
+      }>();
+    expect(subRow?.id).toBe(placeholderId);
+    expect(subRow?.razorpay_subscription_id).toBe("sub_healed");
+    expect(subRow?.status).toBe("active");
+    expect(subRow?.current_period_end).toBe(
+      new Date(periodEnd * 1000).toISOString(),
+    );
+
+    // Cascading user/api_keys updates ran.
+    const userRow = await db
+      .prepare("SELECT tier FROM users WHERE id = ?")
+      .bind("user_heal")
+      .first<{ tier: string }>();
+    expect(userRow?.tier).toBe("Pro");
+    const keyRow = await db
+      .prepare("SELECT tier, expires_at FROM api_keys WHERE user_id = ?")
+      .bind("user_heal")
+      .first<{ tier: string; expires_at: string }>();
+    expect(keyRow?.tier).toBe("Pro");
+    expect(keyRow?.expires_at).toBe(new Date(periodEnd * 1000).toISOString());
+  });
+
+  it("null current_end: refuse to grant tier; record dropped event", async () => {
+    // Bug: when Razorpay delivers a subscription event without `current_end`,
+    // the old handler computes `periodEnd = null` and writes that NULL into
+    // api_keys.expires_at. The hourly downgrade cron skips NULL rows by
+    // design (it can't downgrade a never-expiring key), so the user gets a
+    // permanent free Pro until manually corrected.
+    //
+    // Fix: refuse the event entirely — log it to webhook_events_dropped, do
+    // not touch users/api_keys/subscriptions. The webhook still returns 2xx
+    // so Razorpay doesn't retry-storm; we'll reconcile via portal/Razorpay
+    // dashboard if needed.
+    await seedSubscriber({
+      userId: "user_nullend",
+      githubId: 402,
+      tier: "Pro",
+      subId: "sub_nullend",
+      subStatus: "created",
+    });
+
+    const body = subWebhook({
+      event: "subscription.activated",
+      subscriptionId: "sub_nullend",
+      status: "active",
+      // currentEnd intentionally omitted → subWebhook sends null
+    });
+    const sig = await hmacHex("test-webhook-secret", body);
+    const res = await getJson("/v1/billing/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Razorpay-Signature": sig,
+      },
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+
+    // Subscription row: status NOT promoted to 'active'.
+    const subRow = await db
+      .prepare(
+        "SELECT status, current_period_end FROM subscriptions WHERE razorpay_subscription_id = ?",
+      )
+      .bind("sub_nullend")
+      .first<{ status: string; current_period_end: string | null }>();
+    expect(subRow?.status).toBe("created");
+    expect(subRow?.current_period_end).toBeNull();
+
+    // users.tier stays Free.
+    const userRow = await db
+      .prepare("SELECT tier FROM users WHERE id = ?")
+      .bind("user_nullend")
+      .first<{ tier: string }>();
+    expect(userRow?.tier).toBe("Free");
+
+    // api_keys untouched: tier=Free, expires_at=null (CRUCIAL — a NULL
+    // here under the bug would lock in permanent free Pro).
+    const keyRow = await db
+      .prepare(
+        "SELECT tier, expires_at FROM api_keys WHERE user_id = ?",
+      )
+      .bind("user_nullend")
+      .first<{ tier: string; expires_at: string | null }>();
+    expect(keyRow?.tier).toBe("Free");
+    expect(keyRow?.expires_at).toBeNull();
+
+    // Audit trail: the dropped event must be recorded in webhook_events_dropped.
+    const dropped = await db
+      .prepare(
+        "SELECT reason, event_type FROM webhook_events_dropped WHERE razorpay_subscription_id = ?",
+      )
+      .bind("sub_nullend")
+      .first<{ reason: string; event_type: string }>();
+    expect(dropped?.reason).toBe("missing_current_end");
+    expect(dropped?.event_type).toBe("subscription.activated");
   });
 });
 

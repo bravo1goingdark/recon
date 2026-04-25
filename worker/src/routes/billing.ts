@@ -1,6 +1,5 @@
 import { Hono, type Context } from "hono";
 import {
-  createOrder,
   createPlan,
   createSubscription,
   cancelSubscription,
@@ -10,7 +9,6 @@ import { getTierConfig, getTierPrice, type Currency } from "../lib/tiers";
 import { requireAuth } from "../middleware/auth";
 import { clientIp, rateLimit } from "../middleware/ratelimit";
 import {
-  CheckoutBody,
   SubscribeBody,
   parseBody,
   RazorpayWebhookBody,
@@ -20,71 +18,6 @@ import type { AuthUser, Env } from "../types";
 type AuthedEnv = { Bindings: Env; Variables: { user: AuthUser } };
 
 export const billingRoutes = new Hono<AuthedEnv>();
-
-/**
- * POST /v1/billing/checkout — legacy one-time purchase flow.
- *
- * Kept for backwards compat and as an escape hatch; new UI calls /subscribe.
- * Not exercised by the dashboard anymore. Can be removed once we're sure no
- * cached clients are still hitting it.
- */
-billingRoutes.post(
-  "/checkout",
-  requireAuth,
-  rateLimit<AuthedEnv>(
-    "RL_CHECKOUT",
-    (c) => c.get("user")?.id ?? clientIp(c),
-    60,
-  ),
-  async (c) => {
-    const user = c.get("user");
-    const db = c.env.RECON_DB;
-
-    let rawBody: unknown;
-    try {
-      rawBody = await c.req.json();
-    } catch {
-      return c.json({ error: "body must be valid JSON" }, 400);
-    }
-    const parsed = parseBody(CheckoutBody, rawBody);
-    if (!parsed.ok) return c.json(parsed.error, 400);
-
-    const tierConfig = getTierConfig(parsed.value.tier);
-    // Legacy path only ever shipped USD one-time orders. Hard-pin to USD
-    // here; anyone who needs a different currency should use /subscribe.
-    const usdPrice = getTierPrice(tierConfig.name, "USD");
-    if (!usdPrice) {
-      return c.json({ error: "This tier cannot be purchased online" }, 400);
-    }
-
-    const receipt = `recon_${user.id.slice(0, 8)}_${Date.now()}`;
-    const order = await createOrder(
-      c.env.RAZORPAY_KEY_ID,
-      c.env.RAZORPAY_KEY_SECRET,
-      usdPrice.amount,
-      "USD",
-      receipt,
-      { user_id: user.id, tier: tierConfig.name },
-    );
-
-    await db
-      .prepare(
-        `INSERT INTO payments (user_id, razorpay_order_id, amount_paise, currency, status, tier)
-         VALUES (?, ?, ?, 'USD', 'created', ?)`,
-      )
-      .bind(user.id, order.id, usdPrice.amount, tierConfig.name)
-      .run();
-
-    return c.json({
-      order_id: order.id,
-      amount: usdPrice.amount,
-      currency: "USD",
-      key_id: c.env.RAZORPAY_KEY_ID,
-      tier: tierConfig.name,
-      price_display: usdPrice.display,
-    });
-  },
-);
 
 /**
  * POST /v1/billing/subscribe — start a recurring monthly subscription.
@@ -155,76 +88,133 @@ billingRoutes.post(
       );
     }
 
-    // Refuse to stack subscriptions — except for rows where the user has
-    // already clicked Cancel. Those have `cancel_at_period_end = 1` which
-    // means "no further renewals"; the billing period still runs out, but
-    // from the user's POV they're free to start a new plan. Blocking that
-    // leaves them confused ("I cancelled — why is it telling me to cancel
-    // again?") which is the exact bug this guard previously caused.
+    // Race-free placeholder INSERT.
     //
-    // The old sub keeps its current period_end (honor-until-end still
-    // stands) and the webhook will transition it to `cancelled` when
-    // Razorpay's renewal attempt would have been.
-    const existing = await db
+    // The old shape was SELECT-existing → call Razorpay → INSERT row. Two
+    // concurrent clicks (or a retried network request) sailed through the
+    // SELECT together, double-charged the user upstream, and double-INSERTed.
+    //
+    // We now claim the slot with a single atomic statement: the INSERT-SELECT
+    // body's WHERE NOT EXISTS is evaluated inside the same SQLite write txn
+    // as the row insert, so only one of N concurrent callers wins the
+    // placeholder. The losers see an empty RETURNING and bail with 409.
+    //
+    // We also keep the cancel-at-period-end carve-out: rows already flagged
+    // for cancellation don't block a new subscribe (cancelled-then-resubscribe
+    // is a legitimate flow).
+    const placeholder = await db
       .prepare(
-        `SELECT id, razorpay_subscription_id, tier, status, cancel_at_period_end
-         FROM subscriptions
-         WHERE user_id = ?
-           AND status IN ('created','authenticated','active','pending','halted')
-           AND cancel_at_period_end = 0
-         LIMIT 1`,
+        `INSERT INTO subscriptions (user_id, tier, status)
+         SELECT ?, ?, 'created'
+         WHERE NOT EXISTS (
+           SELECT 1 FROM subscriptions
+           WHERE user_id = ?
+             AND status IN ('created','authenticated','active','pending','halted')
+             AND cancel_at_period_end = 0
+         )
+         RETURNING id`,
       )
-      .bind(user.id)
-      .first();
-    if (existing) {
+      .bind(user.id, tierConfig.name, user.id)
+      .first<{ id: string }>();
+    if (!placeholder) {
+      // Re-read whatever blocked us so the 409 has the same shape clients
+      // already depend on (`existing_tier` / `existing_status`).
+      const existing = await db
+        .prepare(
+          `SELECT tier, status FROM subscriptions
+           WHERE user_id = ?
+             AND status IN ('created','authenticated','active','pending','halted')
+             AND cancel_at_period_end = 0
+           LIMIT 1`,
+        )
+        .bind(user.id)
+        .first<{ tier: string; status: string }>();
       return c.json(
         {
           error:
             "You already have an active subscription. Cancel it from the dashboard before subscribing to a different tier.",
-          existing_tier: existing.tier,
-          existing_status: existing.status,
+          existing_tier: existing?.tier ?? null,
+          existing_status: existing?.status ?? null,
         },
         409,
       );
     }
 
-    // Resolve (or lazily create) the Razorpay plan for this (tier, currency).
-    const planId = await ensurePlanForTier(
-      db,
-      c.env.RAZORPAY_KEY_ID,
-      c.env.RAZORPAY_KEY_SECRET,
-      tierConfig.name,
-      currency,
-      price.amount,
-    );
+    // The catch scope is narrow on purpose. We DELETE the placeholder only
+    // when the failure happens *before* Razorpay has materialised a real
+    // subscription upstream — i.e. plan creation or createSubscription
+    // itself threw. After createSubscription resolves, Razorpay owns a real
+    // sub and a real upcoming charge; the placeholder MUST stay so the
+    // eventual webhook can self-heal via notes.placeholder_id even if our
+    // post-Razorpay UPDATE fails. Wrapping the UPDATE in this try would
+    // make a transient D1 hiccup orphan the user's charge.
+    let sub: Awaited<ReturnType<typeof createSubscription>>;
+    try {
+      // Resolve (or lazily create) the Razorpay plan for this (tier, currency).
+      const planId = await ensurePlanForTier(
+        db,
+        c.env.RAZORPAY_KEY_ID,
+        c.env.RAZORPAY_KEY_SECRET,
+        tierConfig.name,
+        currency,
+        price.amount,
+      );
 
-    // 120 cycles = 10 years of monthly charges. Effectively unbounded but
-    // Razorpay requires a finite total_count.
-    const sub = await createSubscription(
-      c.env.RAZORPAY_KEY_ID,
-      c.env.RAZORPAY_KEY_SECRET,
-      {
-        plan_id: planId,
-        total_count: 120,
-        customer_notify: true,
-        notes: {
-          user_id: user.id,
-          tier: tierConfig.name,
-          currency,
+      // 120 cycles = 10 years of monthly charges. Effectively unbounded but
+      // Razorpay requires a finite total_count.
+      //
+      // We pass `placeholder_id` in the notes so the webhook can self-heal:
+      // if our post-Razorpay UPDATE below fails (network drop, isolate kill),
+      // the eventual subscription.activated webhook still finds the row by
+      // joining on notes.placeholder_id.
+      sub = await createSubscription(
+        c.env.RAZORPAY_KEY_ID,
+        c.env.RAZORPAY_KEY_SECRET,
+        {
+          plan_id: planId,
+          total_count: 120,
+          customer_notify: true,
+          notes: {
+            user_id: user.id,
+            tier: tierConfig.name,
+            currency,
+            placeholder_id: placeholder.id,
+          },
         },
-      },
-    );
+      );
+    } catch (err) {
+      // Pre-Razorpay failure (plan creation or createSubscription threw): no
+      // upstream sub exists, so delete the placeholder to unblock retry.
+      // Only delete if it's still ours — a webhook that already self-healed
+      // the row (raced ahead of this catch in some bizarre ordering) must
+      // not be clobbered.
+      await db
+        .prepare(
+          `DELETE FROM subscriptions
+           WHERE id = ? AND razorpay_subscription_id IS NULL`,
+        )
+        .bind(placeholder.id)
+        .run();
+      throw err;
+    }
 
-    // Insert a preliminary subscriptions row. The webhook will promote it
-    // to 'active' once the first charge lands. Until then, status='created'
-    // blocks a second /subscribe call from this user.
+    // Idempotent UPDATE: only stamps the razorpay_subscription_id when the
+    // row is still ours (NULL razorpay_subscription_id) or was previously
+    // stamped with the same id (webhook self-heal racing this UPDATE).
+    // Never overwrites a different sub_id.
+    //
+    // If this throws, we deliberately DO NOT delete the placeholder — the
+    // Razorpay sub exists upstream and the webhook will self-heal the row
+    // via notes.placeholder_id. Letting the error bubble surfaces a 500 to
+    // the caller, but the user's billing state recovers automatically.
     await db
       .prepare(
-        `INSERT INTO subscriptions
-           (user_id, razorpay_subscription_id, tier, status)
-         VALUES (?, ?, ?, 'created')`,
+        `UPDATE subscriptions
+         SET razorpay_subscription_id = ?
+         WHERE id = ?
+           AND (razorpay_subscription_id IS NULL OR razorpay_subscription_id = ?)`,
       )
-      .bind(user.id, sub.id, tierConfig.name)
+      .bind(sub.id, placeholder.id, sub.id)
       .run();
 
     return c.json({
@@ -327,17 +317,21 @@ billingRoutes.post(
  * POST /v1/billing/webhook — Razorpay event webhook.
  *
  * Handles:
- *   - payment.captured           (legacy one-time orders; unchanged)
  *   - subscription.activated     (first charge succeeded — grant tier)
  *   - subscription.charged       (renewal charge — extend expires_at)
  *   - subscription.cancelled     (cycle-end reached after cancel request)
  *   - subscription.halted        (repeated charge failures — preserve access until paid period ends)
  *   - subscription.completed     (total_count reached — same semantics as cancelled)
  *
- * Idempotent for payment events via payment_events(razorpay_payment_id PK).
- * Subscription-only events (cancelled, halted, completed) don't have a
- * payment_id; we rely on the subscription row's status monotonically
- * progressing — replays set the same state and are harmless.
+ * `payment.captured` events also fire upstream (Razorpay sends one per
+ * subscription charge), but they don't carry the subscription_id we need
+ * to bind the payment to a user's tier. We rely solely on the
+ * subscription.* events. The handler ignores payment.captured by
+ * dropping it through to the default branch.
+ *
+ * Subscription events don't carry a unique payment_id; we rely on the
+ * subscription row's status monotonically progressing — replays set the
+ * same state and are harmless.
  */
 billingRoutes.post(
   "/webhook",
@@ -365,9 +359,76 @@ billingRoutes.post(
     const event = parsed.value;
     const db = c.env.RECON_DB;
 
+    // Replay-window guard. HMAC alone says "this body was signed with our
+    // secret at some point" — it doesn't bound *when*. A captured-and-
+    // replayed payload from weeks ago verifies the same as a fresh one.
+    // Razorpay sets `created_at` on every event; we accept events at most
+    // 24 hours old (Razorpay retries delivery for ~24h after a failure,
+    // each retry carrying the *original* created_at). Tightening below
+    // 24h would reject legitimate retries on prolonged outages.
+    //
+    // 5-minute future skew tolerance accommodates clock drift between
+    // Razorpay's edge and Cloudflare's runtime.
+    const WEBHOOK_REPLAY_MAX_AGE_SEC = 24 * 60 * 60;
+    const WEBHOOK_REPLAY_FUTURE_SKEW_SEC = 5 * 60;
+    if (typeof event.created_at !== "number") {
+      // Audit-only: this is a malformed body, not a replay attack. Skip
+      // the dropped-events row to keep that table focused on the cases
+      // worth investigating.
+      return c.json({ error: "Webhook event missing created_at" }, 400);
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ageSec = nowSec - event.created_at;
+    if (ageSec > WEBHOOK_REPLAY_MAX_AGE_SEC || -ageSec > WEBHOOK_REPLAY_FUTURE_SKEW_SEC) {
+      // Record the dropped delivery so the audit trail surfaces stale
+      // replays — the alternative is losing the event silently. We do
+      // this BEFORE the early-return so the row lands even on the 400.
+      const subId =
+        event.payload.subscription?.entity?.id ??
+        event.payload.payment?.entity?.id ??
+        null;
+      await recordDroppedEvent(db, event, "replay_window_exceeded", subId);
+      return c.json(
+        {
+          error: "Webhook event outside replay window",
+          age_seconds: ageSec,
+        },
+        400,
+      );
+    }
+
+    // Event-ID idempotency. Razorpay sets a unique `X-Razorpay-Event-Id`
+    // header on every delivery. INSERT-OR-IGNORE on the PK lets us tell
+    // whether we've handled this exact delivery before; a duplicate
+    // returns 2xx with a deterministic body so Razorpay stops retrying.
+    //
+    // We dedup BEFORE side effects so retried events never re-run the
+    // tier/api_keys cascade. (The status-guard fix in handleSubscriptionCharged
+    // is defense-in-depth; this is the first line.)
+    const eventId = c.req.header("X-Razorpay-Event-Id");
+    if (eventId) {
+      const inserted = await db
+        .prepare(
+          `INSERT INTO webhook_events_seen (event_id, event_type)
+           VALUES (?, ?)
+           ON CONFLICT(event_id) DO NOTHING
+           RETURNING event_id`,
+        )
+        .bind(eventId, event.event)
+        .first<{ event_id: string }>();
+      if (!inserted) {
+        return c.json({
+          status: "already_processed",
+          event_id: eventId,
+        });
+      }
+    }
+    // Missing header (legacy/manual replay tooling): we still process the
+    // event since the rest of the guard pipeline is sufficient. This isn't
+    // a documented Razorpay behaviour — they always send the header — but
+    // fail-open keeps debugging the webhook by hand workable.
+
     switch (event.event) {
-      case "payment.captured":
-        return handlePaymentCaptured(c, event, db);
       case "subscription.activated":
       case "subscription.charged":
         return handleSubscriptionCharged(c, event, db);
@@ -405,15 +466,6 @@ billingRoutes.get("/portal", requireAuth, async (c) => {
       cancelled_at: string | null;
     }>();
 
-  const latestPayment = await db
-    .prepare(
-      `SELECT tier, status, created_at FROM payments
-       WHERE user_id = ? AND status = 'captured'
-       ORDER BY created_at DESC LIMIT 1`,
-    )
-    .bind(user.id)
-    .first();
-
   return c.json({
     tier: user.tier,
     tier_config: getTierConfig(user.tier),
@@ -427,13 +479,6 @@ billingRoutes.get("/portal", requireAuth, async (c) => {
           cancelled_at: sub.cancelled_at,
         }
       : null,
-    latest_payment: latestPayment
-      ? {
-          tier: latestPayment.tier,
-          status: latestPayment.status,
-          date: latestPayment.created_at,
-        }
-      : null,
   });
 });
 
@@ -445,75 +490,6 @@ billingRoutes.get("/portal", requireAuth, async (c) => {
 
 type WebhookCtx = Context<AuthedEnv>;
 
-async function handlePaymentCaptured(
-  c: WebhookCtx,
-  event: RazorpayWebhookBody,
-  db: D1Database,
-) {
-  const payment = event.payload.payment?.entity;
-  if (!payment?.order_id) {
-    return c.json({ status: "ignored", reason: "no order_id on payment" });
-  }
-
-  const firstTime = await db
-    .prepare(
-      `INSERT INTO payment_events (razorpay_payment_id, event_type, razorpay_order_id)
-       VALUES (?, ?, ?)
-       ON CONFLICT(razorpay_payment_id) DO NOTHING
-       RETURNING razorpay_payment_id`,
-    )
-    .bind(payment.id, event.event, payment.order_id)
-    .first();
-
-  if (!firstTime) {
-    console.warn(
-      `webhook retry for payment_id=${payment.id} — already processed`,
-    );
-    return c.json({ status: "already_processed", payment_id: payment.id });
-  }
-
-  const paymentRow = await db
-    .prepare("SELECT user_id, tier FROM payments WHERE razorpay_order_id = ?")
-    .bind(payment.order_id)
-    .first<{ user_id: string; tier: string }>();
-
-  if (!paymentRow) {
-    console.warn(
-      `webhook for unknown order_id=${payment.order_id} — no payments row`,
-    );
-    return c.json({ status: "unknown_order", order_id: payment.order_id });
-  }
-
-  const newLimits = JSON.stringify(getTierConfig(paymentRow.tier).limits);
-
-  await db.batch([
-    db
-      .prepare(
-        `UPDATE payments SET razorpay_payment_id = ?, status = 'captured'
-         WHERE razorpay_order_id = ?`,
-      )
-      .bind(payment.id, payment.order_id),
-    db
-      .prepare(
-        "UPDATE users SET tier = ?, updated_at = datetime('now') WHERE id = ?",
-      )
-      .bind(paymentRow.tier, paymentRow.user_id),
-    db
-      .prepare(
-        `UPDATE api_keys SET tier = ?, limits_json = ?
-         WHERE user_id = ? AND revoked_at IS NULL`,
-      )
-      .bind(paymentRow.tier, newLimits, paymentRow.user_id),
-    db
-      .prepare(
-        "UPDATE payment_events SET processed_at = datetime('now') WHERE razorpay_payment_id = ?",
-      )
-      .bind(payment.id),
-  ]);
-
-  return c.json({ status: "ok", payment_id: payment.id });
-}
-
 async function handleSubscriptionCharged(
   c: WebhookCtx,
   event: RazorpayWebhookBody,
@@ -524,8 +500,27 @@ async function handleSubscriptionCharged(
     return c.json({ status: "ignored", reason: "no subscription entity" });
   }
 
-  // Locate our row.
-  const row = await db
+  // Reject events we cannot safely act on. Each branch records the dropped
+  // event for audit (Workers `console.warn` vanishes without log forwarding).
+  // Webhook still 2xx so Razorpay does not retry-storm a known-bad event.
+  if (sub.current_end == null) {
+    // Razorpay occasionally fires subscription events before the first
+    // billing cycle is finalized — current_end is null in those. Granting
+    // tier with NULL expires_at would write NULL into api_keys.expires_at,
+    // and the hourly downgrade cron skips NULL by design (it's used for
+    // never-expiring CI keys). Net effect of the bug: permanent free Pro.
+    await recordDroppedEvent(db, event, "missing_current_end", sub.id);
+    return c.json({
+      status: "dropped",
+      reason: "missing_current_end",
+      subscription_id: sub.id,
+    });
+  }
+
+  // Locate our row. First by razorpay_subscription_id (the steady state),
+  // then by notes.placeholder_id (webhook self-heal: the post-Razorpay
+  // UPDATE in /subscribe failed and never stamped sub_id onto the row).
+  let row = await db
     .prepare(
       `SELECT id, user_id, tier FROM subscriptions
        WHERE razorpay_subscription_id = ?`,
@@ -533,27 +528,68 @@ async function handleSubscriptionCharged(
     .bind(sub.id)
     .first<{ id: string; user_id: string; tier: string }>();
 
+  if (!row && sub.notes?.placeholder_id) {
+    const placeholder = await db
+      .prepare(
+        `SELECT id, user_id, tier FROM subscriptions
+         WHERE id = ? AND razorpay_subscription_id IS NULL`,
+      )
+      .bind(sub.notes.placeholder_id)
+      .first<{ id: string; user_id: string; tier: string }>();
+    if (placeholder) {
+      // Bind the sub_id idempotently so subsequent webhook deliveries find
+      // the row via the primary path.
+      await db
+        .prepare(
+          `UPDATE subscriptions
+           SET razorpay_subscription_id = ?
+           WHERE id = ? AND razorpay_subscription_id IS NULL`,
+        )
+        .bind(sub.id, placeholder.id)
+        .run();
+      row = placeholder;
+    }
+  }
+
   if (!row) {
-    console.warn(`subscription webhook for unknown sub_id=${sub.id}`);
+    await recordDroppedEvent(db, event, "unknown_subscription", sub.id);
     return c.json({ status: "unknown_subscription", subscription_id: sub.id });
   }
 
   const periodStart = sub.current_start
     ? isoFromUnix(sub.current_start)
     : null;
-  const periodEnd = sub.current_end ? isoFromUnix(sub.current_end) : null;
+  const periodEnd = isoFromUnix(sub.current_end);
   const limits = JSON.stringify(getTierConfig(row.tier).limits);
 
+  // Status guard. Razorpay delivers webhooks at-least-once and may reorder
+  // them on retry — a delayed `charged` arriving after a `cancelled` would
+  // (under the old code) flip the row back to active and extend service for
+  // a billing period the user never paid for.
+  //
+  // The UPDATE only fires for non-terminal rows. We then read meta.changes
+  // to decide whether the cascading user/api_keys updates should run.
+  const updateResult = await db
+    .prepare(
+      `UPDATE subscriptions
+       SET status = 'active',
+           current_period_start = COALESCE(?, current_period_start),
+           current_period_end = COALESCE(?, current_period_end)
+       WHERE id = ?
+         AND status NOT IN ('cancelled','completed','expired')`,
+    )
+    .bind(periodStart, periodEnd, row.id)
+    .run();
+
+  if (updateResult.meta.changes === 0) {
+    await recordDroppedEvent(db, event, "subscription_terminal", sub.id);
+    return c.json({
+      status: "terminal_skipped",
+      subscription_id: sub.id,
+    });
+  }
+
   await db.batch([
-    db
-      .prepare(
-        `UPDATE subscriptions
-         SET status = 'active',
-             current_period_start = COALESCE(?, current_period_start),
-             current_period_end = COALESCE(?, current_period_end)
-         WHERE id = ?`,
-      )
-      .bind(periodStart, periodEnd, row.id),
     db
       .prepare(
         "UPDATE users SET tier = ?, updated_at = datetime('now') WHERE id = ?",
@@ -572,6 +608,32 @@ async function handleSubscriptionCharged(
     subscription_id: sub.id,
     period_end: periodEnd,
   });
+}
+
+/**
+ * Record a webhook event we deliberately dropped. Workers `console.warn`
+ * vanishes without log forwarding; the row IS the audit trail. Failures
+ * here are swallowed — never let an audit-write block the webhook 2xx.
+ */
+async function recordDroppedEvent(
+  db: D1Database,
+  event: RazorpayWebhookBody,
+  reason: string,
+  subscriptionId: string | null,
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO webhook_events_dropped
+           (event_type, razorpay_subscription_id, reason, payload_json)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .bind(event.event, subscriptionId, reason, JSON.stringify(event))
+      .run();
+  } catch {
+    // Audit insert failed — fall through. The webhook handler still
+    // returns 2xx; we just lose this one breadcrumb.
+  }
 }
 
 async function handleSubscriptionCancelled(
