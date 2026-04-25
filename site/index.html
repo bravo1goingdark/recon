@@ -242,8 +242,11 @@
   @media (max-width:720px){ .compare{grid-template-columns:1fr} }
 
   /* ─────── INSTALL ─────── */
-  .install-grid{display:grid;grid-template-columns:1fr 1fr;gap:32px}
-  @media (max-width:900px){ .install-grid{grid-template-columns:1fr} }
+  /* 4 vertical (narrow / portrait) cards in a row at desktop. Collapses to
+     2 cols on tablets and 1 col on phones. */
+  .install-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;align-items:start}
+  @media (max-width:1024px){ .install-grid{grid-template-columns:repeat(2,1fr);gap:32px} }
+  @media (max-width:600px){ .install-grid{grid-template-columns:1fr} }
   .step{border-top:1px solid var(--rule)}
   .step .n{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;color:var(--clay);padding:20px 0 10px;text-transform:uppercase}
   .step h3{font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin-bottom:14px;line-height:1.1}
@@ -992,38 +995,6 @@ recon doctor</pre>
 
 <script src="/js/theme.js"></script>
 <script src="/js/auth.js"></script>
-<script>
-  // OS picker on the install section. CSS-only fallback would need
-  // labelled radios + :checked siblings; one tiny script is cleaner.
-  (function () {
-    var tabs = document.querySelectorAll(".os-tabs button[data-os]");
-    var panes = document.querySelectorAll(".os-pane[data-os]");
-    if (!tabs.length) return;
-
-    // Auto-select the user's platform on first load if we haven't been
-    // told otherwise. Best-effort detection — falls back to Linux.
-    var ua = navigator.userAgent || "";
-    var detected = /Win/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "macos" : "linux";
-
-    function activate(os) {
-      tabs.forEach(function (t) {
-        var on = t.dataset.os === os;
-        t.classList.toggle("active", on);
-        t.setAttribute("aria-selected", on ? "true" : "false");
-      });
-      panes.forEach(function (p) {
-        p.classList.toggle("active", p.dataset.os === os);
-      });
-    }
-
-    tabs.forEach(function (t) {
-      t.addEventListener("click", function () {
-        activate(t.dataset.os);
-      });
-    });
-
-    activate(detected);
-  })();
-</script>
+<script src="/js/os-tabs.js"></script>
 </body>
 </html>
