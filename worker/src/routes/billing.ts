@@ -167,6 +167,12 @@ billingRoutes.post(
       // if our post-Razorpay UPDATE below fails (network drop, isolate kill),
       // the eventual subscription.activated webhook still finds the row by
       // joining on notes.placeholder_id.
+      //
+      // callback_url is what Razorpay redirects to after the user finishes
+      // authorising the mandate. Without it they get stranded on Razorpay's
+      // hosted "Payment successful" page. `?just_paid=1` flags the dashboard
+      // to poll /v1/billing/portal for a few seconds until the webhook lands.
+      const callbackUrl = `${c.env.FRONTEND_URL.replace(/\/$/, "")}/dashboard?just_paid=1`;
       sub = await createSubscription(
         c.env.RAZORPAY_KEY_ID,
         c.env.RAZORPAY_KEY_SECRET,
@@ -180,6 +186,8 @@ billingRoutes.post(
             currency,
             placeholder_id: placeholder.id,
           },
+          callback_url: callbackUrl,
+          callback_method: "get",
         },
       );
     } catch (err) {

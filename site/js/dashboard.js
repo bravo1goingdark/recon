@@ -41,6 +41,84 @@ async function loadDashboard() {
   }
 
   await loadRepos();
+
+  // Razorpay redirects here with `?just_paid=1` after a successful
+  // subscription auth. The webhook usually lands within a couple of
+  // seconds but there's a window where the dashboard would still show
+  // "Free". Poll /v1/billing/portal until the tier flips, then refresh
+  // the page so the badge + sidebar reflect the upgrade.
+  if (window.location.search.indexOf("just_paid=1") !== -1) {
+    pollForTierUpgrade(user.tier);
+  }
+}
+
+/**
+ * After a successful Razorpay subscription auth, poll /v1/billing/portal
+ * until the user's tier moves off `oldTier`. The webhook usually fires
+ * within ~2s; we poll for up to 30s before giving up. Stops at the first
+ * tier change OR when the user navigates away. Drops the `just_paid`
+ * query param via history.replaceState so a refresh doesn't re-trigger.
+ */
+async function pollForTierUpgrade(oldTier) {
+  var attempts = 0;
+  var MAX_ATTEMPTS = 15; // 15 × 2s = 30s
+  showUpgradePendingBanner();
+
+  // Strip the just_paid flag so a manual refresh during/after the poll
+  // doesn't re-arm this loop.
+  try {
+    var url = new URL(window.location.href);
+    url.searchParams.delete("just_paid");
+    window.history.replaceState({}, "", url.toString());
+  } catch (_) {}
+
+  var iv = setInterval(async function () {
+    attempts++;
+    var resp = await authFetch("/v1/billing/portal");
+    if (resp.ok) {
+      var billing = await resp.json();
+      if (billing.tier !== oldTier) {
+        clearInterval(iv);
+        hideUpgradePendingBanner();
+        // Full reload so the user sees the new tier badge + limits
+        // without us having to surgically re-render every panel.
+        window.location.reload();
+        return;
+      }
+    }
+    if (attempts >= MAX_ATTEMPTS) {
+      clearInterval(iv);
+      hideUpgradePendingBanner(
+        "Payment received — tier upgrade is taking longer than usual. Refresh in a minute, or contact support if it doesn't appear.",
+      );
+    }
+  }, 2000);
+}
+
+function showUpgradePendingBanner() {
+  var existing = document.getElementById("upgrade-pending-banner");
+  if (existing) return;
+  var b = document.createElement("div");
+  b.id = "upgrade-pending-banner";
+  b.style.cssText =
+    "position:fixed;top:0;left:0;right:0;background:var(--clay);color:var(--paper);padding:10px 16px;text-align:center;font-size:13px;z-index:1000;font-family:var(--mono)";
+  b.textContent =
+    "Payment received — confirming your upgrade…";
+  document.body.appendChild(b);
+}
+
+function hideUpgradePendingBanner(failureMessage) {
+  var b = document.getElementById("upgrade-pending-banner");
+  if (!b) return;
+  if (failureMessage) {
+    b.textContent = failureMessage;
+    b.style.background = "var(--ink)";
+    setTimeout(function () {
+      if (b.parentNode) b.parentNode.removeChild(b);
+    }, 8000);
+  } else {
+    b.parentNode.removeChild(b);
+  }
 }
 
 /**

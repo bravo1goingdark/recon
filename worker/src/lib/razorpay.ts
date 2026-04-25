@@ -93,6 +93,14 @@ export async function createSubscription(
     total_count: number;
     customer_notify: boolean;
     notes: Record<string, string>;
+    /**
+     * URL Razorpay redirects the user to after they complete authorisation
+     * on the hosted short_url page. Without this, the user lands on
+     * Razorpay's generic "Payment Successful" page and has no path back
+     * to our dashboard. Pair with `callback_method: "get"`.
+     */
+    callback_url?: string;
+    callback_method?: "get";
   },
 ): Promise<RazorpaySubscription> {
   return rpPost<RazorpaySubscription>(keyId, keySecret, "/subscriptions", {
@@ -100,6 +108,12 @@ export async function createSubscription(
     total_count: opts.total_count,
     customer_notify: opts.customer_notify ? 1 : 0,
     notes: opts.notes,
+    ...(opts.callback_url
+      ? {
+          callback_url: opts.callback_url,
+          callback_method: opts.callback_method ?? "get",
+        }
+      : {}),
   });
 }
 
