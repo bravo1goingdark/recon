@@ -75,13 +75,13 @@
   nav.top .ship span{color:var(--clay)}
   @media (max-width:900px){ nav.top ul{display:none} nav.top{padding:18px 24px} }
 
-  /* LAYOUT */
-  .shell{display:grid;grid-template-columns:240px minmax(0,1fr) 220px;gap:56px;max-width:1240px;margin:0 auto;padding:48px 40px 120px}
-  @media (max-width:1100px){ .shell{grid-template-columns:220px minmax(0,1fr);gap:40px} aside.toc{display:none} }
+  /* LAYOUT — two-column: sidebar + main. Right "On this page" rail removed. */
+  .shell{display:grid;grid-template-columns:240px minmax(0,1fr);gap:56px;max-width:1080px;margin:0 auto;padding:48px 40px 120px}
   @media (max-width:760px){ .shell{grid-template-columns:1fr;padding:32px 24px 80px} aside.side{display:none} }
 
-  /* SIDEBAR */
-  aside.side{position:sticky;top:88px;align-self:start;max-height:calc(100vh - 104px);overflow:auto;padding-right:12px}
+  /* SIDEBAR — scrollbar hidden visually; wheel/touch scroll still works */
+  aside.side{position:sticky;top:88px;align-self:start;max-height:calc(100vh - 104px);overflow:auto;padding-right:12px;scrollbar-width:none;-ms-overflow-style:none}
+  aside.side::-webkit-scrollbar{width:0;height:0;display:none}
   aside.side h4{font-family:var(--mono);font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);margin:22px 0 10px;font-weight:500}
   aside.side h4:first-child{margin-top:0}
   aside.side ul{list-style:none}
@@ -142,13 +142,36 @@
   .tiers .t .lat{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:8px;display:block}
   @media (max-width:720px){ .tiers{grid-template-columns:1fr} }
 
-  /* TOC (right rail) */
-  aside.toc{position:sticky;top:88px;align-self:start;max-height:calc(100vh - 104px);overflow:auto}
-  aside.toc .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:12px}
-  aside.toc ul{list-style:none;border-left:1px solid var(--rule-soft)}
-  aside.toc li a{display:block;padding:5px 14px;font-size:12.5px;color:var(--ink-3);border-left:1px solid transparent;margin-left:-1px}
-  aside.toc li a:hover{color:var(--ink)}
-  aside.toc li a.on{color:var(--ink);border-left-color:var(--clay)}
+  /* COLLAPSIBLE SECTIONS — every <h2> section is wrapped in <details class="section">. */
+  details.section{border-top:1px solid var(--rule-soft);margin:0;scroll-margin-top:96px}
+  details.section:last-of-type{border-bottom:1px solid var(--rule-soft)}
+  details.section > summary{
+    list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:16px;
+    padding:24px 0;margin:0;outline:none;
+    transition:background .15s;
+  }
+  details.section > summary::-webkit-details-marker{display:none}
+  details.section > summary:hover{background:color-mix(in oklab, var(--paper-2) 50%, transparent)}
+  details.section > summary > h2{
+    margin:0 !important;font-size:clamp(28px,3vw,36px);flex:1;line-height:1.1;
+  }
+  details.section > summary::after{
+    content:"+";font-family:var(--mono);font-size:22px;color:var(--ink-3);
+    transition:transform .15s, color .15s;line-height:1;align-self:center;
+  }
+  details.section[open] > summary::after{content:"−";color:var(--clay)}
+  details.section > summary:hover::after{color:var(--ink)}
+  details.section[open] > summary{border-bottom:1px solid var(--rule-soft);margin-bottom:24px}
+  details.section > .body{padding:0 0 32px 0}
+
+  /* "Expand all" / "Collapse all" toggle */
+  .section-controls{display:flex;justify-content:flex-end;margin:8px 0 -8px;font-family:var(--mono);font-size:11px;letter-spacing:0.06em;text-transform:uppercase}
+  .section-controls button{
+    background:none;border:1px solid var(--rule);color:var(--ink-3);
+    padding:6px 12px;border-radius:3px;cursor:pointer;font:inherit;letter-spacing:inherit;
+    transition:border-color .15s,color .15s;
+  }
+  .section-controls button:hover{border-color:var(--ink);color:var(--ink)}
 
   /* footer nav */
   .next{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:80px;max-width:820px}
@@ -228,8 +251,15 @@
       Three commands to get <b>recon</b> wired into your editor and serving symbol-aware tools to your AI agent. The rest of this page is a complete reference for every CLI command — pick what you need.
     </p>
 
+
+    <div class="section-controls">
+      <button id="expand-all" type="button">Expand all</button>
+    </div>
     <!-- QUICKSTART -->
-    <h2 id="quickstart"><span class="no">01</span>Quickstart</h2>
+  <details class="section" id="quickstart" open>
+    <summary><h2><span class="no">01</span>Quickstart</h2></summary>
+    <div class="body">
+
     <p>One-time setup per machine, then per project.</p>
 <pre><span class="c"># 1. install (Linux / macOS)</span>
 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
@@ -249,7 +279,13 @@ recon init --mcp <span class="h">cc</span>        <span class="c"># Claude Code<
     </div>
 
     <!-- INSTALL -->
-    <h2 id="install"><span class="no">02</span>Install</h2>
+    </div>
+  </details>
+
+  <details class="section" id="install">
+    <summary><h2><span class="no">02</span>Install</h2></summary>
+    <div class="body">
+
     <p>recon ships as a single 24 MB Rust binary. The installer verifies a SHA-256 manifest and (when <code>cosign</code> is on the machine) the manifest's sigstore signature against our GitHub Actions release workflow.</p>
 
 <pre><span class="c"># Linux · macOS</span>
@@ -288,7 +324,13 @@ RECON_LICENSE_HMAC_KEY=&lt;your-secret&gt; cargo build -p recon-cli --release
     </p>
 
     <!-- IDE SETUP -->
-    <h2 id="ide-setup"><span class="no">03</span>IDE setup</h2>
+    </div>
+  </details>
+
+  <details class="section" id="ide-setup">
+    <summary><h2><span class="no">03</span>IDE setup</h2></summary>
+    <div class="body">
+
     <p><code>recon init --mcp &lt;ide&gt;</code> indexes the repo, writes the IDE's MCP config, and drops a strict-policy agent rules file so the agent uses recon's <code>code_*</code> tools instead of <code>Read</code>/<code>Grep</code>/<code>Glob</code>.</p>
 
     <table>
@@ -311,7 +353,13 @@ recon purge --mcp cc</pre>
     <p>Removes the local index (<code>.recon/</code>), the IDE's MCP entry (preserves any other servers in the config), the agent rules block, and frees the server-side repo slot. <code>recon purge</code> with no flag deletes only the index.</p>
 
     <!-- ── CLI ───────────────────────────────────────────────────── -->
-    <h2 id="cli-account"><span class="no">04</span>CLI · Account</h2>
+    </div>
+  </details>
+
+  <details class="section" id="cli-account">
+    <summary><h2><span class="no">04</span>CLI · Account</h2></summary>
+    <div class="body">
+
     <p>Commands that talk to your recon account on the worker. All of them need <code>recon login</code> to have run at least once on this machine.</p>
 
     <h3 id="cmd-login"><code>recon login &lt;key&gt;</code></h3>
@@ -359,7 +407,13 @@ $ recon repos remove a3f1c8b2e6d4710f9c2e6d4710fc8b2e6d4710fc8b2e6d4710fc8b2e6d4
     </div>
 
     <!-- PROJECT -->
-    <h2 id="cli-project"><span class="no">05</span>CLI · Project</h2>
+    </div>
+  </details>
+
+  <details class="section" id="cli-project">
+    <summary><h2><span class="no">05</span>CLI · Project</h2></summary>
+    <div class="body">
+
     <p>Commands that operate on a single repository. They take an optional <code>--repo &lt;path&gt;</code> (default: the current directory).</p>
 
     <h3 id="cmd-init"><code>recon init [--mcp &lt;ide&gt;]</code></h3>
@@ -424,7 +478,13 @@ Now on v0.2.0.</pre>
     <p>Print the binary's semver tag. Identical to <code>recon --version</code>; provided for shell scripts that want a stable subcommand.</p>
 
     <!-- SERVER -->
-    <h2 id="cli-server"><span class="no">06</span>CLI · Server</h2>
+    </div>
+  </details>
+
+  <details class="section" id="cli-server">
+    <summary><h2><span class="no">06</span>CLI · Server</h2></summary>
+    <div class="body">
+
 
     <h3 id="cmd-serve"><code>recon serve [--port &lt;n&gt;] [--log &lt;level&gt;]</code></h3>
     <p>Start the MCP server. With no flags it speaks JSON-RPC over stdio — the form your IDE auto-spawns. <code>--port</code> switches to Streamable HTTP for browser-based MCP clients or remote use.</p>
@@ -451,7 +511,13 @@ Indexed 1834 files, 87421 symbols (0 errors)</pre>
     <p>Print a one-screen index health report: file count, symbol count, last indexed time, schema version, on-disk size.</p>
 
     <!-- DIRECT QUERY -->
-    <h2 id="cli-query"><span class="no">07</span>CLI · Direct query</h2>
+    </div>
+  </details>
+
+  <details class="section" id="cli-query">
+    <summary><h2><span class="no">07</span>CLI · Direct query</h2></summary>
+    <div class="body">
+
     <p>Mirrors of the MCP tools, callable from the shell. Useful for debugging, scripting, or pasting recon output into a chat without the agent in the loop. Every command supports <code>--json</code> for structured output.</p>
 
     <table>
@@ -485,7 +551,13 @@ $ recon map --budget 800 --focus crates/recon-server/src/server.rs
 [ranked overview, ~800 tokens, focused on server.rs callees and callers]</pre>
 
     <!-- MCP TOOLS -->
-    <h2 id="tools"><span class="no">08</span>MCP tools</h2>
+    </div>
+  </details>
+
+  <details class="section" id="tools">
+    <summary><h2><span class="no">08</span>MCP tools</h2></summary>
+    <div class="body">
+
     <p>The 12 tools your AI agent calls when recon is wired up. Each is documented in the agent's tool listing — these are summarised here so you can audit what the agent has access to.</p>
 
     <table>
@@ -507,7 +579,13 @@ $ recon map --budget 800 --focus crates/recon-server/src/server.rs
     </table>
 
     <!-- FILTER DSL -->
-    <h2 id="filter-dsl"><span class="no">09</span>Filter DSL</h2>
+    </div>
+  </details>
+
+  <details class="section" id="filter-dsl">
+    <summary><h2><span class="no">09</span>Filter DSL</h2></summary>
+    <div class="body">
+
     <p>Search-shaped tools (<code>code_search</code>, <code>code_find_strings</code>, <code>code_list</code>) and their CLI mirrors accept an optional <code>--filter</code> / <code>filter:</code> argument. The DSL is small on purpose — these are the supported terms:</p>
 
     <table>
@@ -526,7 +604,13 @@ $ recon map --budget 800 --focus crates/recon-server/src/server.rs
 <span class="c"># → TODOs in modified Rust files outside test/ paths</span></pre>
 
     <!-- CONFIGURATION -->
-    <h2 id="configuration"><span class="no">10</span>Configuration</h2>
+    </div>
+  </details>
+
+  <details class="section" id="configuration">
+    <summary><h2><span class="no">10</span>Configuration</h2></summary>
+    <div class="body">
+
     <p>Per-repo settings live in <code>.recon/config.toml</code> at your project root. The file is local — commit it if you want shared defaults, never your license. Every setting has a conservative default; override only what you need.</p>
 
 <pre><span class="c"># .recon/config.toml</span>
@@ -559,7 +643,13 @@ allow_sensitive = <span class="h">false</span></pre>
     </table>
 
     <!-- ACCOUNT & REPOS -->
-    <h2 id="account"><span class="no">11</span>Account &amp; repos</h2>
+    </div>
+  </details>
+
+  <details class="section" id="account">
+    <summary><h2><span class="no">11</span>Account &amp; repos</h2></summary>
+    <div class="body">
+
     <p>Every recon account has a tier-defined <code>max_repos</code> — the number of distinct repositories one license can index concurrently. As of <b>v0.2.0</b> the limit is enforced by the worker: each <code>recon init</code> registers the repo's canonical-path SHA-256 fingerprint, and a <code>403</code> there blocks indexing rather than a local file the agent could overwrite.</p>
 
     <h3>How registration works</h3>
@@ -583,7 +673,13 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <p>Tier limits are summarised on the <a href="pricing/">pricing page</a>. <code>recon license</code> shows what your current key entitles you to.</p>
 
     <!-- TROUBLESHOOTING -->
-    <h2 id="troubleshooting"><span class="no">12</span>Troubleshooting</h2>
+    </div>
+  </details>
+
+  <details class="section" id="troubleshooting">
+    <summary><h2><span class="no">12</span>Troubleshooting</h2></summary>
+    <div class="body">
+
     <p>Start with <code>recon doctor</code>. It runs a battery of probes across every surface a stuck install can fail on and returns exit-code 1 when anything's broken. Match the failing probe to the row below:</p>
 
     <table>
@@ -640,7 +736,13 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     </table>
 
     <!-- SECURITY -->
-    <h2 id="security"><span class="no">13</span>Security</h2>
+    </div>
+  </details>
+
+  <details class="section" id="security">
+    <summary><h2><span class="no">13</span>Security</h2></summary>
+    <div class="body">
+
     <ul class="bul">
       <li><b>Code stays local.</b> Source files are indexed on your machine; recon never uploads them. The only network call it makes is the license check (key in, tier out).</li>
       <li><b>Credentials chmod 0600.</b> The raw API key is stored at <code>~/.config/recon/credentials.json</code> with mode 0600 on Unix. <code>recon doctor</code> verifies the mode.</li>
@@ -652,7 +754,13 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     </ul>
 
     <!-- PERFORMANCE -->
-    <h2 id="performance"><span class="no">14</span>Performance</h2>
+    </div>
+  </details>
+
+  <details class="section" id="performance">
+    <summary><h2><span class="no">14</span>Performance</h2></summary>
+    <div class="body">
+
     <p>Benchmarked on real codebases. Release build, warm cache, mimalloc, fat LTO. Numbers from the <code>bench-real</code> harness in the repo.</p>
 
     <h3>Query latency (p50)</h3>
@@ -685,7 +793,13 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <p>A typical "find and fix a bug" task: <b>~3.2K tokens</b> with recon vs <b>~100K+</b> with Read/Grep/Glob.</p>
 
     <!-- CHANGELOG -->
-    <h2 id="changelog"><span class="no">15</span>Changelog</h2>
+    </div>
+  </details>
+
+  <details class="section" id="changelog">
+    <summary><h2><span class="no">15</span>Changelog</h2></summary>
+    <div class="body">
+
     <p><b>v0.2.0</b> — Server-side repo enforcement.</p>
     <ul class="bul">
       <li>Server-side <code>max_repos</code>: <code>recon init</code> now registers each repo's canonical-path SHA-256 fingerprint with the worker via atomic <code>POST /v1/account/repos</code>.</li>
@@ -697,8 +811,17 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <p><b>v0.1.0</b> — Initial release. 12 tools, 9 languages, signed 24 MB Rust binary.</p>
 
     <!-- LICENSE -->
-    <h2 id="license"><span class="no">16</span>License</h2>
+    </div>
+  </details>
+
+  <details class="section" id="license">
+    <summary><h2><span class="no">16</span>License</h2></summary>
+    <div class="body">
+
     <p><b>recon</b> is proprietary software. © 2026. All rights reserved. Use is governed by the recon Terms of Service.</p>
+
+    </div>
+  </details>
 
     <div class="next">
       <a href="#quickstart">
@@ -712,28 +835,6 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     </div>
   </main>
 
-  <!-- TOC -->
-  <aside class="toc" aria-label="On this page">
-    <div class="lbl">On this page</div>
-    <ul>
-      <li><a href="#quickstart">Quickstart</a></li>
-      <li><a href="#install">Install</a></li>
-      <li><a href="#ide-setup">IDE setup</a></li>
-      <li><a href="#cli-account">CLI · Account</a></li>
-      <li><a href="#cli-project">CLI · Project</a></li>
-      <li><a href="#cli-server">CLI · Server</a></li>
-      <li><a href="#cli-query">CLI · Direct query</a></li>
-      <li><a href="#tools">MCP tools</a></li>
-      <li><a href="#filter-dsl">Filter DSL</a></li>
-      <li><a href="#configuration">Configuration</a></li>
-      <li><a href="#account">Account &amp; repos</a></li>
-      <li><a href="#troubleshooting">Troubleshooting</a></li>
-      <li><a href="#security">Security</a></li>
-      <li><a href="#performance">Performance</a></li>
-      <li><a href="#changelog">Changelog</a></li>
-      <li><a href="#license">License</a></li>
-    </ul>
-  </aside>
 </div>
 
 <script src="/js/docs-toc.js"></script>
