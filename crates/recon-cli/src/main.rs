@@ -86,6 +86,48 @@ impl Ide {
             }),
         }
     }
+
+    /// Where to write the strict-policy agent rules for this IDE.
+    ///
+    /// Two layouts:
+    /// - `Shared(path)` — rules block fenced by recon markers inside a file
+    ///   the project may also use for unrelated content (`CLAUDE.md`,
+    ///   `AGENTS.md`).  Append-only; never created from scratch when missing
+    ///   for `CLAUDE.md` so we don't shadow a hand-curated context file.
+    /// - `Dedicated(path, body)` — recon owns the file outright
+    ///   (`.cursor/rules/recon.mdc`, `.windsurf/rules/recon.md`).  Purge can
+    ///   simply delete it; no string surgery required.
+    fn agent_target(&self, repo: &Path) -> AgentTarget {
+        match self {
+            Ide::ClaudeCode => AgentTarget::Shared {
+                path: repo.join("CLAUDE.md"),
+                create_if_missing: false,
+            },
+            Ide::OpenCode => AgentTarget::Shared {
+                path: repo.join("AGENTS.md"),
+                create_if_missing: true,
+            },
+            Ide::Cursor => AgentTarget::Dedicated {
+                path: repo.join(".cursor").join("rules").join("recon.mdc"),
+                body: CURSOR_MDC.to_string(),
+            },
+            Ide::Windsurf => AgentTarget::Dedicated {
+                path: repo.join(".windsurf").join("rules").join("recon.md"),
+                body: WINDSURF_MD.to_string(),
+            },
+        }
+    }
+}
+
+enum AgentTarget {
+    Shared {
+        path: PathBuf,
+        create_if_missing: bool,
+    },
+    Dedicated {
+        path: PathBuf,
+        body: String,
+    },
 }
 
 /// Returns the Windsurf global MCP config path.
@@ -224,8 +266,18 @@ enum Command {
     Stats,
     /// Force full re-index
     Reindex,
-    /// Delete all index data (.recon directory)
-    Purge,
+    /// Delete recon's index and (optionally) its IDE wiring
+    ///
+    /// With no flag: removes only `.recon/` (index, merkle snapshot, caches).
+    /// With `--mcp <ide>`: also removes the recon entry from that IDE's MCP
+    /// config, strips the strict-policy block from the matching agent file,
+    /// and frees this repo's slot in the global tracking registry — i.e. the
+    /// symmetric inverse of `recon init --mcp <ide>`.
+    Purge {
+        /// Tear down wiring for the given IDE (cc | oc | cursor | windsurf)
+        #[arg(long, value_enum)]
+        mcp: Option<Ide>,
+    },
     /// Show version
     Version,
     /// Upgrade recon to the latest published release.
@@ -292,6 +344,255 @@ fn maybe_migrate_license(repo: &Path) {
             );
         }
     }
+}
+
+// ── Agent rule wiring ──────────────────────────────────────────────────────────
+
+/// Stable markers used to delimit recon's block in shared agent files
+/// (`CLAUDE.md`, `AGENTS.md`).  `recon purge --mcp <ide>` strips the bytes
+/// between (and including) these markers, leaving the rest of the file intact.
+/// HTML comments rather than markdown headers because they survive arbitrary
+/// content reorgs around them.
+const RECON_RULES_START: &str = "<!-- recon:start -->";
+const RECON_RULES_END: &str = "<!-- recon:end -->";
+
+/// Strict policy body inserted into shared agent files.
+///
+/// Wording is deliberately blunt: Claude Code and equivalents have strong
+/// priors toward `Read`/`Grep`/`Glob`, and a soft "prefer" hint loses to
+/// those priors in practice.  The exception clause is the escape hatch when
+/// recon genuinely cannot answer (binaries, generated assets, freshly added
+/// files before reindex), gated on explicit user confirmation so the model
+/// cannot silently regress to the high-token path.
+const RECON_RULES_BODY: &str = "## recon MCP tools — strict policy
+
+For all code exploration in this repository, you MUST use the `code_*` tools \
+provided by the recon MCP server:
+
+- Reading code: `code_outline`, `code_skeleton`, `code_read_symbol` (instead of `Read`)
+- Searching: `code_find_symbol`, `code_find_refs`, `code_search`, `code_find_strings`, `code_multi_find` (instead of `Grep`)
+- Listing / orientation: `code_list`, `code_repo_map` (instead of `Glob`)
+- Index health: `code_stats`, `code_reindex`
+
+Do **not** use `Read`, `Grep`, or `Glob` on source files by default.
+
+**Exception.** If no `code_*` tool can answer the question — for example a \
+non-source file (JSON config, Markdown doc, generated asset), a freshly \
+created file the index has not picked up yet, or the recon index is \
+unavailable — you MAY use `Read`, `Grep`, or `Glob`, but only after:
+
+1. Stopping and asking the user for explicit permission, and
+2. Explaining which `code_*` tool you tried and the specific reason it could not answer.
+
+Do not silently fall back. The whole point of recon is the 15–30× token \
+reduction; defaulting to `Read`/`Grep`/`Glob` defeats it.";
+
+/// Cursor `.mdc` rule file.  Frontmatter `alwaysApply: true` makes Cursor
+/// inject the body on every prompt, matching the strict-policy intent.
+const CURSOR_MDC: &str = "---
+description: recon MCP tool usage policy (strict)
+alwaysApply: true
+---
+
+## recon MCP tools — strict policy
+
+For all code exploration in this repository, you MUST use the `code_*` tools \
+provided by the recon MCP server:
+
+- Reading code: `code_outline`, `code_skeleton`, `code_read_symbol` (instead of `Read`)
+- Searching: `code_find_symbol`, `code_find_refs`, `code_search`, `code_find_strings`, `code_multi_find` (instead of `Grep`)
+- Listing / orientation: `code_list`, `code_repo_map` (instead of `Glob`)
+- Index health: `code_stats`, `code_reindex`
+
+Do **not** use `Read`, `Grep`, or `Glob` on source files by default.
+
+**Exception.** If no `code_*` tool can answer the question — for example a \
+non-source file (JSON config, Markdown doc, generated asset), a freshly \
+created file the index has not picked up yet, or the recon index is \
+unavailable — you MAY use `Read`, `Grep`, or `Glob`, but only after:
+
+1. Stopping and asking the user for explicit permission, and
+2. Explaining which `code_*` tool you tried and the specific reason it could not answer.
+
+Do not silently fall back. The whole point of recon is the 15–30× token \
+reduction; defaulting to `Read`/`Grep`/`Glob` defeats it.
+";
+
+/// Windsurf rule file.  Frontmatter `trigger: always_on` is Windsurf's
+/// equivalent of Cursor's `alwaysApply: true`.
+const WINDSURF_MD: &str = "---
+description: recon MCP tool usage policy (strict)
+trigger: always_on
+---
+
+## recon MCP tools — strict policy
+
+For all code exploration in this repository, you MUST use the `code_*` tools \
+provided by the recon MCP server:
+
+- Reading code: `code_outline`, `code_skeleton`, `code_read_symbol` (instead of `Read`)
+- Searching: `code_find_symbol`, `code_find_refs`, `code_search`, `code_find_strings`, `code_multi_find` (instead of `Grep`)
+- Listing / orientation: `code_list`, `code_repo_map` (instead of `Glob`)
+- Index health: `code_stats`, `code_reindex`
+
+Do **not** use `Read`, `Grep`, or `Glob` on source files by default.
+
+**Exception.** If no `code_*` tool can answer the question — for example a \
+non-source file (JSON config, Markdown doc, generated asset), a freshly \
+created file the index has not picked up yet, or the recon index is \
+unavailable — you MAY use `Read`, `Grep`, or `Glob`, but only after:
+
+1. Stopping and asking the user for explicit permission, and
+2. Explaining which `code_*` tool you tried and the specific reason it could not answer.
+
+Do not silently fall back. The whole point of recon is the 15–30× token \
+reduction; defaulting to `Read`/`Grep`/`Glob` defeats it.
+";
+
+/// Render the fenced block recon writes into shared agent files.
+fn shared_block() -> String {
+    format!("{RECON_RULES_START}\n{RECON_RULES_BODY}\n{RECON_RULES_END}\n")
+}
+
+/// Write recon's strict agent rules for the chosen IDE.
+///
+/// - Shared targets (`CLAUDE.md`, `AGENTS.md`): append a marker-fenced block.
+///   Idempotent — already-present markers cause a skip with a stderr note.
+///   `CLAUDE.md` is never created from scratch (preserves the project's
+///   hand-curated context file convention).
+/// - Dedicated targets (`.cursor/rules/recon.mdc`, `.windsurf/rules/recon.md`):
+///   overwrite with the canonical body.  Safe because recon owns the path.
+fn write_agent_rules(ide: &Ide, repo: &Path) -> Result<()> {
+    match ide.agent_target(repo) {
+        AgentTarget::Shared {
+            path,
+            create_if_missing,
+        } => {
+            let exists = path.exists();
+            if !exists && !create_if_missing {
+                eprintln!(
+                    "Skipped agent rules: {} not found (create it manually, then re-run init)",
+                    path.display()
+                );
+                return Ok(());
+            }
+            let mut content = if exists {
+                std::fs::read_to_string(&path)?
+            } else {
+                String::new()
+            };
+            if content.contains(RECON_RULES_START) {
+                eprintln!("Agent rules already present in {}", path.display());
+                return Ok(());
+            }
+            // Separate from prior content with a blank line so the block
+            // doesn't run on; idempotent since we exit above on re-run.
+            if !content.is_empty() && !content.ends_with("\n\n") {
+                if content.ends_with('\n') {
+                    content.push('\n');
+                } else {
+                    content.push_str("\n\n");
+                }
+            }
+            content.push_str(&shared_block());
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, content)?;
+            eprintln!("Wrote recon rules block to {}", path.display());
+        }
+        AgentTarget::Dedicated { path, body } => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, body)?;
+            eprintln!("Wrote {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// Reverse of [`write_agent_rules`].
+///
+/// - Shared targets: strip the marker-fenced block (and any trailing blank
+///   line we inserted).  No-op if markers are absent or the file is gone.
+/// - Dedicated targets: delete the file outright.  No-op if absent.
+fn remove_agent_rules(ide: &Ide, repo: &Path) -> Result<()> {
+    match ide.agent_target(repo) {
+        AgentTarget::Shared { path, .. } => {
+            if !path.exists() {
+                return Ok(());
+            }
+            let content = std::fs::read_to_string(&path)?;
+            let Some(start) = content.find(RECON_RULES_START) else {
+                return Ok(());
+            };
+            // End marker must come *after* the start marker.
+            let after_start = start + RECON_RULES_START.len();
+            let Some(end_rel) = content[after_start..].find(RECON_RULES_END) else {
+                return Ok(());
+            };
+            let end = after_start + end_rel + RECON_RULES_END.len();
+            // Also consume the trailing newline that follows the end marker
+            // (and any blank line we inserted before the start marker), so
+            // we don't leak a vertical gap.
+            let mut head = content[..start].to_string();
+            while head.ends_with("\n\n") {
+                head.pop();
+            }
+            let mut tail_start = end;
+            let bytes = content.as_bytes();
+            if bytes.get(tail_start) == Some(&b'\n') {
+                tail_start += 1;
+            }
+            let tail = &content[tail_start..];
+            let mut new_content = head;
+            if !tail.is_empty() {
+                if !new_content.is_empty() && !new_content.ends_with('\n') {
+                    new_content.push('\n');
+                }
+                new_content.push_str(tail);
+            } else if !new_content.is_empty() && !new_content.ends_with('\n') {
+                new_content.push('\n');
+            }
+            std::fs::write(&path, new_content)?;
+            eprintln!("Removed recon rules block from {}", path.display());
+        }
+        AgentTarget::Dedicated { path, .. } => {
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+                eprintln!("Removed {}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reverse of [`write_mcp_config`]: drop the `recon` server entry from the
+/// IDE's MCP config, preserving any other servers the user has wired.  No-op
+/// if the file is absent or has no `recon` entry.
+fn remove_mcp_entry(ide: &Ide, repo: &Path) -> Result<()> {
+    let config_path = ide.config_abs_path(repo);
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&config_path)?;
+    let mut value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Ok(()), // Corrupt JSON — leave it for the user to fix.
+    };
+    let servers_key = ide.servers_key();
+    let removed = value
+        .get_mut(servers_key)
+        .and_then(|s| s.as_object_mut())
+        .map(|servers| servers.remove("recon").is_some())
+        .unwrap_or(false);
+    if !removed {
+        return Ok(());
+    }
+    std::fs::write(&config_path, serde_json::to_string_pretty(&value)?)?;
+    eprintln!("Removed recon entry from {}", config_path.display());
+    Ok(())
 }
 
 // ── MCP config ────────────────────────────────────────────────────────────────
@@ -670,13 +971,14 @@ async fn main() -> Result<()> {
             )
             .map_err(|e| anyhow::anyhow!("failed to update repos registry: {e}"))?;
 
-            // 2. Write IDE MCP config (only if --mcp was passed)
-            if let Some(ide) = mcp {
+            // 2. Write IDE MCP config + strict agent rules (only if --mcp was passed)
+            if let Some(ref ide) = mcp {
                 let recon_bin = std::env::current_exe()?
                     .canonicalize()?
                     .to_string_lossy()
                     .to_string();
-                write_mcp_config(&ide, &repo, &recon_bin)?;
+                write_mcp_config(ide, &repo, &recon_bin)?;
+                write_agent_rules(ide, &repo)?;
             }
 
             // 3. Add .recon/ to .gitignore if not already there
@@ -704,28 +1006,6 @@ async fn main() -> Result<()> {
                 }
                 writeln!(f, ".recon/")?;
                 eprintln!("Added .recon/ to .gitignore");
-            }
-
-            // 4. Append CLAUDE.md hint if not already present
-            let claude_md = repo.join("CLAUDE.md");
-            let recon_hint = "Prefer code_* tools (code_outline, code_skeleton, \
-                code_find_symbol, code_search, code_repo_map) over Read/Grep/Glob \
-                for code exploration.";
-            let needs_hint = if claude_md.exists() {
-                let content = std::fs::read_to_string(&claude_md)?;
-                !content.contains("code_*")
-            } else {
-                false // don't create CLAUDE.md if it doesn't exist
-            };
-            if needs_hint {
-                use std::io::Write;
-                let mut f = std::fs::OpenOptions::new().append(true).open(&claude_md)?;
-                let content = std::fs::read_to_string(&claude_md)?;
-                if !content.ends_with('\n') {
-                    writeln!(f)?;
-                }
-                writeln!(f, "\n## recon MCP tools\n{recon_hint}")?;
-                eprintln!("Added recon hint to CLAUDE.md");
             }
 
             eprintln!("Done. Restart your IDE to activate recon tools.");
@@ -1085,7 +1365,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Purge => {
+        Command::Purge { mcp } => {
             let repo = repo.canonicalize()?;
             let store_dir = repo.join(".recon");
             if store_dir.exists() {
@@ -1093,6 +1373,26 @@ async fn main() -> Result<()> {
                 eprintln!("Purged {}", store_dir.display());
             } else {
                 eprintln!("No index found at {}", store_dir.display());
+            }
+
+            match mcp {
+                Some(ide) => {
+                    remove_mcp_entry(&ide, &repo)?;
+                    remove_agent_rules(&ide, &repo)?;
+                    let config_dir = recon_server::license::global_config_dir();
+                    let repo_path_str = repo.to_string_lossy().to_string();
+                    match recon_server::repos::remove_repo(&config_dir, &repo_path_str) {
+                        Ok(true) => eprintln!("Released repo slot in {}", config_dir.display()),
+                        Ok(false) => {}
+                        Err(e) => eprintln!("Failed to update repos registry: {e}"),
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "Note: MCP config and agent rules left in place. \
+                         Run `recon purge --mcp <ide>` to fully reverse `recon init`."
+                    );
+                }
             }
             Ok(())
         }
@@ -1494,5 +1794,161 @@ mod tests {
             maybe_migrate_license(repo_dir.path());
         });
         assert!(result.is_ok(), "should not panic when nothing to migrate");
+    }
+
+    // ── write_agent_rules / remove_agent_rules ───────────────────────────────
+
+    #[test]
+    fn write_agent_rules_claude_skips_when_file_missing() {
+        let dir = tempdir().unwrap();
+        write_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        assert!(
+            !dir.path().join("CLAUDE.md").exists(),
+            "must not create CLAUDE.md from scratch"
+        );
+    }
+
+    #[test]
+    fn write_agent_rules_claude_appends_when_file_exists() {
+        let dir = tempdir().unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+        fs::write(&claude, "# Project\n\nSome existing content.\n").unwrap();
+        write_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        let content = fs::read_to_string(&claude).unwrap();
+        assert!(content.starts_with("# Project"));
+        assert!(content.contains(RECON_RULES_START));
+        assert!(content.contains("strict policy"));
+        assert!(content.contains("asking the user"));
+        assert!(content.contains(RECON_RULES_END));
+    }
+
+    #[test]
+    fn write_agent_rules_claude_idempotent() {
+        let dir = tempdir().unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+        fs::write(&claude, "# Project\n").unwrap();
+        write_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        let after_first = fs::read_to_string(&claude).unwrap();
+        write_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        let after_second = fs::read_to_string(&claude).unwrap();
+        assert_eq!(
+            after_first, after_second,
+            "second run must not duplicate the rules block"
+        );
+    }
+
+    #[test]
+    fn write_agent_rules_opencode_creates_agents_md() {
+        let dir = tempdir().unwrap();
+        write_agent_rules(&Ide::OpenCode, dir.path()).unwrap();
+        let agents = dir.path().join("AGENTS.md");
+        assert!(agents.exists());
+        let content = fs::read_to_string(&agents).unwrap();
+        assert!(content.contains(RECON_RULES_START));
+        assert!(content.contains("strict policy"));
+    }
+
+    #[test]
+    fn write_agent_rules_cursor_writes_dedicated_mdc() {
+        let dir = tempdir().unwrap();
+        write_agent_rules(&Ide::Cursor, dir.path()).unwrap();
+        let mdc = dir.path().join(".cursor").join("rules").join("recon.mdc");
+        assert!(mdc.exists());
+        let content = fs::read_to_string(&mdc).unwrap();
+        assert!(content.starts_with("---\n"));
+        assert!(content.contains("alwaysApply: true"));
+        assert!(content.contains("strict policy"));
+        assert!(content.contains("asking the user"));
+    }
+
+    #[test]
+    fn write_agent_rules_windsurf_writes_dedicated_md() {
+        let dir = tempdir().unwrap();
+        write_agent_rules(&Ide::Windsurf, dir.path()).unwrap();
+        let md = dir.path().join(".windsurf").join("rules").join("recon.md");
+        assert!(md.exists());
+        let content = fs::read_to_string(&md).unwrap();
+        assert!(content.contains("trigger: always_on"));
+        assert!(content.contains("strict policy"));
+    }
+
+    #[test]
+    fn remove_agent_rules_strips_block_from_claude() {
+        let dir = tempdir().unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+        fs::write(&claude, "# Project\n\nKeep me.\n").unwrap();
+        write_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        remove_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        let content = fs::read_to_string(&claude).unwrap();
+        assert!(content.contains("# Project"));
+        assert!(content.contains("Keep me."));
+        assert!(!content.contains(RECON_RULES_START));
+        assert!(!content.contains("strict policy"));
+    }
+
+    #[test]
+    fn remove_agent_rules_deletes_dedicated_files() {
+        let dir = tempdir().unwrap();
+        write_agent_rules(&Ide::Cursor, dir.path()).unwrap();
+        write_agent_rules(&Ide::Windsurf, dir.path()).unwrap();
+        remove_agent_rules(&Ide::Cursor, dir.path()).unwrap();
+        remove_agent_rules(&Ide::Windsurf, dir.path()).unwrap();
+        assert!(!dir.path().join(".cursor/rules/recon.mdc").exists());
+        assert!(!dir.path().join(".windsurf/rules/recon.md").exists());
+    }
+
+    #[test]
+    fn remove_agent_rules_no_op_when_block_absent() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("AGENTS.md");
+        fs::write(&agents, "# Agents\n\nUnrelated content.\n").unwrap();
+        remove_agent_rules(&Ide::OpenCode, dir.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&agents).unwrap(),
+            "# Agents\n\nUnrelated content.\n"
+        );
+    }
+
+    #[test]
+    fn remove_agent_rules_no_op_when_file_missing() {
+        let dir = tempdir().unwrap();
+        // No CLAUDE.md, no AGENTS.md, no recon.mdc — all four must be no-ops.
+        remove_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        remove_agent_rules(&Ide::OpenCode, dir.path()).unwrap();
+        remove_agent_rules(&Ide::Cursor, dir.path()).unwrap();
+    }
+
+    // ── remove_mcp_entry ─────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_mcp_entry_drops_recon_preserves_others() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::ClaudeCode, dir.path(), "/usr/bin/recon").unwrap();
+        // Inject another server alongside recon.
+        let path = dir.path().join(".mcp.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        v["mcpServers"]["other"] = serde_json::json!({"command": "/bin/other"});
+        fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        remove_mcp_entry(&Ide::ClaudeCode, dir.path()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v["mcpServers"]["recon"].is_null());
+        assert_eq!(v["mcpServers"]["other"]["command"], "/bin/other");
+    }
+
+    #[test]
+    fn remove_mcp_entry_no_op_when_config_missing() {
+        let dir = tempdir().unwrap();
+        remove_mcp_entry(&Ide::ClaudeCode, dir.path()).unwrap();
+    }
+
+    #[test]
+    fn remove_mcp_entry_handles_corrupt_json_gracefully() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".mcp.json"), "not json {{").unwrap();
+        // Must not error: corrupt config is the user's problem to fix.
+        remove_mcp_entry(&Ide::ClaudeCode, dir.path()).unwrap();
     }
 }

@@ -87,6 +87,22 @@ pub fn add_or_update_repo(
     save_repos(config_dir, &repos)
 }
 
+/// Remove a repo from the registry by canonical path.
+///
+/// Returns `Ok(true)` if an entry was removed, `Ok(false)` if `path` was not
+/// in the registry. Used by `recon purge --mcp <ide>` to free a license slot
+/// when the user tears down recon's wiring in a project.
+pub fn remove_repo(config_dir: &Path, path: &str) -> Result<bool, String> {
+    let mut repos = load_repos(config_dir)?;
+    let before = repos.len();
+    repos.retain(|r| r.path != path);
+    if repos.len() == before {
+        return Ok(false);
+    }
+    save_repos(config_dir, &repos)?;
+    Ok(true)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -219,6 +235,33 @@ mod tests {
         add_or_update_repo(dir.path(), "/repo/c", 30, 150).unwrap();
         let repos = load_repos(dir.path()).unwrap();
         assert_eq!(repos.len(), 3);
+    }
+
+    // ── remove_repo ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_existing_repo_returns_true() {
+        let dir = tempdir().unwrap();
+        add_or_update_repo(dir.path(), "/repo/a", 10, 50).unwrap();
+        add_or_update_repo(dir.path(), "/repo/b", 20, 100).unwrap();
+        assert!(remove_repo(dir.path(), "/repo/a").unwrap());
+        let repos = load_repos(dir.path()).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].path, "/repo/b");
+    }
+
+    #[test]
+    fn remove_unknown_repo_returns_false() {
+        let dir = tempdir().unwrap();
+        add_or_update_repo(dir.path(), "/repo/a", 10, 50).unwrap();
+        assert!(!remove_repo(dir.path(), "/repo/missing").unwrap());
+        assert_eq!(load_repos(dir.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remove_repo_on_missing_registry_returns_false() {
+        let dir = tempdir().unwrap();
+        assert!(!remove_repo(dir.path(), "/repo/a").unwrap());
     }
 
     #[test]
