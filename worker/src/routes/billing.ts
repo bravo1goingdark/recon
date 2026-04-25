@@ -730,6 +730,7 @@ async function ensurePlanForTier(
     currency,
     period: "monthly",
     interval: 1,
+    description: planDescriptionFor(tierName),
   });
 
   await db
@@ -778,4 +779,24 @@ function getCfCountry(req: Request): string | undefined {
 
 function isoFromUnix(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toISOString();
+}
+
+/**
+ * Customer-facing plan description shown on Razorpay's hosted checkout
+ * and the receipt email. Locked at plan-creation time, so any edit here
+ * only takes effect for *new* (tier, currency) plans — purge
+ * subscription_plans before the next subscriber wants the new copy.
+ *
+ * Numbers mirror tiers.ts. Kept compact (single line) because Razorpay's
+ * checkout page truncates long descriptions.
+ */
+function planDescriptionFor(tierName: string): string {
+  switch (tierName) {
+    case "Pro":
+      return "Up to 10 repos · 5,000 files/repo · 200K LOC. Priority support. Cancel anytime, access continues until period end.";
+    case "Team":
+      return "Up to 25 repos · 50,000 files/repo · 4M LOC. Priority support. Cancel anytime, access continues until period end.";
+    default:
+      return `recon ${tierName} — monthly subscription`;
+  }
 }

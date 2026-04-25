@@ -35,6 +35,15 @@ export async function createPlan(
     currency: string;
     period: "daily" | "weekly" | "monthly" | "yearly";
     interval: number;
+    /**
+     * Description shown on Razorpay's hosted checkout and in the customer's
+     * receipt email. Must be set explicitly per (tier, currency) so it
+     * actually communicates what's included; the previous generic
+     * "monthly subscription" copy left customers guessing what they paid
+     * for. Locked at plan-creation time, so plan_id cache must be purged
+     * to roll out new copy.
+     */
+    description: string;
   },
 ): Promise<RazorpayPlan> {
   return rpPost<RazorpayPlan>(keyId, keySecret, "/plans", {
@@ -42,7 +51,7 @@ export async function createPlan(
     interval: opts.interval,
     item: {
       name: `recon ${opts.tier}`,
-      description: `recon ${opts.tier} — ${opts.period} subscription`,
+      description: opts.description,
       amount: opts.amount,
       currency: opts.currency,
     },
