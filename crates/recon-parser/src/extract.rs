@@ -987,6 +987,70 @@ const DefaultPort = 8080
     }
 
     #[test]
+    fn tsx_basic() {
+        let src = br#"
+import React from "react";
+
+export interface ButtonProps {
+    label: string;
+    onClick: () => void;
+}
+
+export class Button extends React.Component<ButtonProps> {
+    render() {
+        return <button onClick={this.props.onClick}>{this.props.label}</button>;
+    }
+}
+
+export function PrimaryButton(props: ButtonProps) {
+    return <Button {...props} />;
+}
+"#;
+        let result = extract_symbols(src, Language::Tsx, Path::new("Button.tsx"));
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"ButtonProps"),
+            "missing ButtonProps interface: {names:?}"
+        );
+        assert!(names.contains(&"Button"), "missing Button class: {names:?}");
+        assert!(
+            names.contains(&"PrimaryButton"),
+            "missing PrimaryButton fn: {names:?}"
+        );
+        assert!(
+            names.contains(&"render"),
+            "missing render method: {names:?}"
+        );
+    }
+
+    #[test]
+    fn javascript_basic() {
+        let src = br#"
+export class Server {
+    constructor(config) {
+        this.config = config;
+    }
+
+    start() {
+        console.log("starting");
+    }
+}
+
+export function createServer(config) {
+    return new Server(config);
+}
+"#;
+        let result = extract_symbols(src, Language::JavaScript, Path::new("server.js"));
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Server"), "missing Server class: {names:?}");
+        assert!(names.contains(&"start"), "missing start method: {names:?}");
+        assert!(
+            names.contains(&"createServer"),
+            "missing createServer fn: {names:?}"
+        );
+    }
+
+    #[test]
     fn qualified_names_work() {
         let src = br#"
 pub struct Foo {
