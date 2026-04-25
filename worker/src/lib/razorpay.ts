@@ -102,27 +102,18 @@ export async function createSubscription(
     total_count: number;
     customer_notify: boolean;
     notes: Record<string, string>;
-    /**
-     * URL Razorpay redirects the user to after they complete authorisation
-     * on the hosted short_url page. Without this, the user lands on
-     * Razorpay's generic "Payment Successful" page and has no path back
-     * to our dashboard. Pair with `callback_method: "get"`.
-     */
-    callback_url?: string;
-    callback_method?: "get";
   },
 ): Promise<RazorpaySubscription> {
+  // The /subscriptions API does NOT accept callback_url / callback_method —
+  // Razorpay returns 400 if you send them. The post-auth redirect is
+  // configured client-side via the Checkout JS SDK (Razorpay() constructor
+  // with `callback_url` + `redirect: true`), not on this server-side API
+  // call. See site/js/pricing.js subscribeToTier for that flow.
   return rpPost<RazorpaySubscription>(keyId, keySecret, "/subscriptions", {
     plan_id: opts.plan_id,
     total_count: opts.total_count,
     customer_notify: opts.customer_notify ? 1 : 0,
     notes: opts.notes,
-    ...(opts.callback_url
-      ? {
-          callback_url: opts.callback_url,
-          callback_method: opts.callback_method ?? "get",
-        }
-      : {}),
   });
 }
 

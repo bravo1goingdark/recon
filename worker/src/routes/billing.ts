@@ -167,12 +167,6 @@ billingRoutes.post(
       // if our post-Razorpay UPDATE below fails (network drop, isolate kill),
       // the eventual subscription.activated webhook still finds the row by
       // joining on notes.placeholder_id.
-      //
-      // callback_url is what Razorpay redirects to after the user finishes
-      // authorising the mandate. Without it they get stranded on Razorpay's
-      // hosted "Payment successful" page. `?just_paid=1` flags the dashboard
-      // to poll /v1/billing/portal for a few seconds until the webhook lands.
-      const callbackUrl = `${c.env.FRONTEND_URL.replace(/\/$/, "")}/dashboard?just_paid=1`;
       sub = await createSubscription(
         c.env.RAZORPAY_KEY_ID,
         c.env.RAZORPAY_KEY_SECRET,
@@ -186,8 +180,6 @@ billingRoutes.post(
             currency,
             placeholder_id: placeholder.id,
           },
-          callback_url: callbackUrl,
-          callback_method: "get",
         },
       );
     } catch (err) {
@@ -227,7 +219,15 @@ billingRoutes.post(
 
     return c.json({
       subscription_id: sub.id,
+      // short_url stays in the response as the JS-disabled fallback path —
+      // a user without the Checkout SDK can still complete auth on
+      // Razorpay's hosted page (just won't get auto-redirected back).
       short_url: sub.short_url,
+      // key_id is required by the Checkout SDK constructor on the
+      // frontend; exposing only the publishable key (rzp_live_… key_id,
+      // never the secret) is safe and matches Razorpay's documented
+      // integration pattern.
+      key_id: c.env.RAZORPAY_KEY_ID,
       tier: tierConfig.name,
       currency,
       price_display: price.display,

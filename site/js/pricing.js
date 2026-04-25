@@ -161,16 +161,62 @@ async function subscribeToTier(tierName) {
 
     var data = await resp.json();
 
-    // Full-page redirect to Razorpay's hosted subscription page. The user
-    // authorises the mandate there; on success Razorpay redirects back to
-    // our callback URL. The webhook is what actually grants the tier;
-    // this redirect is UX.
-    if (data.short_url) {
-      window.location.href = data.short_url;
+    // Open Razorpay's Checkout SDK in an in-page modal. The SDK handles
+    // mandate authorisation (UPI / NetBanking / card) and on success does
+    // a full-page redirect to our `callback_url` (with redirect: true).
+    // The webhook is the authoritative tier-grant; this redirect is UX
+    // — the dashboard polls /v1/billing/portal until the webhook lands.
+    //
+    // Why not the create-subscription API's callback_url? Razorpay's
+    // /subscriptions endpoint rejects that field with 400 — the redirect
+    // is configured here on the SDK constructor, not server-side.
+    //
+    // Falls back to the hosted short_url page if the SDK isn't loaded
+    // (CSP, ad-blocker, etc.) — user still completes auth, just without
+    // the auto-redirect-back.
+    if (typeof Razorpay === "undefined") {
+      if (data.short_url) {
+        window.location.href = data.short_url;
+        return;
+      }
+      alert("Unexpected response — no checkout URL returned.");
       return;
     }
 
-    alert("Unexpected response — no checkout URL returned.");
+    var rzp = new Razorpay({
+      key: data.key_id,
+      subscription_id: data.subscription_id,
+      name: "recon",
+      description: tierName + " plan",
+      callback_url:
+        window.location.origin + "/dashboard?just_paid=1",
+      redirect: true,
+      prefill: currentUser
+        ? {
+            name: currentUser.github_username || "",
+            email: currentUser.email || "",
+          }
+        : {},
+      notes: {
+        tier: tierName,
+        currency: activeCurrency,
+      },
+      theme: { color: "#b07040" }, // matches site --clay accent
+      modal: {
+        ondismiss: function () {
+          // User closed the modal without finishing auth — restore the
+          // subscribe button so they can retry. The placeholder row in
+          // D1 will be cleaned up by the webhook never firing (sub is
+          // still 'created' status; the user can /subscribe again with
+          // the cancel-at-period-end flow if they get stuck).
+          if (btn) {
+            btn.textContent = "Subscribe to " + tierName + " →";
+            btn.disabled = false;
+          }
+        },
+      },
+    });
+    rzp.open();
   } catch (e) {
     alert("Payment error: " + e.message);
     if (btn) {
