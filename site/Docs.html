@@ -15,6 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/nav-menu.css">
 <style>
   :root{
     --paper:       oklch(98.5% 0.004 80);
@@ -93,7 +94,7 @@
   nav.top ul a:hover{color:var(--ink)}
   nav.top .ship{font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:0.02em}
   nav.top .ship span{color:var(--clay)}
-  @media (max-width:900px){ nav.top ul{display:none} nav.top{padding:18px 24px} }
+  @media (max-width:900px){ nav.top ul{display:none} nav.top{padding:18px 24px} .nav-burger{display:inline-flex} }
 
   /* LAYOUT — two-column: sidebar + main. Right "On this page" rail removed. */
   .shell{display:grid;grid-template-columns:240px minmax(0,1fr);gap:56px;max-width:1080px;margin:0 auto;padding:48px 40px 120px}
@@ -210,8 +211,25 @@
       font-size:14px;
     "><span id="theme-icon">◑</span></button>
     <div class="ship">v0.2.0 · <span>shipping</span></div>
+    <button class="nav-burger" id="nav-burger" aria-label="Open menu" aria-controls="nav-sheet" aria-expanded="false">
+      <span class="bars"><span></span></span>
+    </button>
   </div>
 </nav>
+
+<div class="nav-sheet" id="nav-sheet" role="dialog" aria-modal="true" aria-label="Site menu">
+  <ul>
+    <li><a href="index.html#tools">Tools</a></li>
+    <li><a href="index.html#how">How it works</a></li>
+    <li><a href="index.html#benchmarks">Benchmarks</a></li>
+    <li><a href="index.html#install">Install</a></li>
+    <li><a href="Docs.html">Docs</a></li>
+    <li><a href="/pricing">Pricing</a></li>
+  </ul>
+  <div class="sheet-cta">
+    <a href="/login">Sign in</a>
+  </div>
+</div>
 
 <div class="shell">
 
@@ -752,6 +770,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
 <script src="/js/docs-toc.js"></script>
 <script src="/js/theme.js"></script>
 <script src="/js/copy-buttons.js"></script>
+<script src="/js/nav-menu.js"></script>
 
 </body>
 </html>

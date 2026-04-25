@@ -1,0 +1,56 @@
+/* Mobile nav-burger + slide-down sheet — shared across every page that
+   uses `nav.top`. Pairs with /js/nav-menu.js. The breakpoint matches
+   the existing mobile rule each page already has (≤720px on landing /
+   pricing / login / dashboard, ≤900px on Docs); the burger appears
+   wherever `nav.top ul` is hidden. */
+
+.nav-burger{
+  display:none;background:none;border:1px solid var(--rule);border-radius:6px;
+  width:36px;height:36px;cursor:pointer;align-items:center;justify-content:center;
+  padding:0;color:var(--ink-2);transition:border-color .15s,color .15s;
+}
+.nav-burger:hover{color:var(--ink);border-color:var(--ink-3)}
+.nav-burger .bars{position:relative;width:16px;height:12px;display:block}
+.nav-burger .bars::before,.nav-burger .bars::after,.nav-burger .bars span{
+  content:"";position:absolute;left:0;right:0;height:1.5px;background:currentColor;
+  transition:transform .2s ease,opacity .15s ease;
+}
+.nav-burger .bars::before{top:0}
+.nav-burger .bars span{top:50%;transform:translateY(-50%);display:block}
+.nav-burger .bars::after{bottom:0}
+.nav-burger[aria-expanded="true"] .bars::before{transform:translateY(5px) rotate(45deg)}
+.nav-burger[aria-expanded="true"] .bars span{opacity:0}
+.nav-burger[aria-expanded="true"] .bars::after{transform:translateY(-5px) rotate(-45deg)}
+
+.nav-sheet{
+  display:none;position:fixed;left:0;right:0;top:0;bottom:0;
+  background:color-mix(in oklab, var(--paper) 96%, transparent);
+  backdrop-filter:saturate(1.2) blur(12px);
+  z-index:9;padding:80px 24px 32px;overflow-y:auto;
+  opacity:0;transition:opacity .18s ease;
+}
+.nav-sheet.open{display:block;opacity:1}
+.nav-sheet ul{list-style:none;display:flex;flex-direction:column;gap:0;padding:0;margin:0}
+.nav-sheet li{border-bottom:1px solid var(--rule-soft)}
+.nav-sheet li:first-child{border-top:1px solid var(--rule-soft)}
+.nav-sheet a{
+  display:block;padding:18px 4px;font-size:18px;color:var(--ink);
+  font-family:var(--serif);letter-spacing:-.01em;text-decoration:none;
+}
+.nav-sheet a:hover{color:var(--clay)}
+.nav-sheet .sheet-cta{margin-top:24px;display:flex;gap:12px;flex-wrap:wrap}
+.nav-sheet .sheet-cta a{
+  flex:1;min-width:140px;padding:12px 16px;font-size:14px;font-family:var(--sans);
+  border:1px solid var(--rule);border-radius:6px;text-align:center;color:var(--ink-2);
+}
+body.nav-open{overflow:hidden}
+
+/* Show the burger only at narrow widths. Pages whose `nav.top ul` rule
+   uses 900px (Docs) override this with their own `.nav-burger{display:inline-flex}`
+   inside their own breakpoint block. */
+@media (max-width:720px){
+  .nav-burger{display:inline-flex}
+}
+@media (min-width:721px){
+  .nav-sheet{display:none !important}
+}

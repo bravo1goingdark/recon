@@ -750,14 +750,16 @@ function wireControls() {
     });
   }
 
-  var logoutLink = document.getElementById("logout-link");
-  if (logoutLink) {
-    logoutLink.addEventListener("click", function (e) {
+  // Both the desktop nav link and the mobile-sheet entry use the same
+  // logout handler. `logout` is defined in auth.js — shared across pages.
+  ["logout-link", "logout-link-sheet"].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", function (e) {
       e.preventDefault();
-      // `logout` is defined in auth.js — shared across pages.
       if (typeof logout === "function") logout();
     });
-  }
+  });
 
   var closeBtn = document.getElementById("close-key-modal-btn");
   if (closeBtn) closeBtn.addEventListener("click", closeKeyModal);

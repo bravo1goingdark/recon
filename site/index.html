@@ -48,6 +48,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/nav-menu.css">
 <style>
   :root{
     --paper:       oklch(98.5% 0.004 80);
@@ -397,8 +398,27 @@
     ">
       <span id="theme-icon">◑</span>
     </button>
+    <button class="nav-burger" id="nav-burger" aria-label="Open menu" aria-controls="nav-sheet" aria-expanded="false">
+      <span class="bars"><span></span></span>
+    </button>
   </div>
 </nav>
+
+<div class="nav-sheet" id="nav-sheet" role="dialog" aria-modal="true" aria-label="Site menu">
+  <ul>
+    <li><a href="#tools">Tools</a></li>
+    <li><a href="#how">How it works</a></li>
+    <li><a href="#benchmarks">Benchmarks</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#faq">FAQ</a></li>
+    <li><a href="./Docs.html">Docs</a></li>
+    <li><a href="/pricing">Pricing</a></li>
+  </ul>
+  <div class="sheet-cta">
+    <a href="/login">Sign in</a>
+  </div>
+</div>
+
 
 <!-- HERO -->
 <header class="hero">
@@ -1004,5 +1024,6 @@ recon init --mcp windsurf  <span class="c"># Windsurf</span></pre>
 <script src="/js/auth.js"></script>
 <script src="/js/os-tabs.js"></script>
 <script src="/js/copy-buttons.js"></script>
+<script src="/js/nav-menu.js"></script>
 </body>
 </html>
