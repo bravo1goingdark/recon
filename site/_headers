@@ -9,7 +9,14 @@
   Referrer-Policy: strict-origin-when-cross-origin
   # Block legacy features the landing/dashboard never use. Short list
   # keeps the header readable and avoids the noise of exhaustive `=()`.
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()
+  #
+  # accelerometer / gyroscope are explicitly allowed for Razorpay's
+  # checkout iframe — its SDK uses motion sensors for device-fingerprint
+  # / fraud-risk signals during mandate authorisation. Browsers default-
+  # deny these features in cross-origin iframes unless the parent
+  # explicitly delegates them, so without this the Razorpay modal logs
+  # "blocked by permissions policy" and risk scoring degrades.
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=(), accelerometer=(self "https://checkout.razorpay.com" "https://api.razorpay.com"), gyroscope=(self "https://checkout.razorpay.com" "https://api.razorpay.com")
   # HSTS 2 years + includeSubDomains + preload-eligible. Once preload is
   # submitted, browsers refuse plain-HTTP for mcprecon.pages.dev forever.
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
