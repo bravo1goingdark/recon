@@ -1,17 +1,20 @@
 /* Active TOC + sidebar highlight on scroll for /Docs.html */
 (function () {
   var ids = [
-    "introduction",
+    "quickstart",
     "install",
-    "configuration",
-    "shapes",
-    "tiers",
-    "incremental",
-    "filter-dsl",
+    "ide-setup",
+    "cli-account",
+    "cli-project",
+    "cli-server",
+    "cli-query",
     "tools",
+    "filter-dsl",
+    "configuration",
+    "account",
+    "troubleshooting",
     "security",
     "performance",
-    "adrs",
     "changelog",
     "license",
   ];
