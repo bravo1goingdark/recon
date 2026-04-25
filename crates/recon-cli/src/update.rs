@@ -68,7 +68,8 @@ fn current_target() -> Result<&'static str> {
     {
         Err(anyhow!(
             "recon update: no published release for this platform. \
-             Rebuild from source: cargo install --git https://github.com/bravo1goingdark/recon recon-cli"
+             See https://mcprecon.pages.dev/Docs#install for supported \
+             targets, or contact support if you need a build for yours."
         ))
     }
 }
