@@ -37,6 +37,9 @@ import migration0006 from "../migrations/0006_webhook_events_dropped.sql?raw";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error vite `?raw` import — string, no type declaration
 import migration0007 from "../migrations/0007_webhook_events_seen.sql?raw";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error vite `?raw` import — string, no type declaration
+import migration0008 from "../migrations/0008_subscription_currency.sql?raw";
 
 /**
  * Split a SQL file into individual statements.
@@ -76,6 +79,10 @@ const MIGRATIONS = [
   {
     name: "0007_webhook_events_seen",
     queries: splitSql(migration0007 as string),
+  },
+  {
+    name: "0008_subscription_currency",
+    queries: splitSql(migration0008 as string),
   },
 ];
 

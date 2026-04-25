@@ -3,6 +3,7 @@ import {
   createPlan,
   createSubscription,
   cancelSubscription,
+  fetchSubscription,
   verifyWebhookSignature,
 } from "../lib/razorpay";
 import { getTierConfig, getTierPrice, type Currency } from "../lib/tiers";
@@ -88,6 +89,103 @@ billingRoutes.post(
       );
     }
 
+    // Resume-or-swap: handle a previously-abandoned subscribe attempt.
+    //
+    // If the user has a 'created' placeholder still sitting in the table
+    // (modal opened, never authorised), we want the next click to "just
+    // work" without forcing them to find and click Cancel first:
+    //
+    //   - Same tier+currency AND Razorpay still has it in 'created'    → resume
+    //     (return the same subscription_id + a fresh short_url)
+    //   - Different tier/currency, OR Razorpay let it lapse to a non-
+    //     'created' state, OR Razorpay 404'd it                        → swap
+    //     (cancel upstream best-effort, delete D1 row, fall through to
+    //     fresh INSERT below)
+    //
+    // Real, paying subs (status in authenticated/active/pending/halted)
+    // still 409 — those represent money in motion and the user must
+    // cancel them explicitly via /v1/billing/cancel before changing tier.
+    const existing = await db
+      .prepare(
+        `SELECT id, razorpay_subscription_id, tier, currency, status
+         FROM subscriptions
+         WHERE user_id = ?
+           AND status IN ('created','authenticated','active','pending','halted')
+           AND cancel_at_period_end = 0
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .bind(user.id)
+      .first<{
+        id: string;
+        razorpay_subscription_id: string | null;
+        tier: string;
+        currency: string;
+        status: string;
+      }>();
+
+    if (existing && existing.status !== "created") {
+      return c.json(
+        {
+          error:
+            "You already have an active subscription. Cancel it from the dashboard before subscribing to a different tier.",
+          existing_tier: existing.tier,
+          existing_status: existing.status,
+        },
+        409,
+      );
+    }
+
+    if (existing && existing.status === "created") {
+      const sameTierCurrency =
+        existing.tier === tierConfig.name && existing.currency === currency;
+      if (sameTierCurrency && existing.razorpay_subscription_id) {
+        let upstream:
+          | Awaited<ReturnType<typeof fetchSubscription>>
+          | null = null;
+        try {
+          upstream = await fetchSubscription(
+            c.env.RAZORPAY_KEY_ID,
+            c.env.RAZORPAY_KEY_SECRET,
+            existing.razorpay_subscription_id,
+          );
+        } catch (_) {
+          // Razorpay 404 / network error → treat as expired; fall to swap.
+          upstream = null;
+        }
+        if (upstream && upstream.status === "created") {
+          return c.json({
+            subscription_id: existing.razorpay_subscription_id,
+            short_url: upstream.short_url,
+            key_id: c.env.RAZORPAY_KEY_ID,
+            tier: tierConfig.name,
+            currency,
+            price_display: price.display,
+            resumed: true,
+          });
+        }
+      }
+      // Swap: cancel upstream best-effort and drop the placeholder so the
+      // atomic INSERT below can claim a fresh slot. Failures from Razorpay
+      // (sub already expired/cancelled) are non-fatal — we proceed with
+      // the local cleanup either way.
+      if (existing.razorpay_subscription_id) {
+        try {
+          await cancelSubscription(
+            c.env.RAZORPAY_KEY_ID,
+            c.env.RAZORPAY_KEY_SECRET,
+            existing.razorpay_subscription_id,
+            false,
+          );
+        } catch (_) {
+          // Already-cancelled or expired upstream — fine.
+        }
+      }
+      await db
+        .prepare("DELETE FROM subscriptions WHERE id = ?")
+        .bind(existing.id)
+        .run();
+    }
+
     // Race-free placeholder INSERT.
     //
     // The old shape was SELECT-existing → call Razorpay → INSERT row. Two
@@ -104,8 +202,8 @@ billingRoutes.post(
     // is a legitimate flow).
     const placeholder = await db
       .prepare(
-        `INSERT INTO subscriptions (user_id, tier, status)
-         SELECT ?, ?, 'created'
+        `INSERT INTO subscriptions (user_id, tier, currency, status)
+         SELECT ?, ?, ?, 'created'
          WHERE NOT EXISTS (
            SELECT 1 FROM subscriptions
            WHERE user_id = ?
@@ -114,12 +212,12 @@ billingRoutes.post(
          )
          RETURNING id`,
       )
-      .bind(user.id, tierConfig.name, user.id)
+      .bind(user.id, tierConfig.name, currency, user.id)
       .first<{ id: string }>();
     if (!placeholder) {
-      // Re-read whatever blocked us so the 409 has the same shape clients
-      // already depend on (`existing_tier` / `existing_status`).
-      const existing = await db
+      // Lost the race against a concurrent /subscribe that just claimed
+      // the slot (resume-or-swap above happened in another request).
+      const blocker = await db
         .prepare(
           `SELECT tier, status FROM subscriptions
            WHERE user_id = ?
@@ -133,8 +231,8 @@ billingRoutes.post(
         {
           error:
             "You already have an active subscription. Cancel it from the dashboard before subscribing to a different tier.",
-          existing_tier: existing?.tier ?? null,
-          existing_status: existing?.status ?? null,
+          existing_tier: blocker?.tier ?? null,
+          existing_status: blocker?.status ?? null,
         },
         409,
       );
@@ -260,7 +358,7 @@ billingRoutes.post(
         `SELECT id, razorpay_subscription_id, tier, status,
                 current_period_end, cancel_at_period_end
          FROM subscriptions
-         WHERE user_id = ? AND status IN ('authenticated','active','pending','halted')
+         WHERE user_id = ? AND status IN ('created','authenticated','active','pending','halted')
          ORDER BY created_at DESC LIMIT 1`,
       )
       .bind(user.id)
@@ -294,14 +392,47 @@ billingRoutes.post(
       );
     }
 
-    // Ask Razorpay to stop renewals at the end of the current cycle.
-    // This does NOT refund or end access immediately.
-    await cancelSubscription(
-      c.env.RAZORPAY_KEY_ID,
-      c.env.RAZORPAY_KEY_SECRET,
-      sub.razorpay_subscription_id,
-      true,
-    );
+    // 'created' = placeholder from an abandoned subscribe attempt. There's
+    // no billing cycle to honor and no charge to refund — just cancel
+    // immediately upstream and flip the row to 'cancelled' so it stops
+    // blocking future /subscribe attempts. Best-effort upstream cancel:
+    // if Razorpay already auto-expired the unauthenticated sub we want to
+    // succeed locally anyway.
+    //
+    // Authenticated/active/pending/halted = real, paid sub. cancel-at-
+    // cycle-end honors the period the user already paid for; the hourly
+    // cron downgrades api_keys after period_end passes.
+    const isPlaceholder = sub.status === "created";
+    try {
+      await cancelSubscription(
+        c.env.RAZORPAY_KEY_ID,
+        c.env.RAZORPAY_KEY_SECRET,
+        sub.razorpay_subscription_id,
+        !isPlaceholder, // cancel_at_cycle_end = false for placeholders
+      );
+    } catch (err) {
+      if (!isPlaceholder) throw err;
+      // Placeholder: upstream may already be expired/cancelled — that's
+      // fine, we still want the local row flipped to 'cancelled' so the
+      // user can subscribe again.
+    }
+
+    if (isPlaceholder) {
+      await db
+        .prepare(
+          `UPDATE subscriptions
+           SET status = 'cancelled',
+               cancelled_at = datetime('now')
+           WHERE id = ?`,
+        )
+        .bind(sub.id)
+        .run();
+      return c.json({
+        status: "cancelled",
+        access_until: null,
+        tier: sub.tier,
+      });
+    }
 
     await db
       .prepare(

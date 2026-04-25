@@ -1011,6 +1011,400 @@ describe("billing critical bugs — race + status guard + null current_end", () 
   });
 });
 
+describe("/v1/billing/subscribe — resume-or-swap on abandoned attempts", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Same shape as the seedSession helper above but kept self-contained. */
+  async function seed(userId: string, sessionToken: string): Promise<void> {
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const enc = new TextEncoder();
+    const buf = await crypto.subtle.digest("SHA-256", enc.encode(sessionToken));
+    const tokenHash = Array.from(new Uint8Array(buf))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const expiry = new Date(Date.now() + 86_400_000).toISOString();
+    await db
+      .prepare(
+        "INSERT INTO users (id, github_id, github_username, tier) VALUES (?, ?, ?, 'Free')",
+      )
+      .bind(userId, Math.floor(Math.random() * 1_000_000_000), `user_${userId}`)
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
+      )
+      .bind(userId, tokenHash, expiry)
+      .run();
+  }
+
+  /**
+   * Stub global fetch so Razorpay calls return deterministic responses.
+   * The closure tracks call counts per endpoint so tests can assert on
+   * how many times each Razorpay API was hit. When `fetchSubReturns` is
+   * provided, GET /subscriptions/:id returns that body; otherwise 404.
+   */
+  function stubRazorpay(opts: {
+    fetchSubReturns?: { id: string; status: string; short_url: string };
+    cancelOk?: boolean;
+  }) {
+    const counts = {
+      createPlan: 0,
+      createSubscription: 0,
+      fetchSubscription: 0,
+      cancel: 0,
+    };
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (!url.startsWith("https://api.razorpay.com")) {
+          return realFetch(input, init);
+        }
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (url.endsWith("/plans") && method === "POST") {
+          counts.createPlan++;
+          return new Response(
+            JSON.stringify({
+              id: `plan_${counts.createPlan}`,
+              entity: "plan",
+              period: "monthly",
+              interval: 1,
+              item: { id: "i", name: "n", amount: 300, currency: "USD" },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.endsWith("/subscriptions") && method === "POST") {
+          counts.createSubscription++;
+          const body =
+            typeof init?.body === "string" ? JSON.parse(init.body) : {};
+          return new Response(
+            JSON.stringify({
+              id: `sub_new_${counts.createSubscription}`,
+              entity: "subscription",
+              plan_id: body.plan_id ?? "plan_x",
+              status: "created",
+              short_url: `https://rzp.io/i/new${counts.createSubscription}`,
+              current_start: null,
+              current_end: null,
+              ended_at: null,
+              quantity: 1,
+              notes: body.notes ?? {},
+              charge_at: null,
+              start_at: null,
+              end_at: null,
+              auth_attempts: 0,
+              total_count: 120,
+              paid_count: 0,
+              customer_notify: false,
+              created_at: Math.floor(Date.now() / 1000),
+              has_scheduled_changes: false,
+              change_scheduled_at: null,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        // GET /subscriptions/<id> — fetchSubscription
+        const subFetchMatch = url.match(/\/subscriptions\/([^\/]+)$/);
+        if (subFetchMatch && method === "GET") {
+          counts.fetchSubscription++;
+          if (opts.fetchSubReturns) {
+            return new Response(
+              JSON.stringify({
+                id: opts.fetchSubReturns.id,
+                entity: "subscription",
+                plan_id: "plan_existing",
+                status: opts.fetchSubReturns.status,
+                short_url: opts.fetchSubReturns.short_url,
+                current_start: null,
+                current_end: null,
+                ended_at: null,
+                quantity: 1,
+                notes: {},
+                charge_at: null,
+                start_at: null,
+                end_at: null,
+                auth_attempts: 0,
+                total_count: 120,
+                paid_count: 0,
+                customer_notify: false,
+                created_at: Math.floor(Date.now() / 1000),
+                has_scheduled_changes: false,
+                change_scheduled_at: null,
+              }),
+              {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              error: { code: "BAD_REQUEST_ERROR", description: "not found" },
+            }),
+            { status: 404, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        // POST /subscriptions/<id>/cancel
+        if (url.match(/\/subscriptions\/[^\/]+\/cancel$/) && method === "POST") {
+          counts.cancel++;
+          if (opts.cancelOk === false) {
+            return new Response("upstream gone", { status: 400 });
+          }
+          return new Response(
+            JSON.stringify({ status: "cancelled" }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("not stubbed", { status: 500 });
+      },
+    );
+    return counts;
+  }
+
+  it("resumes the same Razorpay sub when the user retries the same tier+currency", async () => {
+    // Opening the modal then dismissing leaves a 'created' placeholder.
+    // Clicking Subscribe again with the same tier+currency must *not*
+    // create a second Razorpay subscription — that would orphan the old
+    // one upstream. Instead, the worker calls fetchSubscription on the
+    // existing sub_id; when Razorpay confirms it's still 'created', the
+    // worker returns the existing subscription_id with `resumed: true`.
+    await seed("user_resume", "ses_resume");
+    const counts = stubRazorpay({
+      fetchSubReturns: {
+        id: "sub_existing",
+        status: "created",
+        short_url: "https://rzp.io/i/existing",
+      },
+    });
+
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    // Pre-seed an abandoned placeholder for Pro USD.
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, currency, status)
+         VALUES (?, 'sub_existing', 'Pro', 'USD', 'created')`,
+      )
+      .bind("user_resume")
+      .run();
+
+    const res = await getJson("/v1/billing/subscribe", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer ses_resume",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tier: "Pro", currency: "USD" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      subscription_id: "sub_existing",
+      short_url: "https://rzp.io/i/existing",
+      resumed: true,
+      tier: "Pro",
+    });
+
+    // No new sub created upstream; only fetchSubscription was called.
+    expect(counts.fetchSubscription).toBe(1);
+    expect(counts.createSubscription).toBe(0);
+    expect(counts.cancel).toBe(0);
+
+    // D1 still has exactly one row, the original placeholder.
+    const rows = await db
+      .prepare(
+        "SELECT razorpay_subscription_id, tier FROM subscriptions WHERE user_id = ?",
+      )
+      .bind("user_resume")
+      .all<{ razorpay_subscription_id: string; tier: string }>();
+    expect(rows.results.length).toBe(1);
+    expect(rows.results[0].razorpay_subscription_id).toBe("sub_existing");
+  });
+
+  it("swaps to a fresh sub when the user retries with a different tier", async () => {
+    // User clicked Subscribe to Pro, dismissed, then clicked Subscribe to
+    // Team. The old Pro placeholder must be cancelled upstream and
+    // deleted locally; a fresh Team subscription is created.
+    await seed("user_swap", "ses_swap");
+    const counts = stubRazorpay({
+      // fetchSubscription is never reached on a tier mismatch — the
+      // worker goes straight to swap.
+    });
+
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, currency, status)
+         VALUES (?, 'sub_old_pro', 'Pro', 'USD', 'created')`,
+      )
+      .bind("user_swap")
+      .run();
+
+    const res = await getJson("/v1/billing/subscribe", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer ses_swap",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tier: "Team", currency: "USD" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      tier: "Team",
+      subscription_id: "sub_new_1",
+    });
+    expect(res.body).not.toHaveProperty("resumed", true);
+
+    // Razorpay was asked to cancel the old Pro sub once and create a
+    // brand-new Team sub. fetchSubscription was NOT consulted (different
+    // tier short-circuits the resume check).
+    expect(counts.cancel).toBe(1);
+    expect(counts.createSubscription).toBe(1);
+    expect(counts.fetchSubscription).toBe(0);
+
+    // D1 has only the new Team row; the old Pro placeholder was deleted.
+    const rows = await db
+      .prepare(
+        "SELECT razorpay_subscription_id, tier FROM subscriptions WHERE user_id = ?",
+      )
+      .bind("user_swap")
+      .all<{ razorpay_subscription_id: string; tier: string }>();
+    expect(rows.results.length).toBe(1);
+    expect(rows.results[0].tier).toBe("Team");
+    expect(rows.results[0].razorpay_subscription_id).toBe("sub_new_1");
+  });
+
+  it("recreates from scratch when Razorpay 404s the stale placeholder", async () => {
+    // Razorpay auto-expires unauthenticated subscriptions after their
+    // internal TTL. The next /subscribe with the same tier+currency
+    // should fetchSubscription, get a 404, fall through to swap, cancel
+    // (best-effort, also fails — fine), delete D1 row, create fresh.
+    await seed("user_stale", "ses_stale");
+    const counts = stubRazorpay({
+      // No fetchSubReturns → 404
+      cancelOk: false,
+    });
+
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, currency, status)
+         VALUES (?, 'sub_expired', 'Pro', 'USD', 'created')`,
+      )
+      .bind("user_stale")
+      .run();
+
+    const res = await getJson("/v1/billing/subscribe", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer ses_stale",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tier: "Pro", currency: "USD" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      tier: "Pro",
+      subscription_id: "sub_new_1",
+    });
+    expect(res.body).not.toHaveProperty("resumed", true);
+
+    // fetchSubscription was tried (and 404'd), upstream cancel was tried
+    // (and failed — that's fine), then a fresh sub was created.
+    expect(counts.fetchSubscription).toBe(1);
+    expect(counts.cancel).toBe(1);
+    expect(counts.createSubscription).toBe(1);
+
+    const rows = await db
+      .prepare(
+        "SELECT razorpay_subscription_id FROM subscriptions WHERE user_id = ?",
+      )
+      .bind("user_stale")
+      .all<{ razorpay_subscription_id: string }>();
+    expect(rows.results.length).toBe(1);
+    expect(rows.results[0].razorpay_subscription_id).toBe("sub_new_1");
+  });
+
+  it("/v1/billing/cancel cancels a 'created' placeholder immediately and unblocks resubscribe", async () => {
+    // The dashboard's Cancel button now renders for 'created' placeholders
+    // (the user clicked Subscribe but dismissed the modal). Hitting
+    // /cancel should:
+    //   - call Razorpay cancel with cancel_at_cycle_end=false
+    //   - flip the local row to 'cancelled' immediately (no period to honor)
+    //   - allow the user to /subscribe again right away
+    await seed("user_cancel_pl", "ses_cancel_pl");
+    const counts = stubRazorpay({});
+
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    await db
+      .prepare(
+        `INSERT INTO subscriptions
+           (user_id, razorpay_subscription_id, tier, currency, status)
+         VALUES (?, 'sub_to_cancel', 'Pro', 'USD', 'created')`,
+      )
+      .bind("user_cancel_pl")
+      .run();
+
+    const cancelRes = await getJson("/v1/billing/cancel", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer ses_cancel_pl",
+        "Content-Type": "application/json",
+      },
+    });
+    expect(cancelRes.status).toBe(200);
+    expect(cancelRes.body).toMatchObject({
+      status: "cancelled",
+      tier: "Pro",
+    });
+    expect(counts.cancel).toBe(1);
+
+    // Local row immediately flipped to 'cancelled'.
+    const row = await db
+      .prepare(
+        "SELECT status, cancelled_at FROM subscriptions WHERE razorpay_subscription_id = ?",
+      )
+      .bind("sub_to_cancel")
+      .first<{ status: string; cancelled_at: string }>();
+    expect(row?.status).toBe("cancelled");
+    expect(row?.cancelled_at).not.toBeNull();
+
+    // User can now /subscribe again — no 409 from leftover placeholder.
+    const newRes = await getJson("/v1/billing/subscribe", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer ses_cancel_pl",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tier: "Pro", currency: "USD" }),
+    });
+    expect(newRes.status).toBe(200);
+    expect(newRes.body).toMatchObject({
+      tier: "Pro",
+      subscription_id: "sub_new_1",
+    });
+  });
+});
+
 describe("scheduled cron: downgradeExpired", () => {
   beforeEach(async () => {
     await resetDb();
