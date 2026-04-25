@@ -349,6 +349,111 @@ fn validate_license_or_die() -> Result<recon_server::license::ValidatedLicense> 
     recon_server::license::validate_license(None, &config_dir).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Spawn `recon serve` against the given repo, wait briefly, and surface
+/// any startup failure to the caller.
+///
+/// The MCP transport in Claude Code / opencode / Cursor pipes the child
+/// process's stderr to the IDE's debug log (where most users never look)
+/// and surfaces only `MCP error -32000: connection closed` when the
+/// child exits before the JSON-RPC `initialize` reply. That's
+/// uninformative — failures from license rejection, over-tier repos,
+/// panics during indexing, or a missing credentials file all collapse
+/// into the same opaque message.
+///
+/// `recon init --mcp <ide>` calls this right after writing the IDE's
+/// MCP config so the *same* command + binary path the IDE will use gets
+/// exercised here first. If the child exits within the wait window we
+/// capture its stderr verbatim and bubble it up as the init error,
+/// pointing the user at the real cause before they ever open the IDE.
+///
+/// The wait window is 4 s — license + workspace open + first-pass index
+/// re-validation finishes well within that on a 320K-symbol repo (we
+/// just indexed in the previous step, so the in-process index is hot).
+/// If the child is still alive after 4 s we kill it cleanly and call
+/// the test passed.
+fn smoke_test_serve(recon_bin: &str, repo_path: &str) -> Result<()> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    eprintln!("Verifying `recon serve` starts cleanly…");
+
+    // stdin/stdout piped so the child stays alive waiting for MCP frames
+    // (otherwise it might EOF immediately and pass a false-negative).
+    // stderr piped so we can dump it into our error if startup fails.
+    let mut child = Command::new(recon_bin)
+        .args(["--repo", repo_path, "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to spawn `{recon_bin}` for smoke test: {e}\n\
+                 The MCP config we just wrote points at this binary; \
+                 if it's not executable here it won't be from the IDE either."
+            )
+        })?;
+
+    // Sleep window: enough for license validate + workspace open + the
+    // license-revalidation task spawn. 4 s is comfortable margin on a
+    // 320K-symbol repo (incremental re-index sees no changes since
+    // `recon init` just indexed in this same invocation).
+    std::thread::sleep(Duration::from_secs(4));
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            // Child exited within the window — bad. Capture stderr verbatim
+            // so the user sees the exact tracing/panic output the IDE
+            // would have hidden.
+            let mut stderr_buf = String::new();
+            if let Some(mut err) = child.stderr.take() {
+                let _ = err.read_to_string(&mut stderr_buf);
+            }
+            let trimmed = stderr_buf.trim();
+            Err(anyhow::anyhow!(
+                "Smoke test failed: `recon serve` exited with {status} \
+                 before the MCP `initialize` handshake.\n\n\
+                 In the IDE this would surface only as:\n  \
+                 MCP error -32000: connection closed\n\n\
+                 The actual server output (would be hidden by the IDE) is:\n\n\
+                 ╭── recon serve stderr ──────────────────────────────────\n\
+                 {}\n\
+                 ╰────────────────────────────────────────────────────────\n\n\
+                 Fix the issue above, then re-run `recon init --mcp <ide>` \
+                 — the call is idempotent.",
+                if trimmed.is_empty() {
+                    "(no stderr output captured)".to_string()
+                } else {
+                    trimmed
+                        .lines()
+                        .map(|l| format!("│ {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            ))
+        }
+        Ok(None) => {
+            // Still running after the wait window — server is alive,
+            // license validated, indexer hot. Kill cleanly so we don't
+            // leave a zombie process around.
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("✓ Server smoke test passed");
+            Ok(())
+        }
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(anyhow::anyhow!(
+                "smoke test wait failed: {e} — couldn't determine \
+                 whether `recon serve` is healthy. Run \
+                 `recon --repo {repo_path} serve` directly to see."
+            ))
+        }
+    }
+}
+
 /// One-time migration: if the global cache is missing but a per-repo
 /// `.recon/license.json` exists, copy it to the global config dir.
 ///
@@ -1054,6 +1159,15 @@ async fn main() -> Result<()> {
                     .to_string();
                 write_mcp_config(ide, &repo, &recon_bin)?;
                 write_agent_rules(ide, &repo)?;
+
+                // Smoke-test the server before declaring success. The MCP
+                // client (Claude Code / opencode / Cursor) swallows the
+                // child's stderr and surfaces failures as a generic
+                // `MCP error -32000: connection closed`. By spawning the
+                // same binary with the same args here we can capture that
+                // stderr ourselves and surface the real cause to the user
+                // — license rejected, over-tier, panic during init, etc.
+                smoke_test_serve(&recon_bin, &repo_path_str)?;
             }
 
             // 3. Add .recon/ to .gitignore if not already there
