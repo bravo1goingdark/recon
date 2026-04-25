@@ -242,15 +242,14 @@
   @media (max-width:720px){ .compare{grid-template-columns:1fr} }
 
   /* ─────── INSTALL ─────── */
-  /* 4 vertical (narrow / portrait) cards in a row at desktop. Collapses to
-     2 cols on tablets and 1 col on phones. */
-  .install-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;align-items:start}
-  @media (max-width:1024px){ .install-grid{grid-template-columns:repeat(2,1fr);gap:32px} }
-  @media (max-width:600px){ .install-grid{grid-template-columns:1fr} }
-  .step{border-top:1px solid var(--rule)}
-  .step .n{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;color:var(--clay);padding:20px 0 10px;text-transform:uppercase}
-  .step h3{font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin-bottom:14px;line-height:1.1}
-  .step p{color:var(--ink-2);margin-bottom:16px;max-width:460px}
+  /* Single stacked column. Centered with a comfortable max width so it
+     doesn't sprawl on wide desktops. */
+  .install-grid{display:flex;flex-direction:column;gap:0;max-width:680px;margin:0 auto}
+  .step{border-top:1px solid var(--rule);padding:28px 0}
+  .step:last-child{border-bottom:1px solid var(--rule)}
+  .step .n{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;color:var(--clay);padding:0 0 8px;text-transform:uppercase}
+  .step h3{font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.1}
+  .step p{color:var(--ink-2);margin-bottom:14px;max-width:560px}
   .step pre{
     font-family:var(--mono);font-size:12.5px;color:var(--ink);
     background:var(--paper-2);border:1px solid var(--rule);border-radius:3px;
@@ -827,14 +826,14 @@
       <div class="step">
         <div class="n">Step 01</div>
         <h3>Sign up with GitHub</h3>
-        <p>One click. We create your account and a free API key instantly. No credit card.</p>
-        <a href="/login" style="display:inline-block;padding:10px 20px;background:var(--ink);color:var(--paper);border-radius:8px;font-size:14px;text-decoration:none;font-weight:500;margin-top:8px">Sign in with GitHub →</a>
+        <p>Free. No credit card.</p>
+        <a class="btn primary" href="/login">Sign in with GitHub <span class="arr">→</span></a>
       </div>
 
       <div class="step">
         <div class="n">Step 02</div>
         <h3>Install the binary</h3>
-        <p>Signed with SHA256 + cosign. Verified end-to-end before it lands in <code>~/.local/bin</code>. Only the license key ever touches the network — never your code.</p>
+        <p>Signed with cosign. Only your license key touches the network.</p>
 
         <div class="os-tabs" role="tablist" aria-label="Operating system">
           <button type="button" role="tab" data-os="linux" class="active" aria-selected="true">Linux</button>
@@ -843,52 +842,35 @@
         </div>
 
         <div class="os-pane active" data-os="linux">
-<pre><span class="c"># Linux (x86_64, aarch64) — 24 MB, cosign-verified</span>
-curl -fsSL https://mcprecon.pages.dev/install.sh | bash
-
-<span class="c"># installs to ~/.local/bin/recon</span>
-<span class="c"># override with INSTALL_DIR=/usr/local/bin curl ... | bash</span></pre>
+<pre>curl -fsSL https://mcprecon.pages.dev/install.sh | bash</pre>
         </div>
-
         <div class="os-pane" data-os="macos">
-<pre><span class="c"># macOS (Intel + Apple Silicon) — 24 MB, cosign-verified</span>
-curl -fsSL https://mcprecon.pages.dev/install.sh | bash
-
-<span class="c"># first launch may prompt Gatekeeper — Apple-notarized</span></pre>
+<pre>curl -fsSL https://mcprecon.pages.dev/install.sh | bash</pre>
         </div>
-
         <div class="os-pane" data-os="windows">
-<pre><span class="c"># Windows (x86_64) — PowerShell</span>
-iwr https://mcprecon.pages.dev/install.ps1 | iex
-
-<span class="c"># installs to %LOCALAPPDATA%\Programs\recon\recon.exe</span></pre>
+<pre>iwr https://mcprecon.pages.dev/install.ps1 | iex</pre>
         </div>
 
-<pre style="margin-top:14px"><span class="c"># then, on every machine you use:</span>
-recon login <span class="h">sk-recon-xxx</span>          <span class="c"># caches signed license at ~/.config/recon/</span></pre>
+<pre style="margin-top:10px">recon login <span class="h">sk-recon-xxx</span></pre>
       </div>
 
       <div class="step">
         <div class="n">Step 03</div>
         <h3>Wire it into your agent</h3>
-        <p>One command per project. <code>recon init --mcp &lt;ide&gt;</code> registers the repo with your account, indexes it (parallel parse, &lt;1 s warm), writes the IDE's MCP config, and drops a <b>strict-policy</b> agent rules file so the agent uses recon's <code>code_*</code> tools by default — not just when it remembers to.</p>
-<pre><span class="c"># inside any project</span>
-recon init --mcp cc        <span class="c"># Claude Code  → .mcp.json        + CLAUDE.md</span>
-recon init --mcp oc        <span class="c"># OpenCode     → opencode.jsonc   + AGENTS.md</span>
-recon init --mcp cursor    <span class="c"># Cursor       → .cursor/mcp.json + .cursor/rules/recon.mdc</span>
-recon init --mcp windsurf  <span class="c"># Windsurf     → ~/.codeium/...   + .windsurf/rules/recon.md</span>
-
-<span class="c"># health-check anytime — one command, exit-code-aware</span>
-recon doctor</pre>
+        <p><code>recon init --mcp &lt;ide&gt;</code> writes the IDE's MCP config and a strict agent-rules file so the agent uses <code>code_*</code> tools by default.</p>
+<pre>recon init --mcp cc        <span class="c"># Claude Code</span>
+recon init --mcp oc        <span class="c"># OpenCode</span>
+recon init --mcp cursor    <span class="c"># Cursor</span>
+recon init --mcp windsurf  <span class="c"># Windsurf</span></pre>
       </div>
 
       <div class="step">
         <div class="n">Step 04</div>
         <h3>Hit a limit? Upgrade.</h3>
-        <p><b>Free tier:</b> 1 repo · 250 files · 10K LOC — generous enough to feel the difference on a small project.</p>
-        <p><b>Pro</b> ($3/mo · ₹249/mo): 10 repos · 5K files · 200K LOC. <b>Team</b> ($7/mo): 25 repos · 50K files · 4M LOC.</p>
-        <p>Limits are enforced server-side by atomic <code>POST /v1/account/repos</code> — a patched binary can't bypass them. Manage slots with <code>recon repos list</code> and <code>recon repos remove</code>.</p>
-        <a href="/pricing" style="display:inline-block;padding:10px 20px;border:1px solid var(--rule);border-radius:8px;font-size:14px;text-decoration:none;color:var(--ink);font-weight:500;margin-top:8px">View pricing →</a>
+        <p><b>Free</b> · 1 repo · 250 files · 10K LOC<br/>
+        <b>Pro</b> $3/mo · 10 repos · 5K files · 200K LOC<br/>
+        <b>Team</b> $7/mo · 25 repos · 50K files · 4M LOC</p>
+        <a class="btn ghost" href="/pricing">View pricing <span class="arr">→</span></a>
       </div>
     </div>
   </div>
