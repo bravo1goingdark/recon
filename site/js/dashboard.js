@@ -39,6 +39,98 @@ async function loadDashboard() {
     var billing = await billingResp.json();
     renderBilling(billing);
   }
+
+  await loadRepos();
+
+  // Razorpay redirects here with `?just_paid=1` after a successful
+  // subscription auth. The webhook usually lands within a couple of
+  // seconds but there's a window where the dashboard would still show
+  // "Free". Poll /v1/billing/portal until the tier flips, then refresh
+  // the page so the badge + sidebar reflect the upgrade.
+  if (window.location.search.indexOf("just_paid=1") !== -1) {
+    pollForTierUpgrade(user.tier);
+  }
+}
+
+/**
+ * After a successful Razorpay subscription auth, poll /v1/billing/portal
+ * until the user's tier moves off `oldTier`. The webhook usually fires
+ * within ~2s; we poll for up to 30s before giving up. Stops at the first
+ * tier change OR when the user navigates away. Drops the `just_paid`
+ * query param via history.replaceState so a refresh doesn't re-trigger.
+ */
+async function pollForTierUpgrade(oldTier) {
+  var attempts = 0;
+  var MAX_ATTEMPTS = 15; // 15 × 2s = 30s
+  showUpgradePendingBanner();
+
+  // Strip the just_paid flag so a manual refresh during/after the poll
+  // doesn't re-arm this loop.
+  try {
+    var url = new URL(window.location.href);
+    url.searchParams.delete("just_paid");
+    window.history.replaceState({}, "", url.toString());
+  } catch (_) {}
+
+  var iv = setInterval(async function () {
+    attempts++;
+    var resp = await authFetch("/v1/billing/portal");
+    if (resp.ok) {
+      var billing = await resp.json();
+      if (billing.tier !== oldTier) {
+        clearInterval(iv);
+        hideUpgradePendingBanner();
+        // Full reload so the user sees the new tier badge + limits
+        // without us having to surgically re-render every panel.
+        window.location.reload();
+        return;
+      }
+    }
+    if (attempts >= MAX_ATTEMPTS) {
+      clearInterval(iv);
+      hideUpgradePendingBanner(
+        "Payment received — tier upgrade is taking longer than usual. Refresh in a minute, or contact support if it doesn't appear.",
+      );
+    }
+  }, 2000);
+}
+
+function showUpgradePendingBanner() {
+  var existing = document.getElementById("upgrade-pending-banner");
+  if (existing) return;
+  var b = document.createElement("div");
+  b.id = "upgrade-pending-banner";
+  b.style.cssText =
+    "position:fixed;top:0;left:0;right:0;background:var(--clay);color:var(--paper);padding:10px 16px;text-align:center;font-size:13px;z-index:1000;font-family:var(--mono)";
+  b.textContent =
+    "Payment received — confirming your upgrade…";
+  document.body.appendChild(b);
+}
+
+function hideUpgradePendingBanner(failureMessage) {
+  var b = document.getElementById("upgrade-pending-banner");
+  if (!b) return;
+  if (failureMessage) {
+    b.textContent = failureMessage;
+    b.style.background = "var(--ink)";
+    setTimeout(function () {
+      if (b.parentNode) b.parentNode.removeChild(b);
+    }, 8000);
+  } else {
+    b.parentNode.removeChild(b);
+  }
+}
+
+/**
+ * Fetch the user's registered-repo list (server-side max_repos
+ * enforcement) and render it into the Repos tab. Pulled out as its own
+ * function so the Remove handler can re-fetch after a delete.
+ */
+async function loadRepos() {
+  var reposResp = await authFetch("/v1/dashboard/repos");
+  if (!reposResp.ok) return;
+  var data = await reposResp.json();
+  renderRepos(data);
 }
 
 function renderProfile(user) {
@@ -119,6 +211,96 @@ function renderKeys(keys) {
     .join("");
 }
 
+/**
+ * Render the user's registered-repo list (v0.2.0+).
+ *
+ * Each row shows a truncated fingerprint, first/last seen, and a
+ * Remove button. Rows are session-tracked server-side via
+ * /v1/dashboard/repos so the dashboard and the CLI see the same
+ * authoritative state.
+ */
+function renderRepos(payload) {
+  var el = document.getElementById("repos");
+  if (!el) return;
+
+  var repos = (payload && payload.repos) || [];
+  var limit = (payload && payload.limit) || 1;
+  var tier = (payload && payload.tier) || "Free";
+
+  var header =
+    '<div class="repos-header">' +
+    "<span><b>" +
+    repos.length +
+    "</b> / " +
+    limit +
+    " repos used" +
+    "</span>" +
+    '<span class="dim">' +
+    escapeHtml(tier) +
+    " plan" +
+    "</span>" +
+    "</div>";
+
+  if (repos.length === 0) {
+    el.innerHTML =
+      header +
+      '<p class="empty">No repos registered yet. Run <code>recon init --mcp &lt;ide&gt;</code> in a project to register one.</p>';
+    return;
+  }
+
+  // Delegated Remove buttons via [data-action='remove-repo'] +
+  // data-fingerprint. CSP blocks inline onclick, so we wire one
+  // listener on #repos in wireControls.
+  var rows = repos
+    .map(function (r) {
+      return (
+        '<div class="repo-row">' +
+        '<code class="repo-fp" title="' +
+        escapeHtml(r.fingerprint) +
+        '">' +
+        escapeHtml(r.fingerprint.slice(0, 16)) +
+        "…</code>" +
+        '<span class="dim">first ' +
+        formatDate(r.first_seen_at) +
+        "</span>" +
+        '<span class="dim">last ' +
+        formatDate(r.last_seen_at) +
+        "</span>" +
+        '<button class="btn ghost sm" data-action="remove-repo" data-fingerprint="' +
+        escapeHtml(r.fingerprint) +
+        '">Remove</button>' +
+        "</div>"
+      );
+    })
+    .join("");
+
+  el.innerHTML = header + rows;
+}
+
+/**
+ * Remove a server-side repo slot from the dashboard. Re-fetches the
+ * list on success so the count + tier badge stay accurate.
+ */
+async function removeRepo(fingerprint) {
+  if (!fingerprint) return;
+  if (!confirm("Remove this repo from your account? Re-running `recon init` from that project will register it again (if you're under your tier limit).")) {
+    return;
+  }
+  var resp = await authFetch("/v1/dashboard/repos/" + encodeURIComponent(fingerprint), {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 204) {
+    var msg = "Failed to remove repo.";
+    try {
+      var body = await resp.json();
+      if (body && body.error) msg = body.error;
+    } catch {}
+    alert(msg);
+    return;
+  }
+  await loadRepos();
+}
+
 function renderBilling(billing) {
   var el = document.getElementById("billing");
   if (!el) return;
@@ -130,24 +312,51 @@ function renderBilling(billing) {
     " · " + (tc.limits.max_loc / 1000).toLocaleString() + "K LOC";
 
   // Pick the status line + right-hand CTA based on subscription state.
-  // Four states the dashboard has to reflect:
-  //   1. Free + no sub  → show Subscribe CTA
-  //   2. Paid + active + not cancelled → show "Next billing: DATE" + Cancel
-  //   3. Paid + cancel_at_period_end → show "Ends DATE" + Resubscribe
-  //   4. Paid + cancelled/halted/expired → show "Access until DATE" + Resubscribe
+  // The states the dashboard has to reflect:
+  //   1. Free + no sub                              → Subscribe CTA
+  //   2. Subscribed + cancel_at_period_end OR
+  //      status='cancelled'                          → "Access until DATE" + Resubscribe
+  //   3. Subscribed + status='halted'                 → "Payment failed" + Resubscribe
+  //   4. Subscribed + status in (active, authenticated, pending, created)
+  //      AND cancel_at_period_end=0                   → status copy + Cancel button
+  //
+  // The Cancel button has to render for the in-between states too —
+  // 'created' / 'authenticated' / 'pending' is the window between the user
+  // clicking Subscribe and Razorpay confirming the first charge. The
+  // backend's POST /v1/billing/cancel accepts all of these, so locking the
+  // UI out of them stranded users with no self-serve cancel path.
   var statusLine = "";
   var actionHtml = "";
   var sub = billing.subscription;
+
+  // States we treat as "subscription is live or about to become live" and
+  // therefore eligible for a Cancel button. Mirrors the WHERE-status list
+  // in /v1/billing/cancel and /v1/billing/subscribe's stack-prevention
+  // guard so the three never disagree about what "active-ish" means.
+  var ACTIVEISH = ["created", "authenticated", "active", "pending"];
 
   if (sub && sub.tier !== "Free") {
     var endDate = sub.current_period_end
       ? formatDate(sub.current_period_end)
       : "unknown";
 
-    if (sub.status === "active" && !sub.cancel_at_period_end) {
+    if (
+      ACTIVEISH.indexOf(sub.status) !== -1 &&
+      !sub.cancel_at_period_end
+    ) {
+      // status copy varies a bit so the user can tell whether their first
+      // charge has landed yet. The Cancel CTA is the same in all cases.
+      var statusText;
+      if (sub.status === "active") {
+        statusText = "Next billing: " + endDate;
+      } else if (sub.status === "pending") {
+        statusText = "Awaiting payment confirmation";
+      } else {
+        statusText = "Awaiting first charge from Razorpay";
+      }
       statusLine =
-        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px">Next billing: ' +
-        escapeHtml(endDate) +
+        '<div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:4px">' +
+        escapeHtml(statusText) +
         "</div>";
       actionHtml =
         '<button id="cancel-sub-btn" class="btn ghost sm" style="margin-left:auto">Cancel subscription</button>';
@@ -574,6 +783,18 @@ function wireControls() {
       if (!btn) return;
       var id = btn.getAttribute("data-key-id");
       if (id) openRevokeForRowKey(id);
+    });
+  }
+
+  // Same pattern for the Repos tab: one listener for every Remove
+  // button rendered by renderRepos().
+  var reposContainer = document.getElementById("repos");
+  if (reposContainer) {
+    reposContainer.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-action='remove-repo']");
+      if (!btn) return;
+      var fp = btn.getAttribute("data-fingerprint");
+      if (fp) removeRepo(fp);
     });
   }
 }

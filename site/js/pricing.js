@@ -103,6 +103,14 @@ function applyCurrency(currency) {
     btn.style.color = isActive ? "var(--paper)" : "inherit";
     btn.style.borderColor = isActive ? "var(--ink)" : "var(--rule)";
   });
+
+  // Footer caption mirrors the active currency. The HTML ships with USD
+  // baked in for JS-disabled readers; this swap keeps it honest when the
+  // INR toggle is engaged.
+  var footerCurrency = document.getElementById("footer-currency");
+  if (footerCurrency) {
+    footerCurrency.textContent = "all prices in " + currency;
+  }
 }
 
 function wireCurrencyToggle() {
@@ -176,12 +184,21 @@ async function subscribeToTier(tierName) {
  * Bind subscribe buttons. Inline `onclick=` would trip CSP under the
  * site's strict script-src — one delegated listener per button dispatches
  * to subscribeToTier() based on the button's data attribute.
+ *
+ * The Starter card's link carries `data-upgrade-tier="Free"` so it can
+ * still be marked "Current plan" for users already on Free. Clicking it
+ * MUST fall through to its href ("/login" or "/dashboard") instead of
+ * triggering /v1/billing/subscribe — the backend rejects Free with a 400
+ * and the user got an alert. We skip Free here and let the browser
+ * follow the link normally.
  */
 function wireUpgradeButtons() {
   document.querySelectorAll("[data-upgrade-tier]").forEach(function (btn) {
-    btn.addEventListener("click", function () {
+    btn.addEventListener("click", function (e) {
       var tier = btn.getAttribute("data-upgrade-tier");
-      if (tier) subscribeToTier(tier);
+      if (!tier || tier === "Free") return;
+      e.preventDefault();
+      subscribeToTier(tier);
     });
   });
 }

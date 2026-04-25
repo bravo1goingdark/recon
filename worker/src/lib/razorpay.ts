@@ -3,36 +3,6 @@ import { hmacSha256Hex, timingSafeEqual } from "./crypto";
 const RAZORPAY_BASE = "https://api.razorpay.com/v1";
 
 // ────────────────────────────────────────────────────────────────────────────
-// One-time Orders (legacy — kept for backwards compat; callers should move to
-// Subscriptions for anything recurring).
-// ────────────────────────────────────────────────────────────────────────────
-
-export interface RazorpayOrder {
-  id: string;
-  amount: number;
-  currency: string;
-  receipt: string;
-  status: string;
-}
-
-/** Create a Razorpay order. */
-export async function createOrder(
-  keyId: string,
-  keySecret: string,
-  amount: number,
-  currency: string,
-  receipt: string,
-  notes: Record<string, string>,
-): Promise<RazorpayOrder> {
-  return rpPost<RazorpayOrder>(keyId, keySecret, "/orders", {
-    amount,
-    currency,
-    receipt,
-    notes,
-  });
-}
-
-// ────────────────────────────────────────────────────────────────────────────
 // Plans — tier-level pricing objects that subscriptions reference.
 // One Plan per tier; created lazily on first subscribe.
 // ────────────────────────────────────────────────────────────────────────────
@@ -123,6 +93,14 @@ export async function createSubscription(
     total_count: number;
     customer_notify: boolean;
     notes: Record<string, string>;
+    /**
+     * URL Razorpay redirects the user to after they complete authorisation
+     * on the hosted short_url page. Without this, the user lands on
+     * Razorpay's generic "Payment Successful" page and has no path back
+     * to our dashboard. Pair with `callback_method: "get"`.
+     */
+    callback_url?: string;
+    callback_method?: "get";
   },
 ): Promise<RazorpaySubscription> {
   return rpPost<RazorpaySubscription>(keyId, keySecret, "/subscriptions", {
@@ -130,6 +108,12 @@ export async function createSubscription(
     total_count: opts.total_count,
     customer_notify: opts.customer_notify ? 1 : 0,
     notes: opts.notes,
+    ...(opts.callback_url
+      ? {
+          callback_url: opts.callback_url,
+          callback_method: opts.callback_method ?? "get",
+        }
+      : {}),
   });
 }
 
@@ -188,25 +172,129 @@ export async function verifyWebhookSignature(
 // duplicate the basic-auth header and the "throw on !ok" dance.
 // ────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Retry policy. Razorpay's HTTP edge occasionally 502s during deploys
+ * and on transient network blips — retrying once or twice with backoff
+ * is the difference between a noisy 5xx to the user and a successful
+ * subscription. We never retry 4xx (auth, bad request — won't change),
+ * never retry idempotent ops more than RETRY_COUNT times (creates a real
+ * sub upstream each time createSubscription succeeds — must NOT replay
+ * a partial success), and bound each attempt with a hard timeout so a
+ * stuck connection can't pin a Worker isolate.
+ */
+const RETRY_COUNT = 2;
+const RETRY_BASE_MS = 250;
+const REQUEST_TIMEOUT_MS = 10_000;
+
+interface RpResponse {
+  ok: boolean;
+  status: number;
+  body: string;
+}
+
+/**
+ * Razorpay HTTP error with a status code attached so retry/branching
+ * logic can reason about it without parsing the message string.
+ */
+export class RazorpayHttpError extends Error {
+  status: number;
+  responseBody: string;
+  constructor(status: number, path: string, body: string) {
+    super(`Razorpay ${path} failed: ${status} ${body}`);
+    this.name = "RazorpayHttpError";
+    this.status = status;
+    this.responseBody = body;
+  }
+}
+
+/**
+ * Fetch with an AbortController-bounded timeout. Caller must dispatch
+ * the result body — we return raw text + status so retry logic can
+ * branch on the HTTP code without re-parsing JSON.
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+): Promise<RpResponse> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, { ...init, signal: ctrl.signal });
+    const body = await resp.text();
+    return { ok: resp.ok, status: resp.status, body };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * Send a Razorpay request with the project's standard retry/backoff and
+ * timeout. Retries on:
+ *   - network errors (fetch threw — DNS, ECONNRESET, abort/timeout)
+ *   - HTTP 5xx (transient upstream failure)
+ * Never retries on 4xx — those won't get better, and double-billing risk
+ * is real for non-idempotent verbs.
+ *
+ * The `path` is logged in the error message so callers don't have to
+ * pass anything extra; secrets are never echoed.
+ */
+async function rpRequest<T>(
+  method: "GET" | "POST",
+  keyId: string,
+  keySecret: string,
+  path: string,
+  body: unknown | undefined,
+): Promise<T> {
+  const url = `${RAZORPAY_BASE}${path}`;
+  const init: RequestInit = {
+    method,
+    headers: {
+      Authorization: "Basic " + btoa(`${keyId}:${keySecret}`),
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  };
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
+    try {
+      const resp = await fetchWithTimeout(url, init);
+      if (resp.ok) return JSON.parse(resp.body) as T;
+      // 5xx → retry (if attempts remain). 4xx → throw immediately
+      // (auth, validation, business rejection — won't change on retry).
+      if (resp.status >= 500 && attempt < RETRY_COUNT) {
+        lastErr = new RazorpayHttpError(resp.status, `${method} ${path}`, resp.body);
+        await sleep(RETRY_BASE_MS * Math.pow(2, attempt));
+        continue;
+      }
+      throw new RazorpayHttpError(resp.status, `${method} ${path}`, resp.body);
+    } catch (err) {
+      // 4xx must NOT be retried — propagate immediately so the caller
+      // (e.g. /subscribe) sees the upstream error and surfaces it.
+      if (err instanceof RazorpayHttpError && err.status < 500) throw err;
+      lastErr = err;
+      if (attempt < RETRY_COUNT) {
+        await sleep(RETRY_BASE_MS * Math.pow(2, attempt));
+        continue;
+      }
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(`Razorpay ${method} ${path} failed after retries`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 async function rpPost<T>(
   keyId: string,
   keySecret: string,
   path: string,
   body: unknown,
 ): Promise<T> {
-  const resp = await fetch(`${RAZORPAY_BASE}${path}`, {
-    method: "POST",
-    headers: {
-      Authorization: "Basic " + btoa(`${keyId}:${keySecret}`),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Razorpay ${path} failed: ${resp.status} ${err}`);
-  }
-  return (await resp.json()) as T;
+  return rpRequest<T>("POST", keyId, keySecret, path, body);
 }
 
 async function rpGet<T>(
@@ -214,14 +302,5 @@ async function rpGet<T>(
   keySecret: string,
   path: string,
 ): Promise<T> {
-  const resp = await fetch(`${RAZORPAY_BASE}${path}`, {
-    headers: {
-      Authorization: "Basic " + btoa(`${keyId}:${keySecret}`),
-    },
-  });
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Razorpay GET ${path} failed: ${resp.status} ${err}`);
-  }
-  return (await resp.json()) as T;
+  return rpRequest<T>("GET", keyId, keySecret, path, undefined);
 }

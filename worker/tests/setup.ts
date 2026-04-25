@@ -31,6 +31,12 @@ import migration0004 from "../migrations/0004_currency_per_plan.sql?raw";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error vite `?raw` import — string, no type declaration
 import migration0005 from "../migrations/0005_user_repos.sql?raw";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error vite `?raw` import — string, no type declaration
+import migration0006 from "../migrations/0006_webhook_events_dropped.sql?raw";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error vite `?raw` import — string, no type declaration
+import migration0007 from "../migrations/0007_webhook_events_seen.sql?raw";
 
 /**
  * Split a SQL file into individual statements.
@@ -63,6 +69,14 @@ const MIGRATIONS = [
     name: "0005_user_repos",
     queries: splitSql(migration0005 as string),
   },
+  {
+    name: "0006_webhook_events_dropped",
+    queries: splitSql(migration0006 as string),
+  },
+  {
+    name: "0007_webhook_events_seen",
+    queries: splitSql(migration0007 as string),
+  },
 ];
 
 /**
@@ -73,6 +87,8 @@ export async function resetDb(): Promise<void> {
   const db = (env as { RECON_DB: D1Database }).RECON_DB;
   // Drop every table we created so applyD1Migrations re-runs cleanly.
   const tables = [
+    "webhook_events_seen",
+    "webhook_events_dropped",
     "subscription_plans",
     "payment_events",
     "subscriptions",

@@ -97,6 +97,33 @@
   a{color:inherit;text-decoration:none}
   ::selection{background:var(--clay);color:var(--paper)}
 
+  /* Responsive baseline — block horizontal page-scroll without breaking sticky */
+  html{overflow-x:clip}
+  body{overflow-x:clip;max-width:100%}
+  img,video,iframe,embed,object,svg{max-width:100%;height:auto}
+  pre,table{max-width:100%}
+  code{word-break:break-word;overflow-wrap:anywhere}
+  p,li,td,th,summary{overflow-wrap:anywhere;word-break:break-word}
+
+  /* Copy-to-clipboard control. Sits top-right of every <pre>. Ghosted
+     until the pre is hovered or focused so it doesn't compete with the
+     code text visually; flips to a clay accent on success. */
+  .copy-btn{
+    position:absolute;top:6px;right:6px;
+    background:var(--paper);border:1px solid var(--rule);
+    color:var(--ink-3);font-family:var(--mono);font-size:10px;
+    letter-spacing:0.12em;text-transform:uppercase;
+    padding:4px 9px;border-radius:3px;cursor:pointer;line-height:1;
+    opacity:0;transition:opacity .15s, color .15s, border-color .15s;
+  }
+  pre:hover .copy-btn,pre:focus-within .copy-btn,.copy-btn:focus-visible{opacity:1}
+  .copy-btn:hover{color:var(--ink);border-color:var(--ink-3)}
+  .copy-btn.copied{color:var(--clay);border-color:var(--clay);opacity:1}
+  /* Touch devices have no hover — show the button at a softer opacity. */
+  @media (hover:none){ .copy-btn{opacity:.55} }
+  /* Elements with data-copy (the IDE-matrix flags) flash on click. */
+  [data-copy].copied{outline:1px solid var(--clay);outline-offset:2px}
+
   .wrap{max-width:1180px;margin:0 auto;padding:0 40px}
   @media (max-width:720px){ .wrap{padding:0 24px} }
 
@@ -159,9 +186,13 @@
     border-radius:4px;padding:18px 20px;
     font-family:var(--mono);font-size:12.5px;line-height:1.75;color:var(--ink-2);
     box-shadow: 0 1px 0 var(--rule-soft), 0 24px 48px -36px rgba(0,0,0,0.12);
+    /* Long sample paths/sigs (e.g. crates/recon-search/src/map.rs) are
+       common in this mock. Allow horizontal overflow inside the panel,
+       but keep the panel itself shrinkable so it never widens the page. */
+    overflow-x:auto;min-width:0;max-width:100%;
   }
   .panel .bar{display:flex;align-items:center;gap:6px;margin-bottom:14px;color:var(--ink-3);font-size:11px}
-  .panel .bar .d{width:8px;height:8px;border-radius:50%;background:var(--rule)}
+  .panel .bar .d{width:8px;height:8px;border-radius:50%;background:var(--rule);flex-shrink:0}
   .panel .bar .d.a{background:var(--clay)}
   .panel .bar .t{margin-left:8px;letter-spacing:0.04em}
   .panel .prompt{color:var(--ink-3)}
@@ -169,8 +200,10 @@
   .panel .hl{color:var(--clay)}
   .panel .dim{color:var(--ink-3)}
   .panel .ok{color:oklch(55% 0.13 150)}
-  .panel .row{display:flex;justify-content:space-between;gap:16px}
-  .panel .row span:last-child{color:var(--ink)}
+  .panel .row{display:flex;justify-content:space-between;gap:16px;min-width:0}
+  .panel .row span{min-width:0}
+  .panel .row span:first-child{overflow-wrap:anywhere;word-break:break-word}
+  .panel .row span:last-child{color:var(--ink);flex-shrink:0;white-space:nowrap}
 
   /* ─────── METRICS STRIP ─────── */
   .strip{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--rule-soft)}
@@ -228,12 +261,14 @@
   @media (max-width:720px){ .compare{grid-template-columns:1fr} }
 
   /* ─────── INSTALL ─────── */
-  .install-grid{display:grid;grid-template-columns:1fr 1fr;gap:32px}
-  @media (max-width:900px){ .install-grid{grid-template-columns:1fr} }
-  .step{border-top:1px solid var(--rule)}
-  .step .n{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;color:var(--clay);padding:20px 0 10px;text-transform:uppercase}
-  .step h3{font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin-bottom:14px;line-height:1.1}
-  .step p{color:var(--ink-2);margin-bottom:16px;max-width:460px}
+  /* Single stacked column. Centered with a comfortable max width so it
+     doesn't sprawl on wide desktops. */
+  .install-grid{display:flex;flex-direction:column;gap:0;max-width:680px;margin:0 auto}
+  .step{border-top:1px solid var(--rule);padding:28px 0}
+  .step:last-child{border-bottom:1px solid var(--rule)}
+  .step .n{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;color:var(--clay);padding:0 0 8px;text-transform:uppercase}
+  .step h3{font-family:var(--serif);font-size:28px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.1}
+  .step p{color:var(--ink-2);margin-bottom:14px;max-width:560px}
   .step pre{
     font-family:var(--mono);font-size:12.5px;color:var(--ink);
     background:var(--paper-2);border:1px solid var(--rule);border-radius:3px;
@@ -241,6 +276,32 @@
   }
   .step pre .c{color:var(--ink-3)}
   .step pre .h{color:var(--clay)}
+
+  /* OS picker tabs (Linux / macOS / Windows) inside Step 02 */
+  .os-tabs{display:flex;gap:0;border:1px solid var(--rule);border-radius:6px;overflow:hidden;margin-bottom:14px;width:fit-content}
+  .os-tabs button{
+    background:none;border:0;padding:9px 18px;font-family:var(--mono);font-size:11px;
+    letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-3);cursor:pointer;
+    transition:background .15s, color .15s;border-right:1px solid var(--rule);
+  }
+  .os-tabs button:last-child{border-right:0}
+  .os-tabs button:hover{color:var(--ink)}
+  .os-tabs button.active{background:var(--ink);color:var(--paper)}
+  .os-pane{display:none}
+  .os-pane.active{display:block}
+
+  /* ─────── IDE MATRIX (works with any agent) ─────── */
+  .ides{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft);margin-top:32px}
+  @media (max-width:900px){ .ides{grid-template-columns:repeat(2,1fr)} }
+  @media (max-width:500px){ .ides{grid-template-columns:1fr} }
+  .ide{background:var(--paper);padding:24px 22px;display:flex;flex-direction:column;gap:8px;transition:background .15s}
+  .ide:hover{background:var(--paper-2)}
+  .ide .glyph{font-family:var(--mono);font-size:11px;color:var(--clay);letter-spacing:0.14em;text-transform:uppercase}
+  .ide .name{font-family:var(--serif);font-size:22px;letter-spacing:-0.02em;color:var(--ink);margin:0}
+  .ide .flag{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--paper-2);padding:6px 10px;border:1px solid var(--rule-soft);border-radius:4px;width:fit-content}
+  .ide .ide:hover .flag{background:var(--paper)}
+  .ide .meta{font-family:var(--mono);font-size:11px;color:var(--ink-3);line-height:1.6;margin-top:auto}
+  .ide .meta b{color:var(--ink-2);font-weight:500}
 
   /* ─────── QUOTE / FOOTER LEAD ─────── */
   .quote{padding:120px 0 120px}
@@ -415,11 +476,64 @@
   </div>
 </div>
 
+<!-- IDE MATRIX -->
+<section id="ides">
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>01</em> &nbsp;— &nbsp;Where it runs</div>
+      <h2>Drops into the agents you <em>already use.</em></h2>
+    </div>
+    <p style="color:var(--ink-2);max-width:680px;margin-bottom:8px;font-size:16px;line-height:1.55">
+      <code>recon init --mcp &lt;ide&gt;</code> writes the IDE's MCP config <em>and</em> a strict-policy
+      agent rules file so the agent uses recon's <code>code_*</code> tools before <code>Read</code>/<code>Grep</code>/<code>Glob</code> by default.
+    </p>
+
+    <div class="ides">
+      <div class="ide">
+        <div class="glyph">cc</div>
+        <h3 class="name">Claude Code</h3>
+        <div class="flag" data-copy="recon init --mcp cc">recon init --mcp cc</div>
+        <div class="meta">
+          MCP: <b>./.mcp.json</b><br/>
+          Rules: <b>./CLAUDE.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">oc</div>
+        <h3 class="name">OpenCode</h3>
+        <div class="flag" data-copy="recon init --mcp oc">recon init --mcp oc</div>
+        <div class="meta">
+          MCP: <b>./opencode.jsonc</b><br/>
+          Rules: <b>./AGENTS.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">cur</div>
+        <h3 class="name">Cursor</h3>
+        <div class="flag" data-copy="recon init --mcp cursor">recon init --mcp cursor</div>
+        <div class="meta">
+          MCP: <b>./.cursor/mcp.json</b><br/>
+          Rules: <b>./.cursor/rules/recon.mdc</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">win</div>
+        <h3 class="name">Windsurf</h3>
+        <div class="flag" data-copy="recon init --mcp windsurf">recon init --mcp windsurf</div>
+        <div class="meta">
+          MCP: <b>~/.codeium/windsurf/mcp_config.json</b><br/>
+          Rules: <b>./.windsurf/rules/recon.md</b>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- TOOLS -->
 <section id="tools">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>01</em> &nbsp;— &nbsp;Tools</div>
+      <div class="no"><em>02</em> &nbsp;— &nbsp;Tools</div>
       <h2>Twelve tools that speak <em>symbols,</em> not strings.</h2>
     </div>
 
@@ -504,7 +618,7 @@
 <section id="how">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>02</em> &nbsp;— &nbsp;The difference</div>
+      <div class="no"><em>03</em> &nbsp;— &nbsp;The difference</div>
       <h2>An agent reading code shouldn't burn the <em>context window</em> doing it.</h2>
     </div>
 
@@ -515,14 +629,23 @@
           <span class="pill">Read · Grep · Glob</span>
         </div>
 <pre><span class="c">// agent wants to understand render_map</span>
+<span class="k">Glob</span>("crates/**/*.rs")
+<span class="c">→ 312 paths  ·  ~12,000 tokens</span>
+
 <span class="k">Read</span>("crates/recon-search/src/map.rs")
 <span class="c">→ 412 lines  ·  ~6,800 tokens</span>
 
-<span class="k">Grep</span>("render_map", "crates/**")
-<span class="c">→ 34 matches  ·  ~2,100 tokens</span>
+<span class="k">Grep</span>("render_map", "crates/**")  <span class="c">+ context</span>
+<span class="c">→ 34 matches × 3-line window  ·  ~28,000 tokens</span>
+
+<span class="k">Read</span> 4 callers  <span class="c">(map_test.rs, server.rs, …)</span>
+<span class="c">→ 1,847 lines  ·  ~31,000 tokens</span>
 
 <span class="k">Read</span>("crates/recon-search/src/page_rank.rs")
 <span class="c">→ 218 lines  ·  ~3,600 tokens</span>
+
+<span class="k">Read</span> 6 more files for orientation
+<span class="c">→ 2,170 lines  ·  ~27,600 tokens</span>
 
 <span class="c">subtotal</span> <span class="k">≈ 109,000 tokens</span></pre>
         <div class="meter">
@@ -540,11 +663,20 @@
 <span class="h">code_find_symbol</span>("render_map")
 <span class="c">→ 1 hit, 3 ranked callers  ·  ~140 tokens</span>
 
+<span class="h">code_find_refs</span>("render_map")
+<span class="c">→ 7 sites in 3 files  ·  ~280 tokens</span>
+
 <span class="h">code_read_symbol</span>("…/map.rs", "render_map")
 <span class="c">→ body + 7 call sites  ·  ~780 tokens</span>
 
+<span class="h">code_outline</span>("…/server.rs")
+<span class="c">→ 32 symbols, one line each  ·  ~280 tokens</span>
+
 <span class="h">code_skeleton</span>("…/page_rank.rs")
 <span class="c">→ signatures + docs  ·  ~340 tokens</span>
+
+<span class="h">code_repo_map</span>(focus=<span class="h">"…/map.rs"</span>, budget=<span class="h">1500</span>)
+<span class="c">→ pageranked overview  ·  ~1,280 tokens</span>
 
 <span class="c">subtotal</span> <span class="h">≈ 3,100 tokens</span></pre>
         <div class="meter">
@@ -560,7 +692,7 @@
 <section id="economics">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>03</em> &nbsp;— &nbsp;What you save</div>
+      <div class="no"><em>04</em> &nbsp;— &nbsp;What you save</div>
       <h2>A benchmark that doesn't <em>round up.</em></h2>
     </div>
 
@@ -612,7 +744,7 @@
 <section>
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>04</em> &nbsp;— &nbsp;Principles</div>
+      <div class="no"><em>05</em> &nbsp;— &nbsp;Principles</div>
       <h2>Built on four small, stubborn <em>ideas.</em></h2>
     </div>
 
@@ -645,7 +777,7 @@
 <section id="benchmarks">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>05</em> &nbsp;— &nbsp;Benchmarks</div>
+      <div class="no"><em>06</em> &nbsp;— &nbsp;Benchmarks</div>
       <h2>Tested on <em>real</em> codebases. Not toy repos.</h2>
     </div>
 
@@ -711,7 +843,7 @@
 <section id="install">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>06</em> &nbsp;— &nbsp;Install</div>
+      <div class="no"><em>07</em> &nbsp;— &nbsp;Install</div>
       <h2>One <em>signed</em> binary. Your code stays <em>local.</em></h2>
     </div>
 
@@ -719,41 +851,51 @@
       <div class="step">
         <div class="n">Step 01</div>
         <h3>Sign up with GitHub</h3>
-        <p>One click. We create your account and a free API key instantly. No credit card.</p>
-        <a href="/login" style="display:inline-block;padding:10px 20px;background:var(--ink);color:var(--paper);border-radius:8px;font-size:14px;text-decoration:none;font-weight:500;margin-top:8px">Sign in with GitHub →</a>
+        <p>Free. No credit card.</p>
+        <a class="btn primary" href="/login">Sign in with GitHub <span class="arr">→</span></a>
       </div>
 
       <div class="step">
         <div class="n">Step 02</div>
         <h3>Install the binary</h3>
-        <p>Signed with SHA256 + cosign. Verified end-to-end before it lands in <code>~/.local/bin</code>. Only the license key touches the network — never your code.</p>
-<pre><span class="c"># Linux · macOS (cosign-verified, 24 MB)</span>
-curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+        <p>Signed with cosign. Only your license key touches the network.</p>
 
-<span class="c"># Windows (PowerShell)</span>
-iwr https://mcprecon.pages.dev/install.ps1 | iex
+        <div class="os-tabs" role="tablist" aria-label="Operating system">
+          <button type="button" role="tab" data-os="linux" class="active" aria-selected="true">Linux</button>
+          <button type="button" role="tab" data-os="macos">macOS</button>
+          <button type="button" role="tab" data-os="windows">Windows</button>
+        </div>
 
-<span class="c"># point it at your repo</span>
-cd your-project
-recon login <span class="h">sk-recon-xxx</span>
-recon init --mcp cc   <span class="c"># cc · cursor · windsurf · oc</span></pre>
+        <div class="os-pane active" data-os="linux">
+<pre>curl -fsSL https://mcprecon.pages.dev/install.sh | bash</pre>
+        </div>
+        <div class="os-pane" data-os="macos">
+<pre>curl -fsSL https://mcprecon.pages.dev/install.sh | bash</pre>
+        </div>
+        <div class="os-pane" data-os="windows">
+<pre>iwr https://mcprecon.pages.dev/install.ps1 | iex</pre>
+        </div>
+
+<pre style="margin-top:10px">recon login <span class="h">sk-recon-xxx</span></pre>
       </div>
 
       <div class="step">
         <div class="n">Step 03</div>
-        <h3>Claude Code uses it automatically</h3>
-        <p><code>recon init</code> writes <code>.mcp.json</code> — Claude Code picks up the 12 <code>code_*</code> tools on next start.</p>
-<pre><span class="c"># agent rules (auto-added to CLAUDE.md)</span>
-Use <span class="h">code_*</span> tools (outline, skeleton,
-find_symbol, search, repo_map) before
-Read/Grep/Glob when exploring code.</pre>
+        <h3>Wire it into your agent</h3>
+        <p><code>recon init --mcp &lt;ide&gt;</code> writes the IDE's MCP config and a strict agent-rules file so the agent uses <code>code_*</code> tools by default.</p>
+<pre>recon init --mcp cc        <span class="c"># Claude Code</span>
+recon init --mcp oc        <span class="c"># OpenCode</span>
+recon init --mcp cursor    <span class="c"># Cursor</span>
+recon init --mcp windsurf  <span class="c"># Windsurf</span></pre>
       </div>
 
       <div class="step">
         <div class="n">Step 04</div>
         <h3>Hit a limit? Upgrade.</h3>
-        <p>Free tier: 1 repo, 2K files, 200K LOC. Need more? Upgrade in 30 seconds.</p>
-        <a href="/pricing" style="display:inline-block;padding:10px 20px;border:1px solid var(--rule);border-radius:8px;font-size:14px;text-decoration:none;color:var(--ink);font-weight:500;margin-top:8px">View pricing →</a>
+        <p><b>Free</b> · 1 repo · 250 files · 10K LOC<br/>
+        <b>Pro</b> $3/mo · 10 repos · 5K files · 200K LOC<br/>
+        <b>Team</b> $7/mo · 25 repos · 50K files · 4M LOC</p>
+        <a class="btn ghost" href="/pricing">View pricing <span class="arr">→</span></a>
       </div>
     </div>
   </div>
@@ -763,7 +905,7 @@ Read/Grep/Glob when exploring code.</pre>
 <section id="faq">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>07</em> &nbsp;— &nbsp;Questions</div>
+      <div class="no"><em>08</em> &nbsp;— &nbsp;Questions</div>
       <h2>Things <em>security-minded</em> buyers ask us first.</h2>
     </div>
 
@@ -836,10 +978,10 @@ Read/Grep/Glob when exploring code.</pre>
       <div>
         <h4>Docs</h4>
         <ul>
-          <li><a href="./Docs.html#introduction">Architecture</a></li>
+          <li><a href="./Docs.html#quickstart">Quickstart</a></li>
+          <li><a href="./Docs.html#cli-account">CLI reference</a></li>
           <li><a href="./Docs.html#filter-dsl">Filter DSL</a></li>
           <li><a href="./Docs.html#performance">Benchmarks</a></li>
-          <li><a href="./Docs.html#adrs">ADRs</a></li>
         </ul>
       </div>
       <div>
@@ -860,5 +1002,7 @@ Read/Grep/Glob when exploring code.</pre>
 
 <script src="/js/theme.js"></script>
 <script src="/js/auth.js"></script>
+<script src="/js/os-tabs.js"></script>
+<script src="/js/copy-buttons.js"></script>
 </body>
 </html>

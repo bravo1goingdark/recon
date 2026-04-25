@@ -49,6 +49,19 @@ body{font-size:15px;line-height:1.55;letter-spacing:-0.005em}
 a{color:inherit;text-decoration:none}
 ::selection{background:var(--clay);color:var(--paper)}
 
+/* ─── Responsive baseline ─── */
+/* `overflow-x: clip` blocks horizontal page-level scroll without breaking
+   `position: sticky` the way `overflow-x: hidden` does. Falls back to
+   `hidden` on older engines that don't recognise `clip`. */
+html{overflow-x:clip}
+body{overflow-x:clip;max-width:100%}
+img,video,iframe,embed,object,svg{max-width:100%;height:auto}
+pre,table{max-width:100%}
+code{word-break:break-word;overflow-wrap:anywhere}
+/* Long, single-token URLs / identifiers inside paragraphs (e.g. worker
+   hostnames) won't push their column wider than the viewport. */
+p,li,td,th,summary{overflow-wrap:anywhere;word-break:break-word}
+
 .wrap{max-width:1180px;margin:0 auto;padding:0 40px}
 @media (max-width:720px){ .wrap{padding:0 24px} }
 .wrap.narrow{max-width:720px}

@@ -1,19 +1,19 @@
 /**
- * Razorpay webhook correctness.
+ * Razorpay webhook envelope correctness.
  *
- * Focus: idempotency. Razorpay retries payment.captured with the same
- * payment.id on their network blips. Without the payment_events guard,
- * every retry re-applies the tier upgrade batch — semantically OK today
- * (UPDATEs, not INSERTs) but fragile forever.
+ * The legacy one-time `payment.captured` upgrade path was removed in favour
+ * of subscriptions (see worker/src/routes/billing.ts) — the lifecycle
+ * tests that pin tier-grant + idempotency now live in
+ * `subscription-lifecycle.test.ts`.
  *
- * Each test:
- *   1. Seeds a user + pending payment via resetDb()
- *   2. Computes a valid HMAC signature for the body
- *   3. POSTs to /v1/billing/webhook
- *   4. Asserts DB state after 1st vs 2nd delivery
+ * What's left here is the envelope-level contract every event has to
+ * satisfy before any handler runs:
+ *   - HMAC signature must be present and valid
+ *   - body must parse against RazorpayWebhookBody
+ *   - unknown event types are 200/ignored so Razorpay doesn't retry-storm
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { env, getJson, resetDb } from "./setup";
 
 async function hmacHex(key: string, body: string): Promise<string> {
@@ -31,62 +31,33 @@ async function hmacHex(key: string, body: string): Promise<string> {
     .join("");
 }
 
-function webhookEnvelope(opts: {
-  paymentId: string;
-  orderId: string;
-  event?: string;
-}): string {
+function envelope(event: string): string {
   return JSON.stringify({
-    event: opts.event ?? "payment.captured",
+    event,
+    // `created_at` is required by the replay-window guard. Use "now" so
+    // tests focused on envelope/signature checks aren't tripped by a
+    // tangentially-related concern.
+    created_at: Math.floor(Date.now() / 1000),
     payload: {
-      payment: {
+      // Subscription envelope shape — handlers branch on `event.event`,
+      // so an `order.paid` body still parses through the same schema.
+      subscription: {
         entity: {
-          id: opts.paymentId,
-          order_id: opts.orderId,
-          amount: 2900,
-          currency: "USD",
+          id: "sub_envelope",
+          plan_id: "plan_x",
+          status: "active",
+          current_start: null,
+          current_end: null,
         },
       },
     },
   });
 }
 
-async function seedOrder(opts: {
-  userId: string;
-  orderId: string;
-  tier: string;
-}): Promise<void> {
-  const db = (env as { RECON_DB: D1Database }).RECON_DB;
-  await db
-    .prepare(
-      `INSERT INTO users (id, github_id, github_username, email, tier)
-       VALUES (?, ?, ?, NULL, 'Free')`,
-    )
-    .bind(opts.userId, 42, "alice")
-    .run();
-  await db
-    .prepare(
-      `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, tier, limits_json)
-       VALUES (?, 'dummyhash', 'sk-recon-abcd', 'Default', 'Free', '{}')`,
-    )
-    .bind(opts.userId)
-    .run();
-  await db
-    .prepare(
-      `INSERT INTO payments (user_id, razorpay_order_id, amount_paise, currency, status, tier)
-       VALUES (?, ?, 2900, 'USD', 'created', ?)`,
-    )
-    .bind(opts.userId, opts.orderId, opts.tier)
-    .run();
-}
-
-describe("POST /v1/billing/webhook", () => {
-  beforeEach(async () => {
-    await resetDb();
-  });
-
+describe("POST /v1/billing/webhook — envelope contract", () => {
   it("rejects missing signature with 400", async () => {
-    const body = webhookEnvelope({ paymentId: "pay_1", orderId: "order_1" });
+    await resetDb();
+    const body = envelope("subscription.charged");
     const res = await getJson("/v1/billing/webhook", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -97,7 +68,8 @@ describe("POST /v1/billing/webhook", () => {
   });
 
   it("rejects invalid HMAC signature with 400", async () => {
-    const body = webhookEnvelope({ paymentId: "pay_2", orderId: "order_2" });
+    await resetDb();
+    const body = envelope("subscription.charged");
     const res = await getJson("/v1/billing/webhook", {
       method: "POST",
       headers: {
@@ -110,9 +82,9 @@ describe("POST /v1/billing/webhook", () => {
     expect(res.body).toMatchObject({ error: "Invalid signature" });
   });
 
-  it("rejects malformed webhook body after signature passes", async () => {
-    // Valid HMAC but body that doesn't match the expected Razorpay shape.
-    const body = JSON.stringify({ event: "payment.captured", foo: "bar" });
+  it("rejects malformed body after signature passes", async () => {
+    await resetDb();
+    const body = JSON.stringify({ event: "subscription.charged", foo: "bar" });
     const sig = await hmacHex("test-webhook-secret", body);
     const res = await getJson("/v1/billing/webhook", {
       method: "POST",
@@ -126,11 +98,83 @@ describe("POST /v1/billing/webhook", () => {
     expect(res.body).toMatchObject({ error: "invalid request body" });
   });
 
-  it("ignores non-payment.captured events with 200", async () => {
-    const body = webhookEnvelope({
-      paymentId: "pay_ignore",
-      orderId: "order_ignore",
-      event: "order.paid",
+  it("ignores unknown event types with 200", async () => {
+    await resetDb();
+    const body = envelope("order.paid");
+    const sig = await hmacHex("test-webhook-secret", body);
+    const res = await getJson("/v1/billing/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Razorpay-Signature": sig,
+      },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "ignored", event: "order.paid" });
+  });
+
+  it("rejects events older than the 24-hour replay window AND records audit row", async () => {
+    // A captured-and-replayed body from weeks ago has a valid HMAC for the
+    // secret's full lifetime — signature alone doesn't bound replay risk.
+    // The created_at field caps how stale a delivery can be (24h matches
+    // Razorpay's retry envelope so we don't reject legitimate retries).
+    await resetDb();
+    const stale = Math.floor(Date.now() / 1000) - 25 * 60 * 60; // 25h ago
+    const body = JSON.stringify({
+      event: "subscription.charged",
+      created_at: stale,
+      payload: {
+        subscription: {
+          entity: {
+            id: "sub_replay",
+            plan_id: "plan_x",
+            status: "active",
+            current_start: null,
+            current_end: null,
+          },
+        },
+      },
+    });
+    const sig = await hmacHex("test-webhook-secret", body);
+    const res = await getJson("/v1/billing/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Razorpay-Signature": sig,
+      },
+      body,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      error: "Webhook event outside replay window",
+    });
+
+    // Audit trail: dropped event should be queryable in webhook_events_dropped.
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const dropped = await db
+      .prepare(
+        "SELECT reason FROM webhook_events_dropped WHERE razorpay_subscription_id = ?",
+      )
+      .bind("sub_replay")
+      .first<{ reason: string }>();
+    expect(dropped?.reason).toBe("replay_window_exceeded");
+  });
+
+  it("accepts events that are stale-but-inside the 24h window (Razorpay retry)", async () => {
+    // Razorpay retries deliveries for up to ~24h after a worker failure,
+    // and each retry carries the *original* created_at. A stale-by-12h
+    // event is legitimate and must NOT be rejected.
+    await resetDb();
+    const inside = Math.floor(Date.now() / 1000) - 12 * 60 * 60;
+    const body = JSON.stringify({
+      event: "order.paid", // ignored at dispatch but parses through guard
+      created_at: inside,
+      payload: {
+        subscription: {
+          entity: { id: "sub_x", plan_id: "p", status: "active" },
+        },
+      },
     });
     const sig = await hmacHex("test-webhook-secret", body);
     const res = await getJson("/v1/billing/webhook", {
@@ -145,10 +189,24 @@ describe("POST /v1/billing/webhook", () => {
     expect(res.body).toMatchObject({ status: "ignored", event: "order.paid" });
   });
 
-  it("upgrades tier on first delivery of payment.captured", async () => {
-    await seedOrder({ userId: "user_abc", orderId: "order_ok", tier: "Pro" });
-
-    const body = webhookEnvelope({ paymentId: "pay_ok", orderId: "order_ok" });
+  it("rejects events with missing created_at", async () => {
+    // Razorpay always sends created_at; a body without it is either a bug
+    // upstream or a manually-crafted replay attempt.
+    await resetDb();
+    const body = JSON.stringify({
+      event: "subscription.charged",
+      payload: {
+        subscription: {
+          entity: {
+            id: "sub_no_ts",
+            plan_id: "plan_x",
+            status: "active",
+            current_start: null,
+            current_end: null,
+          },
+        },
+      },
+    });
     const sig = await hmacHex("test-webhook-secret", body);
     const res = await getJson("/v1/billing/webhook", {
       method: "POST",
@@ -158,57 +216,34 @@ describe("POST /v1/billing/webhook", () => {
       },
       body,
     });
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: "ok", payment_id: "pay_ok" });
-
-    const db = (env as { RECON_DB: D1Database }).RECON_DB;
-    const user = await db
-      .prepare("SELECT tier FROM users WHERE id = ?")
-      .bind("user_abc")
-      .first();
-    expect(user?.tier).toBe("Pro");
-
-    const payment = await db
-      .prepare(
-        "SELECT status, razorpay_payment_id FROM payments WHERE razorpay_order_id = ?",
-      )
-      .bind("order_ok")
-      .first();
-    expect(payment?.status).toBe("captured");
-    expect(payment?.razorpay_payment_id).toBe("pay_ok");
-
-    const pe = await db
-      .prepare(
-        "SELECT event_type, processed_at FROM payment_events WHERE razorpay_payment_id = ?",
-      )
-      .bind("pay_ok")
-      .first();
-    expect(pe?.event_type).toBe("payment.captured");
-    expect(pe?.processed_at).not.toBeNull();
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      error: "Webhook event missing created_at",
+    });
   });
 
-  it("is idempotent on retry — returns already_processed without side effects", async () => {
-    await seedOrder({ userId: "user_idem", orderId: "order_idem", tier: "Pro" });
-
-    const body = webhookEnvelope({
-      paymentId: "pay_idem",
-      orderId: "order_idem",
-    });
+  it("dedupes by X-Razorpay-Event-Id — second delivery returns already_processed", async () => {
+    // Razorpay's network occasionally double-fires the same event-id during
+    // retries. The webhook_events_seen table guarantees side effects run
+    // exactly once per event-id, regardless of how many times Razorpay
+    // delivers the body.
+    await resetDb();
+    const body = envelope("order.paid"); // Unknown event = ignored at dispatch.
     const sig = await hmacHex("test-webhook-secret", body);
     const headers = {
       "Content-Type": "application/json",
       "X-Razorpay-Signature": sig,
+      "X-Razorpay-Event-Id": "evt_dedup_test",
     };
 
-    // First delivery → ok
     const first = await getJson("/v1/billing/webhook", {
       method: "POST",
       headers,
       body,
     });
-    expect(first.body).toMatchObject({ status: "ok" });
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ status: "ignored", event: "order.paid" });
 
-    // Second delivery (retry) → already_processed, no re-run.
     const second = await getJson("/v1/billing/webhook", {
       method: "POST",
       headers,
@@ -217,30 +252,28 @@ describe("POST /v1/billing/webhook", () => {
     expect(second.status).toBe(200);
     expect(second.body).toMatchObject({
       status: "already_processed",
-      payment_id: "pay_idem",
+      event_id: "evt_dedup_test",
     });
-
-    // Verify DB state: still exactly one payment_events row, tier unchanged.
-    const db = (env as { RECON_DB: D1Database }).RECON_DB;
-    const count = await db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM payment_events WHERE razorpay_payment_id = ?",
-      )
-      .bind("pay_idem")
-      .first();
-    expect((count as { n: number }).n).toBe(1);
-
-    const user = await db
-      .prepare("SELECT tier FROM users WHERE id = ?")
-      .bind("user_idem")
-      .first();
-    expect(user?.tier).toBe("Pro"); // no accidental re-upgrade
   });
 
-  it("handles webhook for unknown order_id without erroring", async () => {
-    const body = webhookEnvelope({
-      paymentId: "pay_orphan",
-      orderId: "order_orphan",
+  it("ignores payment.captured (legacy path removed) with 200", async () => {
+    // Razorpay still emits payment.captured for every subscription charge,
+    // but the worker only acts on subscription.* events. The dispatch falls
+    // through to the default branch and 200s so Razorpay doesn't retry.
+    await resetDb();
+    const body = JSON.stringify({
+      event: "payment.captured",
+      created_at: Math.floor(Date.now() / 1000),
+      payload: {
+        payment: {
+          entity: {
+            id: "pay_x",
+            order_id: "order_x",
+            amount: 300,
+            currency: "USD",
+          },
+        },
+      },
     });
     const sig = await hmacHex("test-webhook-secret", body);
     const res = await getJson("/v1/billing/webhook", {
@@ -251,11 +284,10 @@ describe("POST /v1/billing/webhook", () => {
       },
       body,
     });
-    // We still 200 so Razorpay stops retrying, but report the unknown.
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
-      status: "unknown_order",
-      order_id: "order_orphan",
+      status: "ignored",
+      event: "payment.captured",
     });
   });
 });
