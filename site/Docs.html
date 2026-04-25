@@ -288,29 +288,6 @@ VERSION=v0.2.0 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 <span class="c"># upgrade in place (lands the latest published release)</span>
 recon update</pre>
 
-    <h3>Manual install &amp; signature verification</h3>
-    <p>Don't want to pipe a script into your shell? Grab the tarball and <code>SHA256SUMS.txt</code> from the <a href="https://github.com/bravo1goingdark/recon/releases">releases page</a> and verify by hand:</p>
-<pre>cosign verify-blob \
-  --certificate SHA256SUMS.txt.pem \
-  --signature SHA256SUMS.txt.sig \
-  --certificate-identity-regexp '^https://github.com/.*/.github/workflows/release.yml@' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  SHA256SUMS.txt
-
-sha256sum -c SHA256SUMS.txt
-tar -xzf recon-x86_64-unknown-linux-gnu.tar.gz
-sudo mv recon /usr/local/bin/</pre>
-
-    <h3>Build from source</h3>
-<pre>git clone https://github.com/bravo1goingdark/recon
-cd recon
-RECON_LICENSE_HMAC_KEY=&lt;your-secret&gt; cargo build -p recon-cli --release
-./target/release/recon --version</pre>
-
-    <p class="muted" style="font-size:13px;color:var(--ink-3)">
-      Note: <code>RECON_LICENSE_HMAC_KEY</code> is required for release builds — it must match the worker's <code>LICENSE_HMAC_SECRET</code>. Building without it fails on purpose so dev binaries can't accidentally validate against production licenses.
-    </p>
-
     <!-- IDE SETUP -->
     <h2 id="ide-setup"><span class="no">03</span>IDE setup</h2>
 
