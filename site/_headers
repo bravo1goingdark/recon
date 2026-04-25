@@ -31,7 +31,10 @@
   # pricing.js can load the widget without opening the door to
   # arbitrary third-party scripts. form-action allows the GitHub OAuth
   # top-level redirect target; everything else POSTs same-origin.
-  Content-Security-Policy: default-src 'self'; script-src 'self' https://checkout.razorpay.com https://cdn.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://mcprecon.pages.dev https://api.razorpay.com https://lumberjack.razorpay.com; frame-src https://api.razorpay.com https://checkout.razorpay.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com https://api.razorpay.com
+  # Google Fonts: style-src allows the @font-face stylesheet at
+  # fonts.googleapis.com; font-src allows the font binaries served
+  # from fonts.gstatic.com (Instrument Serif / Geist / JetBrains Mono).
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://checkout.razorpay.com https://cdn.razorpay.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://mcprecon.pages.dev https://api.razorpay.com https://lumberjack.razorpay.com; frame-src https://api.razorpay.com https://checkout.razorpay.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com https://api.razorpay.com
 
 /dashboard
   Cache-Control: no-store

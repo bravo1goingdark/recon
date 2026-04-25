@@ -38,13 +38,20 @@ async function updateNav() {
 
   var user = await checkAuth();
   if (user) {
+    // Username text is wrapped so the mobile breakpoint can hide it via
+    // CSS (.nav-username) without losing the avatar's link-to-dashboard
+    // affordance on small screens. aria-label keeps the link readable
+    // for screen readers when the visible text is hidden.
     el.innerHTML =
-      '<a href="/dashboard" style="font-family:var(--mono);font-size:12px;display:flex;align-items:center;gap:6px">' +
-      (user.avatar_url
-        ? '<img src="' + escapeHtml(user.avatar_url) + '" width="22" height="22" style="border-radius:50%">'
-        : "") +
+      '<a href="/dashboard" class="nav-user" aria-label="' +
       escapeHtml(user.github_username) +
-      "</a>";
+      ' — open dashboard" style="font-family:var(--mono);font-size:12px;display:flex;align-items:center;gap:6px">' +
+      (user.avatar_url
+        ? '<img src="' + escapeHtml(user.avatar_url) + '" width="32" height="32" style="border-radius:50%;display:block">'
+        : "") +
+      '<span class="nav-username">' +
+      escapeHtml(user.github_username) +
+      "</span></a>";
   } else {
     el.innerHTML = '<a href="/login" class="btn sm ghost">Sign in</a>';
   }

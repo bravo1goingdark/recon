@@ -1,0 +1,61 @@
+<!doctype html>
+<!--
+  recon logo source — render to PNG at the size you need.
+
+    # 1024×1024 transparent (drop into GitHub org/profile, Razorpay merchant)
+    google-chrome --headless --disable-gpu --hide-scrollbars \
+      --default-background-color=00000000 \
+      --window-size=1024,1024 \
+      --screenshot=site/logo.png \
+      file://$(pwd)/scripts/logo.html
+
+    # 512×512 paper-coloured (for slots that reject transparent PNGs)
+    google-chrome --headless --disable-gpu --hide-scrollbars \
+      --window-size=512,512 \
+      --screenshot=site/logo-512.png \
+      "file://$(pwd)/scripts/logo.html?bg=paper"
+
+  The icon scales to whatever viewport you point Chrome at; the SVG fills
+  the square with 12% safe padding so concentric outer rings don't clip
+  in tight crops (some platforms apply a circular mask).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>recon — logo</title>
+<style>
+  :root{
+    --paper: oklch(98.5% 0.004 80);
+    --ink:   oklch(22%   0.01  60);
+    --clay:  oklch(58%   0.14  45);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100vw;height:100vh;overflow:hidden}
+  body{display:flex;align-items:center;justify-content:center}
+  body[data-bg="paper"]{background:var(--paper)}
+  body[data-bg="ink"]{background:var(--ink)}
+  svg{width:88%;height:88%;color:var(--ink)}
+  body[data-bg="ink"] svg{color:var(--paper)}
+</style>
+<script>
+(function(){
+  var p = new URLSearchParams(location.search);
+  var bg = p.get('bg');
+  if (bg) document.documentElement.dataset.pendingBg = bg;
+  document.addEventListener('DOMContentLoaded', function(){
+    if (bg) document.body.setAttribute('data-bg', bg);
+  });
+})();
+</script>
+</head>
+<body>
+  <svg viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="40" cy="40" r="4"  fill="currentColor"/>
+    <circle cx="40" cy="40" r="14" stroke="currentColor" stroke-width="1.5"/>
+    <circle cx="40" cy="40" r="24" stroke="currentColor" stroke-width="1" opacity="0.55"/>
+    <circle cx="40" cy="40" r="34" stroke="currentColor" stroke-width="1" opacity="0.25"/>
+    <line   x1="40" y1="40" x2="68" y2="20" stroke="var(--clay)" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="68" cy="20" r="3.5" fill="var(--clay)"/>
+  </svg>
+</body>
+</html>

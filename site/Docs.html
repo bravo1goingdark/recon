@@ -87,7 +87,7 @@
     position:sticky;top:0;background:color-mix(in oklab, var(--paper) 85%, transparent);
     backdrop-filter:saturate(1.2) blur(8px);z-index:20;
   }
-  nav.top .mark{font-family:var(--serif);font-size:22px;letter-spacing:-0.01em;display:flex;align-items:baseline;gap:8px}
+  nav.top .mark{font-family:var(--serif);font-size:22px;letter-spacing:-0.01em;display:flex;align-items:center;gap:10px}
   nav.top .dot{width:5px;height:5px;border-radius:50%;background:var(--clay);display:inline-block;transform:translateY(-3px)}
   nav.top ul{display:flex;gap:28px;list-style:none;font-size:13px;color:var(--ink-2)}
   nav.top ul a.active{color:var(--ink)}
@@ -195,7 +195,7 @@
 <body>
 
 <nav class="top">
-  <a href="index.html" class="mark">recon<span class="dot"></span></a>
+  <a href="index.html" class="mark" aria-label="recon home"><svg width="24" height="24" viewBox="0 0 80 80" fill="none"><circle cx="40" cy="40" r="4" fill="currentColor"/><circle cx="40" cy="40" r="14" stroke="currentColor" stroke-width="1.5"/><circle cx="40" cy="40" r="24" stroke="currentColor" stroke-width="1" opacity="0.55"/><circle cx="40" cy="40" r="34" stroke="currentColor" stroke-width="1" opacity="0.25"/><line x1="40" y1="40" x2="68" y2="20" stroke="var(--clay)" stroke-width="2" stroke-linecap="round"/><circle cx="68" cy="20" r="3.5" fill="var(--clay)"/></svg><span>recon<span class="dot"></span></span></a>
   <ul>
     <li><a href="index.html#tools">Tools</a></li>
     <li><a href="index.html#how">How it works</a></li>
