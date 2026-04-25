@@ -29,3 +29,10 @@ worker/dist/
 .wrangler/
 
 CLAUDE.md
+
+# Local IDE MCP wiring written by `recon init --mcp <ide>`
+.mcp.json
+opencode.jsonc
+.cursor/mcp.json
+.windsurf/
+AGENTS.md
