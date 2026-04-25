@@ -4,6 +4,26 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.2.1] — 2026-04-25
+
+### Fixed
+
+- **`recon init --mcp <ide>` now smoke-tests the server before declaring
+  success.** Previously, when `recon serve` failed at startup (rejected
+  license, over-tier repo, panic during indexer init, missing
+  credentials, …) the IDE surfaced only `MCP error -32000: connection
+  closed` with no detail — the child process's stderr was swallowed by
+  the MCP transport in Claude Code / opencode / Cursor / Windsurf and
+  routed to a debug log most users never read. `init` now spawns the
+  same binary it just wired into the IDE config, waits 4 s, and either
+  declares the test passed (server stayed alive) or surfaces the
+  child's stderr verbatim inside a clearly labeled block, with a hint
+  that this is the same content the IDE would have hidden as
+  `connection closed`. Idempotent — re-run `recon init --mcp <ide>`
+  after fixing the surfaced cause.
+
+[0.2.1]: https://github.com/bravo1goingdark/recon/releases/tag/v0.2.1
+
 ## [0.2.0] — 2026-04-25
 
 ### Added
