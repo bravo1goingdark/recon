@@ -242,6 +242,32 @@
   .step pre .c{color:var(--ink-3)}
   .step pre .h{color:var(--clay)}
 
+  /* OS picker tabs (Linux / macOS / Windows) inside Step 02 */
+  .os-tabs{display:flex;gap:0;border:1px solid var(--rule);border-radius:6px;overflow:hidden;margin-bottom:14px;width:fit-content}
+  .os-tabs button{
+    background:none;border:0;padding:9px 18px;font-family:var(--mono);font-size:11px;
+    letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-3);cursor:pointer;
+    transition:background .15s, color .15s;border-right:1px solid var(--rule);
+  }
+  .os-tabs button:last-child{border-right:0}
+  .os-tabs button:hover{color:var(--ink)}
+  .os-tabs button.active{background:var(--ink);color:var(--paper)}
+  .os-pane{display:none}
+  .os-pane.active{display:block}
+
+  /* ─────── IDE MATRIX (works with any agent) ─────── */
+  .ides{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft);margin-top:32px}
+  @media (max-width:900px){ .ides{grid-template-columns:repeat(2,1fr)} }
+  @media (max-width:500px){ .ides{grid-template-columns:1fr} }
+  .ide{background:var(--paper);padding:24px 22px;display:flex;flex-direction:column;gap:8px;transition:background .15s}
+  .ide:hover{background:var(--paper-2)}
+  .ide .glyph{font-family:var(--mono);font-size:11px;color:var(--clay);letter-spacing:0.14em;text-transform:uppercase}
+  .ide .name{font-family:var(--serif);font-size:22px;letter-spacing:-0.02em;color:var(--ink);margin:0}
+  .ide .flag{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--paper-2);padding:6px 10px;border:1px solid var(--rule-soft);border-radius:4px;width:fit-content}
+  .ide .ide:hover .flag{background:var(--paper)}
+  .ide .meta{font-family:var(--mono);font-size:11px;color:var(--ink-3);line-height:1.6;margin-top:auto}
+  .ide .meta b{color:var(--ink-2);font-weight:500}
+
   /* ─────── QUOTE / FOOTER LEAD ─────── */
   .quote{padding:120px 0 120px}
   .quote blockquote{
@@ -415,11 +441,64 @@
   </div>
 </div>
 
+<!-- IDE MATRIX -->
+<section id="ides">
+  <div class="wrap">
+    <div class="sechdr">
+      <div class="no"><em>01</em> &nbsp;— &nbsp;Where it runs</div>
+      <h2>Drops into the agents you <em>already use.</em></h2>
+    </div>
+    <p style="color:var(--ink-2);max-width:680px;margin-bottom:8px;font-size:16px;line-height:1.55">
+      <code>recon init --mcp &lt;ide&gt;</code> writes the IDE's MCP config <em>and</em> a strict-policy
+      agent rules file so the agent uses recon's <code>code_*</code> tools before <code>Read</code>/<code>Grep</code>/<code>Glob</code> by default.
+    </p>
+
+    <div class="ides">
+      <div class="ide">
+        <div class="glyph">cc</div>
+        <h3 class="name">Claude Code</h3>
+        <div class="flag">recon init --mcp cc</div>
+        <div class="meta">
+          MCP: <b>./.mcp.json</b><br/>
+          Rules: <b>./CLAUDE.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">oc</div>
+        <h3 class="name">OpenCode</h3>
+        <div class="flag">recon init --mcp oc</div>
+        <div class="meta">
+          MCP: <b>./opencode.jsonc</b><br/>
+          Rules: <b>./AGENTS.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">cur</div>
+        <h3 class="name">Cursor</h3>
+        <div class="flag">recon init --mcp cursor</div>
+        <div class="meta">
+          MCP: <b>./.cursor/mcp.json</b><br/>
+          Rules: <b>./.cursor/rules/recon.mdc</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">win</div>
+        <h3 class="name">Windsurf</h3>
+        <div class="flag">recon init --mcp windsurf</div>
+        <div class="meta">
+          MCP: <b>~/.codeium/windsurf/mcp_config.json</b><br/>
+          Rules: <b>./.windsurf/rules/recon.md</b>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- TOOLS -->
 <section id="tools">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>01</em> &nbsp;— &nbsp;Tools</div>
+      <div class="no"><em>02</em> &nbsp;— &nbsp;Tools</div>
       <h2>Twelve tools that speak <em>symbols,</em> not strings.</h2>
     </div>
 
@@ -504,7 +583,7 @@
 <section id="how">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>02</em> &nbsp;— &nbsp;The difference</div>
+      <div class="no"><em>03</em> &nbsp;— &nbsp;The difference</div>
       <h2>An agent reading code shouldn't burn the <em>context window</em> doing it.</h2>
     </div>
 
@@ -515,14 +594,23 @@
           <span class="pill">Read · Grep · Glob</span>
         </div>
 <pre><span class="c">// agent wants to understand render_map</span>
+<span class="k">Glob</span>("crates/**/*.rs")
+<span class="c">→ 312 paths  ·  ~12,000 tokens</span>
+
 <span class="k">Read</span>("crates/recon-search/src/map.rs")
 <span class="c">→ 412 lines  ·  ~6,800 tokens</span>
 
-<span class="k">Grep</span>("render_map", "crates/**")
-<span class="c">→ 34 matches  ·  ~2,100 tokens</span>
+<span class="k">Grep</span>("render_map", "crates/**")  <span class="c">+ context</span>
+<span class="c">→ 34 matches × 3-line window  ·  ~28,000 tokens</span>
+
+<span class="k">Read</span> 4 callers  <span class="c">(map_test.rs, server.rs, …)</span>
+<span class="c">→ 1,847 lines  ·  ~31,000 tokens</span>
 
 <span class="k">Read</span>("crates/recon-search/src/page_rank.rs")
 <span class="c">→ 218 lines  ·  ~3,600 tokens</span>
+
+<span class="k">Read</span> 6 more files for orientation
+<span class="c">→ 2,170 lines  ·  ~27,600 tokens</span>
 
 <span class="c">subtotal</span> <span class="k">≈ 109,000 tokens</span></pre>
         <div class="meter">
@@ -546,6 +634,9 @@
 <span class="h">code_skeleton</span>("…/page_rank.rs")
 <span class="c">→ signatures + docs  ·  ~340 tokens</span>
 
+<span class="h">code_repo_map</span>(focus=<span class="h">"…/map.rs"</span>, budget=<span class="h">2000</span>)
+<span class="c">→ pageranked overview  ·  ~1,840 tokens</span>
+
 <span class="c">subtotal</span> <span class="h">≈ 3,100 tokens</span></pre>
         <div class="meter">
           <div class="lab"><span>tokens burned</span><span>3,100 &nbsp;·&nbsp; ~35× less</span></div>
@@ -560,7 +651,7 @@
 <section id="economics">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>03</em> &nbsp;— &nbsp;What you save</div>
+      <div class="no"><em>04</em> &nbsp;— &nbsp;What you save</div>
       <h2>A benchmark that doesn't <em>round up.</em></h2>
     </div>
 
@@ -612,7 +703,7 @@
 <section>
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>04</em> &nbsp;— &nbsp;Principles</div>
+      <div class="no"><em>05</em> &nbsp;— &nbsp;Principles</div>
       <h2>Built on four small, stubborn <em>ideas.</em></h2>
     </div>
 
@@ -645,7 +736,7 @@
 <section id="benchmarks">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>05</em> &nbsp;— &nbsp;Benchmarks</div>
+      <div class="no"><em>06</em> &nbsp;— &nbsp;Benchmarks</div>
       <h2>Tested on <em>real</em> codebases. Not toy repos.</h2>
     </div>
 
@@ -711,7 +802,7 @@
 <section id="install">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>06</em> &nbsp;— &nbsp;Install</div>
+      <div class="no"><em>07</em> &nbsp;— &nbsp;Install</div>
       <h2>One <em>signed</em> binary. Your code stays <em>local.</em></h2>
     </div>
 
@@ -726,33 +817,60 @@
       <div class="step">
         <div class="n">Step 02</div>
         <h3>Install the binary</h3>
-        <p>Signed with SHA256 + cosign. Verified end-to-end before it lands in <code>~/.local/bin</code>. Only the license key touches the network — never your code.</p>
-<pre><span class="c"># Linux · macOS (cosign-verified, 24 MB)</span>
+        <p>Signed with SHA256 + cosign. Verified end-to-end before it lands in <code>~/.local/bin</code>. Only the license key ever touches the network — never your code.</p>
+
+        <div class="os-tabs" role="tablist" aria-label="Operating system">
+          <button type="button" role="tab" data-os="linux" class="active" aria-selected="true">Linux</button>
+          <button type="button" role="tab" data-os="macos">macOS</button>
+          <button type="button" role="tab" data-os="windows">Windows</button>
+        </div>
+
+        <div class="os-pane active" data-os="linux">
+<pre><span class="c"># Linux (x86_64, aarch64) — 24 MB, cosign-verified</span>
 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
-<span class="c"># Windows (PowerShell)</span>
+<span class="c"># installs to ~/.local/bin/recon</span>
+<span class="c"># override with INSTALL_DIR=/usr/local/bin curl ... | bash</span></pre>
+        </div>
+
+        <div class="os-pane" data-os="macos">
+<pre><span class="c"># macOS (Intel + Apple Silicon) — 24 MB, cosign-verified</span>
+curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+
+<span class="c"># first launch may prompt Gatekeeper — Apple-notarized</span></pre>
+        </div>
+
+        <div class="os-pane" data-os="windows">
+<pre><span class="c"># Windows (x86_64) — PowerShell</span>
 iwr https://mcprecon.pages.dev/install.ps1 | iex
 
-<span class="c"># point it at your repo</span>
-cd your-project
-recon login <span class="h">sk-recon-xxx</span>
-recon init --mcp cc   <span class="c"># cc · cursor · windsurf · oc</span></pre>
+<span class="c"># installs to %LOCALAPPDATA%\Programs\recon\recon.exe</span></pre>
+        </div>
+
+<pre style="margin-top:14px"><span class="c"># then, on every machine you use:</span>
+recon login <span class="h">sk-recon-xxx</span>          <span class="c"># caches signed license at ~/.config/recon/</span></pre>
       </div>
 
       <div class="step">
         <div class="n">Step 03</div>
-        <h3>Claude Code uses it automatically</h3>
-        <p><code>recon init</code> writes <code>.mcp.json</code> — Claude Code picks up the 12 <code>code_*</code> tools on next start.</p>
-<pre><span class="c"># agent rules (auto-added to CLAUDE.md)</span>
-Use <span class="h">code_*</span> tools (outline, skeleton,
-find_symbol, search, repo_map) before
-Read/Grep/Glob when exploring code.</pre>
+        <h3>Wire it into your agent</h3>
+        <p>One command per project. <code>recon init --mcp &lt;ide&gt;</code> registers the repo with your account, indexes it (parallel parse, &lt;1 s warm), writes the IDE's MCP config, and drops a <b>strict-policy</b> agent rules file so the agent uses recon's <code>code_*</code> tools by default — not just when it remembers to.</p>
+<pre><span class="c"># inside any project</span>
+recon init --mcp cc        <span class="c"># Claude Code  → .mcp.json        + CLAUDE.md</span>
+recon init --mcp oc        <span class="c"># OpenCode     → opencode.jsonc   + AGENTS.md</span>
+recon init --mcp cursor    <span class="c"># Cursor       → .cursor/mcp.json + .cursor/rules/recon.mdc</span>
+recon init --mcp windsurf  <span class="c"># Windsurf     → ~/.codeium/...   + .windsurf/rules/recon.md</span>
+
+<span class="c"># health-check anytime — one command, exit-code-aware</span>
+recon doctor</pre>
       </div>
 
       <div class="step">
         <div class="n">Step 04</div>
         <h3>Hit a limit? Upgrade.</h3>
-        <p>Free tier: 1 repo, 2K files, 200K LOC. Need more? Upgrade in 30 seconds.</p>
+        <p><b>Free tier:</b> 1 repo · 250 files · 10K LOC — generous enough to feel the difference on a small project.</p>
+        <p><b>Pro</b> ($3/mo · ₹249/mo): 10 repos · 5K files · 200K LOC. <b>Team</b> ($7/mo): 25 repos · 50K files · 4M LOC.</p>
+        <p>Limits are enforced server-side by atomic <code>POST /v1/account/repos</code> — a patched binary can't bypass them. Manage slots with <code>recon repos list</code> and <code>recon repos remove</code>.</p>
         <a href="/pricing" style="display:inline-block;padding:10px 20px;border:1px solid var(--rule);border-radius:8px;font-size:14px;text-decoration:none;color:var(--ink);font-weight:500;margin-top:8px">View pricing →</a>
       </div>
     </div>
@@ -763,7 +881,7 @@ Read/Grep/Glob when exploring code.</pre>
 <section id="faq">
   <div class="wrap">
     <div class="sechdr">
-      <div class="no"><em>07</em> &nbsp;— &nbsp;Questions</div>
+      <div class="no"><em>08</em> &nbsp;— &nbsp;Questions</div>
       <h2>Things <em>security-minded</em> buyers ask us first.</h2>
     </div>
 
@@ -860,5 +978,38 @@ Read/Grep/Glob when exploring code.</pre>
 
 <script src="/js/theme.js"></script>
 <script src="/js/auth.js"></script>
+<script>
+  // OS picker on the install section. CSS-only fallback would need
+  // labelled radios + :checked siblings; one tiny script is cleaner.
+  (function () {
+    var tabs = document.querySelectorAll(".os-tabs button[data-os]");
+    var panes = document.querySelectorAll(".os-pane[data-os]");
+    if (!tabs.length) return;
+
+    // Auto-select the user's platform on first load if we haven't been
+    // told otherwise. Best-effort detection — falls back to Linux.
+    var ua = navigator.userAgent || "";
+    var detected = /Win/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "macos" : "linux";
+
+    function activate(os) {
+      tabs.forEach(function (t) {
+        var on = t.dataset.os === os;
+        t.classList.toggle("active", on);
+        t.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      panes.forEach(function (p) {
+        p.classList.toggle("active", p.dataset.os === os);
+      });
+    }
+
+    tabs.forEach(function (t) {
+      t.addEventListener("click", function () {
+        activate(t.dataset.os);
+      });
+    });
+
+    activate(detected);
+  })();
+</script>
 </body>
 </html>
