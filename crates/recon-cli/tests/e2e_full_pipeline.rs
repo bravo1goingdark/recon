@@ -690,3 +690,29 @@ async fn e2e_sensitive_file_redaction() {
         ".env file should not be indexed: {result}"
     );
 }
+
+/// Two identical hybrid-search calls must return byte-identical responses.
+///
+/// Hybrid mode fuses Tantivy BM25 and text-grep hits via reciprocal rank
+/// fusion. The fusion table was historically an `AHashMap`, so ties on the
+/// fused score were broken by hash iteration order — non-deterministic
+/// across runs, which busts the LLM client's prompt cache for repeated
+/// queries. Switching to `BTreeMap` gives deterministic key order and
+/// therefore byte-stable JSON.
+#[tokio::test]
+async fn e2e_hybrid_search_deterministic() {
+    let tmp = tempfile::tempdir().unwrap();
+    build_rust_project(tmp.path());
+
+    let server = make_server(tmp.path()).await;
+    server.index_repo().await.unwrap();
+
+    let args = r#"{"query": "Config", "mode": "hybrid", "filter": null}"#;
+    let first = server.query_tool("code_search", args).await;
+    let second = server.query_tool("code_search", args).await;
+
+    assert_eq!(
+        first, second,
+        "hybrid search must be byte-stable across calls\nfirst:  {first}\nsecond: {second}"
+    );
+}

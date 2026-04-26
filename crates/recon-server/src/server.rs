@@ -1529,7 +1529,14 @@ impl ReconServer {
             };
             let text_hits = self.text_searcher.search(&q).unwrap_or_default();
 
-            let mut rrf: ahash::AHashMap<String, (f64, serde_json::Value)> = ahash::AHashMap::new();
+            // BTreeMap (not AHashMap) so iteration order is lexicographic by key.
+            // Keys are deterministic strings (`{path}:{name}` or `{path}:{line}`),
+            // so identical inputs produce byte-identical outputs — important for
+            // prompt-cache hits when the agent re-issues the same hybrid query.
+            // With AHashMap, ties on RRF score would be broken by hash iteration
+            // order, which varies across runs.
+            let mut rrf: std::collections::BTreeMap<String, (f64, serde_json::Value)> =
+                std::collections::BTreeMap::new();
             let k = 60.0;
 
             for (rank, hit) in tantivy_hits.iter().enumerate() {
