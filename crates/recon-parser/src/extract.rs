@@ -116,6 +116,11 @@ impl<'a> Ctx<'a> {
             ) {
                 doc_parts.push(self.src[p.byte_range()].trim());
                 prev = p.prev_sibling();
+            } else if matches!(kind, "attribute_item" | "inner_attribute_item" | "decorator")
+            {
+                // Skip past attributes/decorators that sit between a doc and the
+                // item (`#[derive(...)]`, `#[inline]`, Python `@decorator`, etc.).
+                prev = p.prev_sibling();
             } else if kind == "expression_statement" {
                 if let Some(child) = p.child(0) {
                     if child.kind() == "string" {
@@ -298,7 +303,32 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
             "impl_item" => {
                 if let Some(type_node) = child.child_by_field_name("type") {
                     let type_name = &ctx.src[type_node.byte_range()];
-                    extract_rust(ctx, child, Some((parent.map_or(0, |p| p.0), type_name)));
+                    // Resolve impl block to the struct/enum/trait it implements so
+                    // methods nest under the type in outlines and parent chains.
+                    // Strip generics ("Foo<T>" -> "Foo") for the lookup; fall back
+                    // to the enclosing scope id if the type is foreign or declared
+                    // after the impl block.
+                    let base_name = type_name
+                        .split('<')
+                        .next()
+                        .unwrap_or(type_name)
+                        .trim();
+                    let type_id = ctx
+                        .symbols
+                        .iter()
+                        .rev()
+                        .find(|s| {
+                            s.name.as_str() == base_name
+                                && matches!(
+                                    s.kind,
+                                    SymbolKind::Struct
+                                        | SymbolKind::Enum
+                                        | SymbolKind::Trait
+                                )
+                        })
+                        .map(|s| s.id)
+                        .unwrap_or_else(|| parent.map_or(0, |p| p.0));
+                    extract_rust(ctx, child, Some((type_id, type_name)));
                 }
             }
             "const_item" => {
@@ -1069,6 +1099,169 @@ impl Foo {
             .unwrap();
         assert_eq!(baz.qualified_name.as_str(), "Foo::baz");
         assert_eq!(baz.kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn rust_impl_method_parent_id_points_to_struct() {
+        // Regression: methods inside `impl Foo` previously got parent_id = Some(0)
+        // (a sentinel), so `code_outline` (which filters parent_id.is_none()) dropped
+        // them and parent chains skipped the type. Now the parser resolves impl
+        // blocks to the struct/enum/trait id.
+        let src = br#"
+pub struct Foo {
+    pub x: i32,
+}
+
+impl Foo {
+    pub fn bar(&self) -> i32 { self.x }
+    pub fn baz(&self) {}
+}
+
+pub enum Color { Red, Green }
+
+impl Color {
+    pub fn name(&self) -> &str { "" }
+}
+
+// Generic impl: lookup must strip generics.
+pub struct Bag<T> { v: Vec<T> }
+
+impl<T> Bag<T> {
+    pub fn len(&self) -> usize { self.v.len() }
+}
+
+// Foreign-type impl falls back to enclosing scope.
+impl ::std::fmt::Display for Foo {
+    fn fmt(&self, _f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result { Ok(()) }
+}
+"#;
+        let result = extract_symbols(src, Language::Rust, Path::new("src/lib.rs"));
+        let foo = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "Foo" && s.kind == SymbolKind::Struct)
+            .expect("Foo struct missing");
+        let bar = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "bar")
+            .expect("bar method missing");
+        let baz = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "baz")
+            .expect("baz method missing");
+        assert_eq!(bar.parent_id, Some(foo.id), "bar must parent to Foo");
+        assert_eq!(baz.parent_id, Some(foo.id), "baz must parent to Foo");
+        assert_eq!(bar.kind, SymbolKind::Method);
+
+        let color = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "Color" && s.kind == SymbolKind::Enum)
+            .expect("Color enum missing");
+        let name = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "name")
+            .expect("name method missing");
+        assert_eq!(name.parent_id, Some(color.id), "name must parent to Color");
+
+        let bag = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "Bag" && s.kind == SymbolKind::Struct)
+            .expect("Bag struct missing");
+        let len = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "len")
+            .expect("len method missing");
+        assert_eq!(
+            len.parent_id,
+            Some(bag.id),
+            "len must parent to Bag (generics stripped for lookup)"
+        );
+    }
+
+    #[test]
+    fn rust_doc_survives_attribute_item_between_doc_and_struct() {
+        // Regression: leading_doc walked siblings backward, breaking on any
+        // node that wasn't a comment or expression_statement. Attributes
+        // (`#[derive(...)]`, `#[cfg(...)]`) sit between the doc and the item
+        // as `attribute_item` siblings — the walk would terminate before
+        // reaching the doc and `code_skeleton` would render no docstring.
+        let src = br#"
+/// Doc on Foo
+#[derive(Debug, Clone)]
+pub struct Foo;
+
+/// Doc on bar
+#[inline]
+pub fn bar() {}
+
+/// Doc on Color
+#[repr(u8)]
+pub enum Color { Red, Green }
+"#;
+        let result = extract_symbols(src, Language::Rust, Path::new("src/lib.rs"));
+        let foo = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "Foo")
+            .expect("Foo missing");
+        assert!(
+            foo.doc
+                .as_deref()
+                .is_some_and(|d| d.contains("Doc on Foo")),
+            "Foo doc must survive #[derive] attribute (got: {:?})",
+            foo.doc
+        );
+
+        let bar = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "bar")
+            .expect("bar missing");
+        assert!(
+            bar.doc
+                .as_deref()
+                .is_some_and(|d| d.contains("Doc on bar")),
+            "bar doc must survive #[inline] attribute (got: {:?})",
+            bar.doc
+        );
+
+        let color = result
+            .symbols
+            .iter()
+            .find(|s| s.name.as_str() == "Color")
+            .expect("Color missing");
+        assert!(
+            color
+                .doc
+                .as_deref()
+                .is_some_and(|d| d.contains("Doc on Color")),
+            "Color doc must survive #[repr] attribute (got: {:?})",
+            color.doc
+        );
+    }
+
+    #[test]
+    fn rust_impl_before_struct_does_not_panic() {
+        // When `impl Foo` appears before `struct Foo`, the lookup misses and the
+        // method falls back to the enclosing scope. Acceptable degradation; must
+        // not panic and must still extract the method symbol.
+        let src = br#"
+impl Foo {
+    pub fn early(&self) {}
+}
+
+pub struct Foo { x: i32 }
+"#;
+        let result = extract_symbols(src, Language::Rust, Path::new("src/lib.rs"));
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"early"), "early method missing: {names:?}");
+        assert!(names.contains(&"Foo"), "Foo struct missing: {names:?}");
     }
 
     #[test]

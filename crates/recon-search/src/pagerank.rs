@@ -21,6 +21,20 @@ const PPR_EPSILON: f64 = 1e-6;
 /// 15 is the safe upper bound. Reduced from 30 for ~2x speedup on large graphs.
 pub const DEFAULT_MAX_ITERATIONS: usize = 15;
 
+/// Down-weight applied to test-scope symbols' final PR score so the inline
+/// `tests` module doesn't outrank real production hubs in code_repo_map.
+const TEST_SCOPE_SCORE_FACTOR: f64 = 0.1;
+
+/// True when a qualified name names a `#[cfg(test)] mod tests` scope or a symbol
+/// inside one. Matches "tests", "tests::*", and "*::tests::*" variants.
+#[inline]
+fn is_test_qualified_name(qname: &str) -> bool {
+    qname == "tests"
+        || qname.starts_with("tests::")
+        || qname.contains("::tests::")
+        || qname.ends_with("::tests")
+}
+
 /// A ranked symbol with its PageRank score.
 #[derive(Debug, Clone)]
 pub struct RankedSymbol {
@@ -68,6 +82,17 @@ impl RankGraph {
 
         let focus_set: AHashSet<usize> = focus_symbols.iter().copied().collect();
 
+        // Detect inline test scopes: symbols inside `#[cfg(test)] mod tests`
+        // (qualified_name "tests::foo" or "outer::tests::foo") AND the test
+        // module itself ("tests" / "outer::tests"). Refs originating from any
+        // of these are skipped at edge-build time — scaling weight isn't enough
+        // because PR normalizes per-source by total_weight, so a single-out-edge
+        // test caller still propagates its full score regardless of weight.
+        let is_test_scope: Vec<bool> = symbols
+            .iter()
+            .map(|s| is_test_qualified_name(s.qualified_name.as_str()))
+            .collect();
+
         // Phase 1: Count edges per node to pre-allocate CSR offsets
         let mut edge_counts = vec![0usize; n];
         let mut total_edges = 0usize;
@@ -77,6 +102,11 @@ impl RankGraph {
                 Some(&idx) => idx,
                 None => continue,
             };
+            // Skip refs originating from test scopes so production hub scores
+            // aren't inflated by test-driven traffic.
+            if is_test_scope[src_idx] {
+                continue;
+            }
             let target_indices = match name_to_idx.get(r.ident.as_str()) {
                 Some(indices) => indices,
                 None => continue,
@@ -114,6 +144,9 @@ impl RankGraph {
                 Some(&idx) => idx,
                 None => continue,
             };
+            if is_test_scope[src_idx] {
+                continue;
+            }
             let target_indices = match name_to_idx.get(r.ident.as_str()) {
                 Some(indices) => indices,
                 None => continue,
@@ -328,11 +361,16 @@ pub fn pagerank(
         push_ppr(&graph, focus_symbols, damping)
     };
 
-    // Post-processing: boost top-level symbols by sqrt(in_degree + 1)
+    // Post-processing: boost top-level symbols by sqrt(in_degree + 1), and
+    // demote any symbol that lives in an inline test scope so the `tests`
+    // module itself drops below real production hubs in repo orientation.
     for (i, sym) in symbols.iter().enumerate() {
         if sym.parent_id.is_none() {
             let ref_count = graph.in_degree[i] as f64;
             scores[i] *= (ref_count + 1.0).sqrt();
+        }
+        if is_test_qualified_name(sym.qualified_name.as_str()) {
+            scores[i] *= TEST_SCOPE_SCORE_FACTOR;
         }
     }
 
@@ -485,6 +523,48 @@ mod tests {
         // Very small budget should truncate
         let tiny = render_repo_map(&symbols, &ranked, 5);
         assert!(tiny.len() <= output.len());
+    }
+
+    #[test]
+    fn test_origin_refs_are_down_weighted() {
+        // The "production" hub `production_target` is referenced once from a
+        // production caller. The "test_target" is referenced four times — but
+        // every caller is in `tests::*`, so each ref carries 0.25× weight.
+        // Effective weights: production_target = 1.0, test_target = 4 * 0.25 = 1.0.
+        // Without the down-weight, test_target would outrank by 4×.
+        let symbols = vec![
+            sym(1, "prod_caller", "crate::prod_caller"),
+            sym(2, "production_target", "crate::production_target"),
+            sym(3, "t1", "tests::t1"),
+            sym(4, "t2", "tests::t2"),
+            sym(5, "t3", "tests::t3"),
+            sym(6, "t4", "tests::t4"),
+            sym(7, "test_target", "crate::test_target"),
+        ];
+        let refs = vec![
+            make_ref("production_target", 1),
+            make_ref("test_target", 3),
+            make_ref("test_target", 4),
+            make_ref("test_target", 5),
+            make_ref("test_target", 6),
+        ];
+        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS);
+
+        let prod_score = ranked
+            .iter()
+            .find(|r| r.index == 1) // index of production_target
+            .map(|r| r.score)
+            .expect("production_target ranked");
+        let test_score = ranked
+            .iter()
+            .find(|r| r.index == 6) // index of test_target
+            .map(|r| r.score)
+            .expect("test_target ranked");
+        assert!(
+            test_score < prod_score * 1.5,
+            "test_target ({test_score}) must not dwarf production_target ({prod_score}) — \
+             4× test refs at 0.25 weight should be ≈ 1× production ref at full weight"
+        );
     }
 
     #[test]

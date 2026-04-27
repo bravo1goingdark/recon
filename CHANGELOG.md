@@ -4,7 +4,70 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
-## [0.2.2] — 2026-04-27
+## [0.2.3] — 2026-04-27
+
+v0.2.3 supersedes v0.2.2: the v0.2.2 tag was pushed but its release pipeline
+hung indefinitely on the `macos-latest` test job (no `timeout-minutes` set,
+FSEvents in CI failed to deliver an event under a `RecursiveMode::NonRecursive`
+root watch and a `recv()` call with no timeout sat forever). v0.2.2 never
+produced binaries — anyone who runs `recon update` will receive v0.2.3.
+
+### Fixed
+
+- **`code_outline` dropped methods inside `impl` blocks.** The Rust extractor
+  in `crates/recon-parser/src/extract.rs` parented `impl_item` methods to a
+  `Some(0)` sentinel instead of looking up the struct/enum/trait id. The
+  outline filter (`parent_id.is_none()`) silently excluded them, and
+  `code_read_symbol` parent chains skipped the type. The parser now resolves
+  the `impl` target's id (with generics stripped: `Foo<T>` → `Foo`) and
+  threads it through; the server-side outline also rescues legacy `Some(0)`
+  rows by parsing `qualified_name` "Type::method" prefixes against the
+  in-file type map, so the fix takes effect without forcing a reindex.
+- **`code_skeleton` lost doc comments above attributed items.** `leading_doc`
+  walked previous siblings backward and broke on anything that wasn't a
+  comment or expression statement — so `#[derive(...)]` / `#[inline]` /
+  `#[repr(...)]` / Python `@decorator` between the doc and the item
+  terminated the walk before reaching the doc. The walk now skips
+  `attribute_item` / `inner_attribute_item` / `decorator` siblings.
+- **`code_find_refs` digest filled with degenerate `{path:"", line:0}` rows.**
+  When a ref's `src_symbol_id` had no matching location row (orphan from a
+  pre-watcher-fix deletion), the digest emitted an empty path before the
+  top-20 cap, polluting the output. Filter is now applied *before* the cap
+  and `total` reports the count of valid (locatable) refs.
+- **`code_repo_map` over-ranked `#[cfg(test)] mod tests` content.** Test
+  callers at single out-edge nodes propagated full PR weight into the
+  production hubs they exercised, and the `tests` module itself appeared
+  high in repo orientation. Refs originating from any test scope (qualified
+  name `tests`, `tests::*`, `*::tests::*`, `*::tests`) are now skipped at
+  graph-build time so they don't inflate target scores; symbols inside
+  test scopes also have their final score multiplied by 0.1 so the `tests`
+  module drops below real production hubs in the rendered map.
+- **macOS release pipeline hung indefinitely on `cargo test`.** The
+  `watcher_recv_blocks_until_event` test in `crates/recon-indexer/src/watcher.rs`
+  called `Watcher::recv()` (blocking, no timeout). Under v0.2.2's new
+  `RecursiveMode::NonRecursive` root watch, FSEvents in the macOS-latest
+  CI runner did not deliver the `delayed.rs` create event reliably and the
+  test wedged forever — held the runner for 1h+ until manually cancelled.
+  Replaced with `recv_timeout(Duration::from_secs(10))`, and added
+  `timeout-minutes: 30` to the `test:` step in both `release.yml` and
+  `cross-platform.yml` so a future regression of this shape fails fast
+  instead of consuming a 6 h job slot.
+
+### Migration notes
+
+This is a patch release — no schema or config changes. The `code_outline`
+fix takes effect without a reindex (server-side rescue path handles legacy
+rows); `code_skeleton` doc rendering improves the next time a file with
+attributed items is touched (or after `code_reindex --force`).
+
+[0.2.3]: https://github.com/bravo1goingdark/recon/releases/tag/v0.2.3
+
+## [0.2.2] — 2026-04-27 — superseded by 0.2.3
+
+> The 0.2.2 tag exists but no binaries were ever published — the
+> macos-latest test job in the release pipeline hung indefinitely and was
+> cancelled. All fixes listed here are also in 0.2.3, which additionally
+> resolves the macOS hang itself. Skip ahead to 0.2.3.
 
 ### Fixed
 

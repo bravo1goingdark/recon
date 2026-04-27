@@ -22,6 +22,12 @@ jobs:
   test:
     name: Test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Hard cap per matrix leg. macOS FSEvents in CI has historically delivered
+    # file events unreliably enough to wedge a `recv()` test forever; v0.2.2's
+    # release run sat hung for 1h+ on the macos-latest leg until manually
+    # cancelled. 30 min is well above the worst observed legitimate run
+    # (Windows ~25 min) but bounded enough that a hang fails fast.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

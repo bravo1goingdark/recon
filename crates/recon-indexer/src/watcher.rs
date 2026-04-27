@@ -320,11 +320,14 @@ mod tests {
             fs::write(root.join("delayed.rs"), "fn delayed() {}").unwrap();
         });
 
-        // recv() should block and then return when the file is written
-        let events = watcher.recv();
+        // recv_timeout: macOS FSEvents in CI VMs can drop events for files
+        // created under a NonRecursive root watch, leaving a plain `recv()`
+        // hung forever. Bounded timeout fails fast instead of wedging the
+        // whole test binary (cf. v0.2.2 release pipeline hang on macos-latest).
+        let events = watcher.recv_timeout(Duration::from_secs(10));
         assert!(
-            events.is_some(),
-            "recv() should return events after file creation"
+            events.is_ok(),
+            "recv_timeout should return events after file creation, got {events:?}"
         );
 
         handle.join().unwrap();

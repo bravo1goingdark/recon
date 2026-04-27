@@ -1172,17 +1172,58 @@ impl ReconServer {
             }
         };
 
-        // O(n) child lookup: build parent_id -> children map in one pass
+        // Build a name->id map of top-level types (struct/enum/trait/class) so
+        // we can rescue impl-block methods whose parent_id is missing (legacy
+        // index rows pre-parser-fix) or pointing to the enclosing scope (impl
+        // appears before its type in source).
+        let type_id_by_name: AHashMap<&str, u64> = symbols
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    recon_core::symbol::SymbolKind::Struct
+                        | recon_core::symbol::SymbolKind::Enum
+                        | recon_core::symbol::SymbolKind::Trait
+                        | recon_core::symbol::SymbolKind::Class
+                )
+            })
+            .map(|s| (s.name.as_str(), s.id))
+            .collect();
+
+        // qualified_name "Type::method" rescue: maps a method back to its owning
+        // type id when parent_id is None or the legacy 0 sentinel.
+        let qname_rescue = |sym: &recon_core::symbol::Symbol| -> Option<u64> {
+            sym.qualified_name
+                .as_str()
+                .split_once("::")
+                .and_then(|(ty, _)| {
+                    let base = ty.split('<').next().unwrap_or(ty).trim();
+                    type_id_by_name.get(base).copied()
+                })
+        };
+
+        // O(n) child lookup: build parent_id -> children map in one pass.
+        // parent_id == Some(0) is a legacy sentinel meaning "no real parent" —
+        // treat it as None for grouping purposes.
         let mut children_map: AHashMap<u64, Vec<&recon_core::symbol::Symbol>> = AHashMap::new();
         for sym in &symbols {
-            if let Some(pid) = sym.parent_id {
+            let effective_parent = match sym.parent_id {
+                Some(0) | None => qname_rescue(sym),
+                Some(pid) => Some(pid),
+            };
+            if let Some(pid) = effective_parent {
                 children_map.entry(pid).or_default().push(sym);
             }
         }
 
+        // A symbol is top-level if it has no effective parent.
         let mut entries = SmallVec::new();
         for sym in &symbols {
-            if sym.parent_id.is_none() {
+            let is_top_level = match sym.parent_id {
+                None | Some(0) => qname_rescue(sym).is_none(),
+                Some(_) => false,
+            };
+            if is_top_level {
                 let children = children_map
                     .get(&sym.id)
                     .map(|kids| {
@@ -1591,14 +1632,26 @@ impl ReconServer {
             .map(|(id, path, line)| (id, (path, line)))
             .collect();
 
-        let top_k: Vec<RefEntry> = refs
+        // Filter orphan refs (no location row, or empty path) BEFORE the take(20)
+        // cap so the digest doesn't fill up with degenerate {path:"", line:0}
+        // entries from stale rows that lost their parent symbol.
+        let valid: Vec<&recon_core::symbol::Ref> = refs
+            .iter()
+            .filter(|r| {
+                loc_map
+                    .get(&r.src_symbol_id)
+                    .is_some_and(|(p, _)| !p.is_empty())
+            })
+            .collect();
+
+        let top_k: Vec<RefEntry> = valid
             .iter()
             .take(20)
             .map(|r| {
                 let (path, line) = loc_map
                     .get(&r.src_symbol_id)
                     .cloned()
-                    .unwrap_or_else(|| (String::new(), 0));
+                    .expect("filtered above");
                 RefEntry {
                     path: PathBuf::from(path),
                     line,
@@ -1611,7 +1664,7 @@ impl ReconServer {
 
         let view = ToolOutput::ReferenceDigest(RefDigestView {
             symbol: params.0.symbol.as_str().into(),
-            total: refs.len(),
+            total: valid.len(),
             top_k,
         });
         redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
@@ -2368,6 +2421,72 @@ mod tests {
         });
         let result = server.code_repo_map(params).await;
         assert!(!result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn code_outline_nests_impl_methods_under_struct() {
+        // Regression: methods inside `impl Foo` were dropped from the outline
+        // because the parser parented them to a Some(0) sentinel and the outline
+        // filtered to parent_id.is_none(). Fix nests them under their type.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs_write(
+            root.join("src/lib.rs"),
+            "pub struct Greeter { name: String }\n\nimpl Greeter {\n    pub fn new(name: String) -> Self { Self { name } }\n    pub fn greet(&self) -> String { format!(\"hi {}\", self.name) }\n}\n\npub fn unrelated() {}\n",
+        );
+
+        let db_path = root.join(".recon").join("recon.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let store = Store::open(&db_path).unwrap();
+        let tantivy_dir = root.join(".recon").join("tantivy");
+        std::fs::create_dir_all(&tantivy_dir).unwrap();
+        let tantivy = TantivyBackend::open(&tantivy_dir).unwrap();
+        let server = ReconServer::new(root.to_path_buf(), store, tantivy).unwrap();
+        server.index_repo().await.unwrap();
+
+        use rmcp::handler::server::wrapper::Parameters;
+        let params = Parameters(crate::tools::OutlineParams {
+            path: "src/lib.rs".into(),
+        });
+        let result = server.code_outline(params).await;
+        assert!(
+            !result.starts_with("Error:"),
+            "code_outline failed: {result}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let entries = json["entries"].as_array().expect("entries array");
+
+        let greeter = entries
+            .iter()
+            .find(|e| e["name"] == "Greeter")
+            .expect("Greeter struct must appear at top level");
+        let children = greeter["children"]
+            .as_array()
+            .expect("Greeter must carry children");
+        let child_names: Vec<&str> = children.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(
+            child_names.contains(&"new"),
+            "new method must nest under Greeter (got: {child_names:?})"
+        );
+        assert!(
+            child_names.contains(&"greet"),
+            "greet method must nest under Greeter (got: {child_names:?})"
+        );
+
+        // Methods must NOT appear as standalone top-level entries.
+        let top_names: Vec<&str> = entries.iter().filter_map(|e| e["name"].as_str()).collect();
+        assert!(
+            !top_names.contains(&"new"),
+            "new method must not appear at top level (got: {top_names:?})"
+        );
+        assert!(
+            !top_names.contains(&"greet"),
+            "greet method must not appear at top level (got: {top_names:?})"
+        );
+        assert!(
+            top_names.contains(&"unrelated"),
+            "unrelated free function must appear at top level (got: {top_names:?})"
+        );
     }
 
     #[tokio::test]

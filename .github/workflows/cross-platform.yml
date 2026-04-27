@@ -30,6 +30,9 @@ jobs:
   test-matrix:
     name: Test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Hard cap so a flaky test (e.g. macOS FSEvents) cannot run out a 6h job
+    # and waste billable minutes — see release.yml for the v0.2.2 hang post-mortem.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
