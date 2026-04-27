@@ -80,6 +80,28 @@ fn redact_response(response: String) -> String {
     redact::redact_secrets(&response).unwrap_or(response)
 }
 
+/// Build a search-hit JSON object, omitting `col` when not captured.
+///
+/// Token diet (v0.2.2): `"col":null` was emitted on every lexical hit and on
+/// every Tantivy fallback hit even when no column was carried — pure overhead
+/// for the LLM client. This helper lifts the conditional insertion into one
+/// place so every search-tool site benefits identically.
+fn text_hit_json(
+    path: impl Into<String>,
+    line: u32,
+    col: Option<u32>,
+    text: impl Into<String>,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::with_capacity(4);
+    map.insert("path".into(), serde_json::Value::String(path.into()));
+    map.insert("line".into(), serde_json::Value::Number(line.into()));
+    if let Some(c) = col {
+        map.insert("col".into(), serde_json::Value::Number(c.into()));
+    }
+    map.insert("text".into(), serde_json::Value::String(text.into()));
+    serde_json::Value::Object(map)
+}
+
 /// Maximum file size for `read_to_string` calls (2 MB).
 /// Prevents OOM on accidentally large files (e.g. minified bundles, lock files).
 const MAX_READ_FILE_SIZE: u64 = 2 * 1024 * 1024;
@@ -1722,7 +1744,7 @@ impl ReconServer {
                 .iter()
                 .map(|h| {
                     let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
-                    serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "col": h.col, "text": h.line_text })
+                    text_hit_json(rel.to_string_lossy(), h.line, h.col, h.line_text.as_str())
                 })
                 .collect();
 
@@ -1737,10 +1759,12 @@ impl ReconServer {
             let entries: Vec<serde_json::Value> = tantivy_hits
                 .iter()
                 .map(|hit| {
-                    serde_json::json!({
-                        "path": hit.path, "line": 0, "col": null,
-                        "text": hit.signature.as_deref().unwrap_or(&hit.name),
-                    })
+                    text_hit_json(
+                        hit.path.as_str(),
+                        0,
+                        None,
+                        hit.signature.as_deref().unwrap_or(hit.name.as_str()),
+                    )
                 })
                 .collect();
             return redact_response(
@@ -1761,7 +1785,7 @@ impl ReconServer {
             .iter()
             .map(|h| {
                 let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
-                serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "col": h.col, "text": h.line_text })
+                text_hit_json(rel.to_string_lossy(), h.line, h.col, h.line_text.as_str())
             })
             .collect();
 
@@ -2446,8 +2470,17 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(json["qualified_name"].as_str(), Some("sum_three"));
-        // parent_chain may be empty for top-level symbols; just verify the field exists
-        assert!(json.get("parent_chain").is_some());
+        // v0.2.2 token diet: parent_chain is omitted from JSON when empty,
+        // so for a top-level symbol the field should be either absent OR a
+        // non-empty array. Either is a valid "we computed this" signal.
+        match json.get("parent_chain") {
+            None => {} // empty → omitted, fine
+            Some(serde_json::Value::Array(arr)) => assert!(
+                !arr.is_empty(),
+                "parent_chain present but empty — should have been omitted"
+            ),
+            Some(other) => panic!("parent_chain has unexpected JSON type: {other}"),
+        }
     }
 
     #[tokio::test]

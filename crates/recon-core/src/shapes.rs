@@ -55,6 +55,10 @@ pub struct OutlineView {
 }
 
 /// A single entry in an outline.
+///
+/// `children` is omitted from JSON when empty — leaf entries (most of them)
+/// previously emitted `"children":[]`, ~14 bytes per leaf × tens of leaves
+/// per file outline.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutlineEntry {
     /// Symbol kind.
@@ -64,13 +68,16 @@ pub struct OutlineEntry {
     /// Line number (1-indexed).
     pub line: u32,
     /// Nested child entries.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<OutlineEntry>,
 }
 
 /// Skeleton view — signatures + docstrings, bodies as `...`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkeletonView {
-    /// File path, if scoped to a single file.
+    /// File path, if scoped to a single file. Omitted from JSON when `None`
+    /// (e.g. repo-map output that aggregates many files).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     /// Skeleton content with bodies replaced by `...`.
     pub content: String,
@@ -79,6 +86,12 @@ pub struct SkeletonView {
 }
 
 /// Symbol card — full source of one symbol + parents + callers.
+///
+/// `signature`, `doc`, and the three list fields (`parent_chain`, `callers`,
+/// `callees`) are omitted from JSON when empty. For symbols with no resolved
+/// callers/callees this saves ~26 bytes per response (`"callers":[],"callees":[]`)
+/// — multiplied across `code_read_symbol` calls in a session it's a measurable
+/// token win.
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolCardView {
     /// File containing this symbol.
@@ -88,22 +101,31 @@ pub struct SymbolCardView {
     /// Symbol kind.
     pub kind: SymbolKind,
     /// Signature line.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     /// Doc comment.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
     /// Full source body.
     pub body: String,
     /// Start and end lines (1-indexed).
     pub line_range: (u32, u32),
     /// Enclosing parent symbols from outermost to innermost.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub parent_chain: Vec<String>,
     /// Incoming references (callers).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<RefEntry>,
     /// Outgoing references (callees).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callees: Vec<RefEntry>,
 }
 
 /// A reference entry (compact).
+///
+/// `col` and `enclosing_symbol` are omitted from JSON when not captured —
+/// most lexical hits don't carry a column or a resolved enclosing symbol,
+/// and `"col":null` on every hit is pure overhead.
 #[derive(Debug, Clone, Serialize)]
 pub struct RefEntry {
     /// File path.
@@ -111,10 +133,12 @@ pub struct RefEntry {
     /// Line number (1-indexed).
     pub line: u32,
     /// Column number (0-indexed), if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub col: Option<u32>,
     /// Source line snippet.
     pub snippet: CompactString,
     /// Name of the enclosing symbol, if resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub enclosing_symbol: Option<CompactString>,
 }
 
@@ -243,7 +267,10 @@ mod tests {
     }
 
     #[test]
-    fn ref_entry_no_enclosing_symbol() {
+    fn ref_entry_omits_none_fields() {
+        // Token-saving guarantee (v0.2.2): None fields must NOT serialize.
+        // Inverted from the v0.2.1-and-earlier behavior that emitted
+        // `"col":null` and `"enclosing_symbol":null` on every lexical hit.
         let entry = RefEntry {
             path: PathBuf::from("src/lib.rs"),
             line: 3,
@@ -252,7 +279,87 @@ mod tests {
             enclosing_symbol: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains("\"enclosing_symbol\":null"));
+        assert!(
+            !json.contains("\"col\""),
+            "col=None must be omitted: {json}"
+        );
+        assert!(
+            !json.contains("\"enclosing_symbol\""),
+            "enclosing_symbol=None must be omitted: {json}"
+        );
+        // Required fields still present.
+        assert!(json.contains("\"path\""));
+        assert!(json.contains("\"line\":3"));
+        assert!(json.contains("\"snippet\":\"foo()\""));
+    }
+
+    #[test]
+    fn ref_entry_includes_some_fields() {
+        let entry = RefEntry {
+            path: PathBuf::from("src/lib.rs"),
+            line: 3,
+            col: Some(7),
+            snippet: "foo()".into(),
+            enclosing_symbol: Some("main".into()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"col\":7"));
+        assert!(json.contains("\"enclosing_symbol\":\"main\""));
+    }
+
+    #[test]
+    fn outline_entry_omits_empty_children() {
+        let leaf = OutlineEntry {
+            kind: SymbolKind::Function,
+            name: "main".into(),
+            line: 1,
+            children: vec![],
+        };
+        let json = serde_json::to_string(&leaf).unwrap();
+        assert!(
+            !json.contains("\"children\""),
+            "empty children must be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn symbol_card_view_omits_empty_lists_and_none_fields() {
+        let view = SymbolCardView {
+            path: PathBuf::from("src/lib.rs"),
+            qualified_name: "lib::standalone".into(),
+            kind: SymbolKind::Function,
+            signature: None,
+            doc: None,
+            body: "fn standalone() {}".into(),
+            line_range: (1, 1),
+            parent_chain: vec![],
+            callers: vec![],
+            callees: vec![],
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        for field in &[
+            "\"signature\"",
+            "\"doc\"",
+            "\"parent_chain\"",
+            "\"callers\"",
+            "\"callees\"",
+        ] {
+            assert!(!json.contains(field), "{field} must be omitted: {json}");
+        }
+    }
+
+    #[test]
+    fn skeleton_view_omits_none_path() {
+        let view = SkeletonView {
+            path: None,
+            content: "...".into(),
+            token_estimate: 1,
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            !json.contains("\"path\""),
+            "None path must be omitted: {json}"
+        );
     }
 
     #[test]
