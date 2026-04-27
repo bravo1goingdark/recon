@@ -4,6 +4,119 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.2.2] — 2026-04-27
+
+### Fixed
+
+- **Watcher silently dropped delete and rename events.** The
+  notify-debouncer filter at `crates/recon-indexer/src/watcher.rs` checked
+  `p.is_file()`, which returns `false` for paths that no longer exist —
+  so deletion events never reached the indexer. Symbols from removed
+  files lingered in SQLite, Tantivy, and the embedding store until the
+  user manually ran `code_reindex --force`. Replaced with `!p.is_dir()`
+  (excludes directories, keeps deleted-file events) and added a
+  Phase 0 in `start_watcher` that snapshots symbol IDs, then cascades
+  through SQLite (`delete_file_cascade`), Tantivy (new `delete_path`),
+  and the vector store (new `delete_by_symbol_ids`). Rename is the
+  same shape — old path treated as delete, new path as create.
+- **Watcher saturated by `cargo build` storms.** A single recursive
+  watch on the repo root pulled every `target/` subdir into inotify
+  (8.6k dirs in this workspace). Build-time file activity overflowed
+  the kernel's 16k inotify event queue → `IN_Q_OVERFLOW` → silent
+  loss of legitimate source-file edits — the user would edit a file,
+  query immediately, and see stale results. Replaced with a
+  non-recursive watch on the root plus per-top-level-child recursive
+  watches that exclude `target/`, `node_modules/`, `.git/`, `.recon/`,
+  `.idea/`, `.vscode/`. Also broadened the overflow-fallback regex
+  (`overflow` / `coalesced` / `lost` / `queue`) so more notify error
+  phrasings reliably trigger the `gix status` recovery path.
+- **`refresh_caches` was non-transactional.** Path / symbol / ref
+  caches were populated from three independent SQLite read connections.
+  A concurrent writer between any two reads left the caches reflecting
+  different point-in-time states (e.g. symbols referencing a path no
+  longer in the path list). New `ReadPool::snapshot_all_for_caches`
+  wraps all three reads in one transaction on a single connection.
+- **`recon init --mcp cc` no longer silently skips agent rules when
+  `CLAUDE.md` is missing.** Previously the init flow saw "no
+  `CLAUDE.md`", printed a one-line skip message, and returned success —
+  Claude Code then started without recon's strict-policy block, the
+  agent defaulted to `Read`/`Grep`/`Glob`, and the whole point of the
+  recon `code_*` tooling was silently absent.  Init now creates
+  `CLAUDE.md` when missing and writes the marker-fenced rules block in
+  it (matches the behavior already in place for opencode's
+  `AGENTS.md`).  Symmetric purge: `recon purge --mcp cc` deletes the
+  file outright if its only content was the recon block, so we don't
+  leak a file we created ourselves; user-authored content keeps the
+  file alive with only the recon block stripped.
+- **`smallvec` `write` feature missing from workspace.**
+  `recon-search/src/pagerank.rs` uses `write!(line_buf, ...)` on a
+  `SmallVec<[u8; 256]>`, which requires the `write` feature.
+  Workspace `Cargo.toml` only declared `serde`. Workspace builds
+  succeeded by accident because `gix-object` transitively enabled
+  `smallvec/write` and Cargo's feature unification spread it to
+  every crate — single-crate `cargo build -p recon-search --lib`
+  failed with `cannot write into SmallVec<[u8; 256]>`. Now declared
+  explicitly.
+
+### Performance
+
+- **Token diet for every tool response.** All canonical view types in
+  `recon-core::shapes` now skip `None` and empty-`Vec` fields when
+  serialising — `RefEntry::col`, `RefEntry::enclosing_symbol`,
+  `SymbolCardView::signature`, `SymbolCardView::doc`,
+  `SkeletonView::path`, `SymbolCardView::parent_chain` /
+  `callers` / `callees`, and `OutlineEntry::children`. The ad-hoc text
+  search hits in `code_search` (lexical, regex, Tantivy fallback)
+  also stop emitting `"col":null` on every row. Previously every
+  symbol card carried `"callers":[],"callees":[]` (~26 bytes) even
+  when nothing was resolved, and every leaf in a `code_outline` carried
+  `"children":[]` (~14 bytes per leaf). On a 50-symbol outline the
+  combined savings round to ~700 bytes / ~175 tokens; on a dense
+  `code_search` with 100 lexical hits, ~10–15 bytes per hit times
+  the population.
+- **`code_reindex --force` clears the index in O(1) transactions.**
+  Was N transactions (one `delete_file_cascade` per file with a WAL
+  fsync each), a multi-second hot spot on large repos. New
+  `Store::delete_all_files_cascade()` does the truncation in one
+  `BEGIN`/`COMMIT` — `DELETE FROM refs; DELETE FROM files;` and the
+  schema cascade handles symbols → symbol_docs → FTS triggers.
+- **Embed handles use lock-free `ArcSwapOption`.** `embed_service`
+  and `vec_read_pool` were `Arc<Mutex<Option<Arc<…>>>>` — set once
+  in `init_embed` but read on every embed-backed tool call (semantic
+  search, semantic find-symbol, watcher embed batch). The
+  `parking_lot::Mutex` reads are now lock-free `load_full()` calls.
+- **`index_repo` releases locks around `incremental_vacuum`.** Both
+  writer locks are now released between the indexing pass and VACUUM,
+  so VACUUM only holds the SQLite writer. Cache pre-warm runs without
+  any locks held.
+- **Embed catch-up cleans up orphan embeddings.** When the watcher
+  starts, embeddings whose underlying symbol is no longer in SQLite
+  (legacy from pre-fix watchers, or out-of-band index wipes) are now
+  removed alongside the missing-symbol embed pass. Added
+  `VecReadPool::all_embed_ids()` for the diff against current symbol IDs.
+
+### Migration notes
+
+This is a patch release — no schema or config changes. Existing users
+pick this up via `recon update`; no `recon login` or `recon init`
+re-run is required. The watcher delete-fix is silent: the first time
+the new binary starts, it cleans up any orphan embeddings left over
+from deletes that happened under earlier versions, then runs as before.
+
+**Wire-format note for third-party MCP clients.** The token-diet entry
+in *Performance* changes the JSON shape: optional fields that used to
+serialise as `null` (`col`, `enclosing_symbol`, `signature`, `doc`,
+`path` on aggregated skeletons) and empty arrays (`callers`, `callees`,
+`parent_chain`, `children`) are now **omitted** instead of emitted as
+`null`/`[]`. LLM consumers (the canonical client) are unaffected — they
+read content, not structure. Custom clients that pattern-match on field
+presence (e.g. `if (hit.col === null)`, `response.callers.length`)
+should treat **omitted optional fields as `null`** and **omitted list
+fields as `[]`**. The recon binary itself was the only known parser of
+this shape and has been updated.
+
+[0.2.2]: https://github.com/bravo1goingdark/recon/releases/tag/v0.2.2
+
 ## [0.2.1] — 2026-04-25
 
 ### Fixed

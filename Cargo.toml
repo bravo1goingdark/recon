@@ -3,7 +3,7 @@ members = ["crates/*", "xtask"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"
@@ -92,7 +92,7 @@ parking_lot = "0.12.5"
 # Hot-path performance
 aho-corasick = "1.1.4"
 bytemuck = "1.24"
-smallvec = { version = "1.15.1", features = ["serde"] }
+smallvec = { version = "1.15.1", features = ["serde", "write"] }
 compact_str = { version = "0.9.0", features = ["serde"] }
 ahash = "0.8.12"
 arc-swap = "1.9.1"
