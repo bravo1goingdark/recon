@@ -210,7 +210,7 @@
       justify-content:center;color:var(--ink-3);transition:border-color .15s,color .15s;
       font-size:14px;
     "><span id="theme-icon">◑</span></button>
-    <div class="ship">v0.2.0 · <span>shipping</span></div>
+    <div class="ship">v0.2.1 · <span>shipping</span></div>
     <button class="nav-burger" id="nav-burger" aria-label="Open menu" aria-controls="nav-sheet" aria-expanded="false">
       <span class="bars"><span></span></span>
     </button>
@@ -321,7 +321,7 @@ curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 iwr https://mcprecon.pages.dev/install.ps1 | iex
 
 <span class="c"># pin a specific version</span>
-VERSION=v0.2.0 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+VERSION=v0.2.1 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
 <span class="c"># upgrade in place (lands the latest published release)</span>
 recon update</pre>
@@ -351,6 +351,12 @@ recon purge --mcp cc</pre>
     <p>Removes the local index (<code>.recon/</code>), the IDE's MCP entry (preserves any other servers in the config), the agent rules block, and frees the server-side repo slot. <code>recon purge</code> with no flag deletes only the index.</p>
 
     <!-- ── CLI ───────────────────────────────────────────────────── -->
+    <p><b>Global flags.</b> Two flags are available on every subcommand:</p>
+    <ul style="margin:8px 0 16px 22px">
+      <li><code>--repo &lt;path&gt;</code> — repository root (default: <code>.</code>). A no-op on account-only commands like <code>login</code>, <code>logout</code>, <code>license</code>, <code>update</code>, <code>version</code>; meaningful for everything that touches a project (<code>init</code>, <code>purge</code>, <code>doctor</code>, <code>serve</code>, <code>index</code>, <code>reindex</code>, <code>stats</code>, and the direct-query commands).</li>
+      <li><code>--json</code> — emit a JSON envelope instead of formatted text. Pipe into <code>jq</code> or a script. <code>recon doctor</code> also accepts a sub-flag <code>--json</code> for the same purpose; either form works.</li>
+    </ul>
+
     <h2 id="cli-account"><span class="no">04</span>CLI · Account</h2>
 
     <p>Commands that talk to your recon account on the worker. All of them need <code>recon login</code> to have run at least once on this machine.</p>
@@ -406,6 +412,8 @@ $ recon repos remove a3f1c8b2e6d4710f9c2e6d4710fc8b2e6d4710fc8b2e6d4710fc8b2e6d4
 
     <h3 id="cmd-init"><code>recon init [--mcp &lt;ide&gt;]</code></h3>
     <p>The setup command. Builds the index, registers the repo with your account, and (with <code>--mcp</code>) writes the IDE's MCP config and agent rules. Idempotent — re-running on the same project refreshes the index without burning a slot.</p>
+    <p><b>Flags.</b> <code>--mcp &lt;cc|oc|cursor|windsurf&gt;</code> picks the IDE wiring; omit to index only.</p>
+    <p><b>What it does, in order.</b> Validate the cached license → register the repo fingerprint with the worker (rejects if you're at <code>max_repos</code>) → walk the tree and build the SQLite + Tantivy index → on <code>--mcp</code>, write the IDE config + strict-policy rules and smoke-test <code>recon serve</code> (4-second window; stderr surfaced if the child exits early) → append <code>.recon/</code> to <code>.gitignore</code>.</p>
 <pre>$ recon init --mcp cc
 Registered repo with recon (new/5 on Pro)
 Indexed 1834 files, 87421 symbols (0 errors)
@@ -431,10 +439,10 @@ Released server-side repo slot</pre>
     <h3 id="cmd-doctor"><code>recon doctor [--json]</code></h3>
     <p>Run a battery of probes covering every surface a stuck install can fail on. Exit code is 1 if anything's broken — wire it into CI to catch regressions.</p>
 <pre>$ recon doctor
-recon doctor — 0.2.0 (x86_64-unknown-linux-gnu)
+recon doctor — 0.2.1 (x86_64-unknown-linux-gnu)
 repo: /home/me/proj
 
-[OK]    binary                        recon 0.2.0 (x86_64-unknown-linux-gnu)
+[OK]    binary                        recon 0.2.1 (x86_64-unknown-linux-gnu)
 [OK]    repo dir                      /home/me/proj writable
 [OK]    global config                 /home/me/.config/recon writable
 [OK]    license                       Pro (expires unix=1798761600)
@@ -454,13 +462,13 @@ Summary: 9 ok, 3 warn, 0 fail</pre>
     <h3 id="cmd-update"><code>recon update [--check] [--force]</code></h3>
     <p>Self-upgrade to the latest published release. Verifies the SHA-256 manifest and (with cosign present) the sigstore signature before swapping the binary.</p>
 <pre>$ recon update --check
-Latest: v0.2.0  (you're on v0.1.1)
+Latest: v0.2.1  (you're on v0.1.1)
 
 $ recon update
 Downloading recon-x86_64-unknown-linux-gnu.tar.gz...
 Verifying signature... OK
 Replacing /usr/local/bin/recon... OK
-Now on v0.2.0.</pre>
+Now on v0.2.1.</pre>
 
     <h3 id="cmd-version"><code>recon version</code></h3>
     <p>Print the binary's semver tag. Identical to <code>recon --version</code>; provided for shell scripts that want a stable subcommand.</p>
@@ -469,8 +477,14 @@ Now on v0.2.0.</pre>
     <h2 id="cli-server"><span class="no">06</span>CLI · Server</h2>
 
 
-    <h3 id="cmd-serve"><code>recon serve [--port &lt;n&gt;] [--log &lt;level&gt;]</code></h3>
-    <p>Start the MCP server. With no flags it speaks JSON-RPC over stdio — the form your IDE auto-spawns. <code>--port</code> switches to Streamable HTTP for browser-based MCP clients or remote use.</p>
+    <h3 id="cmd-serve"><code>recon serve [-p &lt;port&gt;] [--host &lt;addr&gt;] [--log &lt;level&gt;]</code></h3>
+    <p>Start the MCP server. With no flags it speaks JSON-RPC over stdio — the form your IDE auto-spawns. <code>--port</code>/<code>-p</code> switches to Streamable HTTP for browser-based MCP clients or remote use.</p>
+    <p><b>Flags.</b></p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>-p, --port &lt;n&gt;</code> — bind a TCP port for the Streamable HTTP transport. Omit for stdio.</li>
+      <li><code>--host &lt;addr&gt;</code> — bind address for HTTP transport (default <code>127.0.0.1</code>). The HTTP transport has no built-in authentication and ships with an allowed-hosts filter that accepts only <code>localhost</code> / <code>127.0.0.1</code> / <code>::1</code> in the request's <code>Host</code> header — i.e. the server is reachable from the same machine even if you bind <code>0.0.0.0</code>.</li>
+      <li><code>--log &lt;level&gt;</code> — <code>error</code>, <code>warn</code>, <code>info</code> (default), <code>debug</code>, <code>trace</code>.</li>
+    </ul>
 <pre><span class="c"># stdio (your IDE auto-spawns this — you never run it manually)</span>
 recon serve
 
@@ -482,7 +496,13 @@ recon serve --port 7777 --log debug</pre>
     </div>
 
     <h3 id="cmd-index"><code>recon index</code></h3>
-    <p>Index a repository without starting the server. Same indexing path <code>recon init</code> uses, but doesn't touch MCP configs or agent rules. Useful if you want to seed the index from a script before the IDE first boots.</p>
+    <p>Index the repo at <code>--repo</code> (default <code>.</code>) without starting the server and without touching IDE configs. Same path <code>recon init</code> takes for the indexer step, just isolated. Useful for:</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li>seeding the index from a CI step before the IDE first boots,</li>
+      <li>warming the index on a fresh clone so the agent's first query isn't a cold-start,</li>
+      <li>scripted batch indexing (loop over a directory of repos before opening any of them).</li>
+    </ul>
+    <p>Incremental — second runs use the Merkle snapshot at <code>.recon/snapshot</code> and only re-parse changed files.</p>
 
     <h3 id="cmd-reindex"><code>recon reindex</code></h3>
     <p>Force a full re-index, discarding the Merkle snapshot. Use when the index is corrupt, after a major upgrade that bumps the schema, or when symbols seem stale despite the live watcher.</p>
@@ -491,42 +511,138 @@ Cleared snapshot
 Indexed 1834 files, 87421 symbols (0 errors)</pre>
 
     <h3 id="cmd-stats"><code>recon stats</code></h3>
-    <p>Print a one-screen index health report: file count, symbol count, last indexed time, schema version, on-disk size.</p>
+    <p>Print an index health report: repo root, file count, total symbols, Tantivy doc count, plus a global count of all repos this machine has indexed. Pair with <code>--json</code> for monitoring scripts (the JSON envelope additionally exposes <code>schema_version</code>).</p>
+<pre>$ recon stats
+Index Health
+  repo     /home/me/proj
+  files    1834
+  symbols  87421
+  tantivy  87421
+Indexed repos (global): 3
+
+$ recon stats --json | jq '.files_indexed, .schema_version'
+1834
+"4"</pre>
 
     <!-- DIRECT QUERY -->
     <h2 id="cli-query"><span class="no">07</span>CLI · Direct query</h2>
 
-    <p>Mirrors of the MCP tools, callable from the shell. Useful for debugging, scripting, or pasting recon output into a chat without the agent in the loop. Every command supports <code>--json</code> for structured output.</p>
+    <p>Each MCP tool has a one-to-one CLI mirror. Use these to debug recon, paste output into a chat without the agent in the loop, or wire recon into shell pipelines. All of them respect the global <code>--repo</code> and <code>--json</code> flags.</p>
 
-    <table>
-      <thead>
-        <tr><th>Command</th><th>Mirrors</th><th>Use it for</th></tr>
-      </thead>
-      <tbody>
-        <tr><td><code>recon find &lt;name&gt; [--kind] [--lang]</code></td><td><code>code_find_symbol</code></td><td>Find a function, struct, class, etc. by name (3-tier exact → BM25 → fuzzy).</td></tr>
-        <tr><td><code>recon search &lt;query&gt; [--mode] [--filter]</code></td><td><code>code_search</code></td><td>Free-text search. <code>--mode</code> = <code>exact</code> (default), <code>regex</code>, <code>hybrid</code>.</td></tr>
-        <tr><td><code>recon outline &lt;path&gt;</code></td><td><code>code_outline</code></td><td>One line per symbol in a file.</td></tr>
-        <tr><td><code>recon skeleton &lt;path&gt; [--depth]</code></td><td><code>code_skeleton</code></td><td>File API at a glance: signatures + docs, bodies elided.</td></tr>
-        <tr><td><code>recon symbol &lt;path&gt; &lt;name&gt;</code></td><td><code>code_read_symbol</code></td><td>Full source of one symbol plus its callers.</td></tr>
-        <tr><td><code>recon refs &lt;symbol&gt;</code></td><td><code>code_find_refs</code></td><td>All call sites of a symbol.</td></tr>
-        <tr><td><code>recon ls [--glob] [--lang] [--filter]</code></td><td><code>code_list</code></td><td>Indexed files with their top symbols.</td></tr>
-        <tr><td><code>recon map [--budget] [--focus]</code></td><td><code>code_repo_map</code></td><td>PageRank-ranked repo overview under a token budget.</td></tr>
-        <tr><td><code>recon strings &lt;pattern&gt; [--kind] [--filter]</code></td><td><code>code_find_strings</code></td><td>Search inside string literals and comments only.</td></tr>
-        <tr><td><code>recon multi &lt;p1&gt; &lt;p2&gt; …</code></td><td><code>code_multi_find</code></td><td>Fan-out search for many patterns in one pass.</td></tr>
-        <tr><td><code>recon query &lt;tool&gt; &lt;json-args&gt;</code></td><td>any tool</td><td>Raw tool call. Useful for testing custom shapes.</td></tr>
-      </tbody>
-    </table>
-
+    <h3 id="cmd-find"><code>recon find &lt;name&gt; [-k &lt;kind&gt;] [-l &lt;lang&gt;]</code></h3>
+    <p>Find symbols by name. Mirrors <code>code_find_symbol</code>. Three-tier matcher: exact SQLite hit → Tantivy BM25 → FTS5 trigram + nucleo fuzzy.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>name</code> (positional, required) — symbol name to search. Fuzzy by default.</li>
+      <li><code>-k, --kind &lt;kind&gt;</code> — restrict to one kind: <code>fn</code>, <code>struct</code>, <code>class</code>, <code>trait</code>, <code>enum</code>, <code>method</code>, etc.</li>
+      <li><code>-l, --lang &lt;lang&gt;</code> — restrict by language: <code>rs</code>, <code>py</code>, <code>ts</code>, <code>go</code>, …</li>
+    </ul>
 <pre>$ recon find Server --kind struct --lang rust --json | jq '.[] | .qualified_name'
 "recon_server::server::ReconServer"
-"recon_server::router::RepoRouter"
+"recon_server::router::RepoRouter"</pre>
 
-$ recon search "TODO" --filter "*.rs status:modified" | head
+    <h3 id="cmd-search"><code>recon search &lt;query&gt; [-m &lt;mode&gt;] [-f &lt;filter&gt;]</code></h3>
+    <p>Search for text patterns in source files. Mirrors <code>code_search</code>.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>query</code> (positional, required) — the pattern to search for.</li>
+      <li><code>-m, --mode &lt;mode&gt;</code> — <code>exact</code> (default), <code>regex</code>, or <code>hybrid</code> (BM25 + text fused via reciprocal rank fusion).</li>
+      <li><code>-f, --filter &lt;dsl&gt;</code> — narrow with the <a href="#filter-dsl">filter DSL</a>: <code>"*.rs"</code>, <code>"type:rust"</code>, <code>"status:modified"</code>, <code>"!test"</code> (negate), space-separated for AND.</li>
+    </ul>
+<pre>$ recon search "TODO" --filter "*.rs status:modified" | head
 crates/recon-cli/src/main.rs:1428:    // TODO: streaming HTTP transport progress
-crates/recon-search/src/text.rs:97:   // TODO: pluggable scorer
+crates/recon-search/src/text.rs:97:    // TODO: pluggable scorer
 
-$ recon map --budget 800 --focus crates/recon-server/src/server.rs
-[ranked overview, ~800 tokens, focused on server.rs callees and callers]</pre>
+$ recon search "fn handle_.*request" --mode regex --filter "!test"</pre>
+
+    <h3 id="cmd-outline"><code>recon outline &lt;path&gt;</code></h3>
+    <p>Tree-style outline of a file: one line per symbol, kind + name + line number. Mirrors <code>code_outline</code>. ~300–500 tokens for a 500-line file vs. ~5000+ for a full <code>cat</code>.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>path</code> (positional, required) — file path relative to the repo root.</li>
+    </ul>
+<pre>$ recon outline crates/recon-cli/src/main.rs
+crates/recon-cli/src/main.rs
+
+  struct     Cli :23
+  enum       Ide :38
+  enum       Command :152
+  function   validate_license_or_die :347
+  function   smoke_test_serve :374
+  function   main :976</pre>
+
+    <h3 id="cmd-skeleton"><code>recon skeleton &lt;path&gt; [-d &lt;depth&gt;]</code></h3>
+    <p>Signatures and docstrings, bodies elided as <code>...</code>. Roughly 10× compression vs. reading the file. Mirrors <code>code_skeleton</code>.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>path</code> (positional, required) — file path relative to the repo root.</li>
+      <li><code>-d, --depth &lt;n&gt;</code> — nesting depth (default <code>2</code>). Bump for deeply nested modules; lower for a tighter view.</li>
+    </ul>
+<pre>$ recon skeleton crates/recon-search/src/text.rs --depth 1</pre>
+
+    <h3 id="cmd-symbol"><code>recon symbol &lt;path&gt; &lt;name&gt;</code></h3>
+    <p>Full source of one symbol with its parent chain and direct caller/callee references. Mirrors <code>code_read_symbol</code>. Use this — not <code>recon outline</code> + manual extraction — when you need the body of a single function or type.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>path</code> (positional, required) — file path relative to the repo root.</li>
+      <li><code>name</code> (positional, required) — symbol name <em>or</em> a line number (recon picks the enclosing symbol).</li>
+    </ul>
+<pre>$ recon symbol crates/recon-cli/src/main.rs smoke_test_serve
+
+$ recon symbol crates/recon-cli/src/main.rs 374
+<span class="c"># same — line 374 is inside smoke_test_serve</span></pre>
+
+    <h3 id="cmd-refs"><code>recon refs &lt;symbol&gt;</code></h3>
+    <p>Find references (call sites, type uses, imports) of a symbol. Mirrors <code>code_find_refs</code>.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>symbol</code> (positional, required) — bare name (<code>ReconServer</code>) or fully-qualified (<code>recon_server::server::ReconServer</code>). Qualified is unambiguous when names collide.</li>
+    </ul>
+<pre>$ recon refs ReconServer
+$ recon refs recon_server::server::ReconServer --json</pre>
+
+    <h3 id="cmd-ls"><code>recon ls [-g &lt;glob&gt;] [-l &lt;lang&gt;] [-f &lt;filter&gt;]</code></h3>
+    <p>List indexed source files with language, line count, and top symbols. Mirrors <code>code_list</code>. Replaces <code>find</code>/<code>fd</code> walks for source-file inventory.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>-g, --glob &lt;pattern&gt;</code> — glob filter (e.g. <code>"crates/recon-cli/**"</code>).</li>
+      <li><code>-l, --lang &lt;lang&gt;</code> — language filter.</li>
+      <li><code>-f, --filter &lt;dsl&gt;</code> — full filter DSL (see section 09).</li>
+    </ul>
+<pre>$ recon ls --lang rust --filter "status:modified"
+
+$ recon ls --glob "crates/recon-server/**" --json | jq '.[] | .path'</pre>
+
+    <h3 id="cmd-map"><code>recon map [-b &lt;budget&gt;] [-f &lt;path&gt;...]</code></h3>
+    <p>PageRank-ranked overview of the most important symbols, fitted to a token budget. Mirrors <code>code_repo_map</code>. The first command to run when you (or your agent) lands in an unfamiliar repo.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>-b, --budget &lt;n&gt;</code> — max output tokens (default <code>2000</code>).</li>
+      <li><code>-f, --focus &lt;path&gt;</code> — boost ranking around this file. Repeatable: pass <code>--focus</code> multiple times to focus on several files.</li>
+    </ul>
+<pre>$ recon map --budget 800 --focus crates/recon-server/src/server.rs
+
+$ recon map -b 1500 -f crates/recon-cli/src/main.rs -f crates/recon-server/src/server.rs</pre>
+
+    <h3 id="cmd-strings"><code>recon strings &lt;pattern&gt; [-k &lt;kind&gt;] [-f &lt;filter&gt;]</code></h3>
+    <p>Search inside string literals and comments only — skips identifiers and keywords, so a hit is always a real natural-language or string match. Mirrors <code>code_find_strings</code>.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>pattern</code> (positional, required) — text to search for.</li>
+      <li><code>-k, --kind &lt;kind&gt;</code> — <code>literal</code>, <code>comment</code>, or <code>both</code> (default).</li>
+      <li><code>-f, --filter &lt;dsl&gt;</code> — filter DSL.</li>
+    </ul>
+<pre>$ recon strings "deprecated" --kind comment --filter "*.rs"
+$ recon strings "https://" --kind literal</pre>
+
+    <h3 id="cmd-multi"><code>recon multi &lt;p1&gt; &lt;p2&gt; ...</code></h3>
+    <p>Search several patterns in a single index pass. Mirrors <code>code_multi_find</code>. Cheaper than N separate <code>recon search</code> calls when the agent (or you) has a fan-out plan in hand.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>patterns</code> (positional, repeated) — two or more patterns, space-separated.</li>
+    </ul>
+<pre>$ recon multi unwrap expect panic!
+<span class="c"># single pass; results grouped per pattern</span></pre>
+
+    <h3 id="cmd-query"><code>recon query &lt;tool&gt; [&lt;json-args&gt;]</code></h3>
+    <p>Raw MCP tool call. Useful for testing tools that don't have a dedicated CLI subcommand, or for exercising arg shapes before wiring them into automation.</p>
+    <ul style="margin:8px 0 12px 22px">
+      <li><code>tool</code> (positional, required) — tool name (e.g. <code>code_find_symbol</code>, <code>code_repo_map</code>).</li>
+      <li><code>json-args</code> (positional, optional) — tool arguments as a JSON object. Default <code>"{}"</code>.</li>
+    </ul>
+<pre>$ recon query code_stats
+$ recon query code_find_symbol '{"name":"Server","kind":"struct"}'
+$ recon query code_repo_map '{"token_budget":500}'</pre>
 
     <!-- MCP TOOLS -->
     <h2 id="tools"><span class="no">08</span>MCP tools</h2>
