@@ -162,6 +162,27 @@ impl ReadPool {
         self.with(read_fns::all_file_paths)
     }
 
+    /// Snapshot all paths, symbols, and refs from a single point-in-time.
+    ///
+    /// Wraps three reads in one transaction on a single connection so the
+    /// returned tuples reflect the same SQLite state — without this, a
+    /// concurrent writer can interleave between the three queries and leave
+    /// the caches mutually inconsistent (e.g. symbols referencing a path no
+    /// longer in the path list). WAL mode gives this snapshot for free.
+    #[allow(clippy::type_complexity)]
+    pub fn snapshot_all_for_caches(&self) -> Result<(Vec<PathBuf>, Vec<Symbol>, Vec<Ref>), Error> {
+        self.with(|conn| {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            let paths = read_fns::all_file_paths(&tx)?;
+            let symbols = read_fns::all_symbols(&tx)?;
+            let refs = read_fns::all_refs(&tx)?;
+            tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
+            Ok((paths, symbols, refs))
+        })
+    }
+
     /// Get file paths filtered by language.
     pub fn file_paths_by_lang(&self, lang: &str) -> Result<Vec<PathBuf>, Error> {
         self.with(|conn| read_fns::file_paths_by_lang(conn, lang))
@@ -274,6 +295,31 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    #[test]
+    fn snapshot_all_for_caches_returns_consistent_view() {
+        let (_dir, db_path) = setup_db();
+        let pool = ReadPool::new(&db_path, 2).unwrap();
+
+        let (paths, symbols, refs) = pool.snapshot_all_for_caches().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name.as_str(), "validate_email");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn snapshot_all_for_caches_on_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        let _store = Store::open(&db_path).unwrap();
+        let pool = ReadPool::new(&db_path, 2).unwrap();
+
+        let (paths, symbols, refs) = pool.snapshot_all_for_caches().unwrap();
+        assert!(paths.is_empty());
+        assert!(symbols.is_empty());
+        assert!(refs.is_empty());
     }
 
     #[test]

@@ -54,12 +54,14 @@ pub struct ReconServer {
     cached_symbols: Arc<ArcSwap<Vec<recon_core::symbol::Symbol>>>,
     /// Cached all_refs — avoids alloc on every code_repo_map call.
     cached_refs: Arc<ArcSwap<Vec<recon_core::symbol::Ref>>>,
-    /// Lock-free embedding service — shared via Arc, no mutex on hot path.
+    /// Lock-free embedding service — set once in `init_embed`, read on every
+    /// embed-backed tool call. `ArcSwapOption` gives true lock-free reads.
     #[cfg(feature = "embed")]
-    embed_service: Arc<Mutex<Option<Arc<recon_embed::EmbedService>>>>,
-    /// Lock-free read pool for vector similarity search.
+    embed_service: Arc<arc_swap::ArcSwapOption<recon_embed::EmbedService>>,
+    /// Lock-free read pool for vector similarity search. Same set-once-read-many
+    /// pattern as `embed_service`.
     #[cfg(feature = "embed")]
-    vec_read_pool: Arc<Mutex<Option<Arc<recon_embed::VecReadPool>>>>,
+    vec_read_pool: Arc<arc_swap::ArcSwapOption<recon_embed::VecReadPool>>,
     /// Write handle — taken by `start_watcher`, None afterwards.
     #[cfg(feature = "embed")]
     vec_writer: Arc<Mutex<Option<recon_embed::VectorStore>>>,
@@ -213,9 +215,9 @@ impl ReconServer {
             watcher_handle: Arc::new(Mutex::new(None)),
             license: Arc::new(ArcSwap::new(Arc::new(None))),
             #[cfg(feature = "embed")]
-            embed_service: Arc::new(Mutex::new(None)),
+            embed_service: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             #[cfg(feature = "embed")]
-            vec_read_pool: Arc::new(Mutex::new(None)),
+            vec_read_pool: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             #[cfg(feature = "embed")]
             vec_writer: Arc::new(Mutex::new(None)),
         })
@@ -224,21 +226,18 @@ impl ReconServer {
     /// Refresh all cached data from the database.
     /// Called after initial index and reindex to keep caches warm.
     fn refresh_caches(&self) {
-        match self.read_pool.all_file_paths() {
-            Ok(paths) => {
+        // Single transactional snapshot — paths, symbols, and refs all reflect
+        // the same SQLite state. Three separate reads would let a concurrent
+        // writer interleave and produce mutually inconsistent caches.
+        match self.read_pool.snapshot_all_for_caches() {
+            Ok((paths, symbols, refs)) => {
                 self.cached_file_count
                     .store(paths.len() as u64, Ordering::Relaxed);
                 self.cached_paths.store(Arc::new(paths));
+                self.cached_symbols.store(Arc::new(symbols));
+                self.cached_refs.store(Arc::new(refs));
             }
-            Err(e) => warn!("failed to refresh path cache: {e}"),
-        }
-        match self.read_pool.all_symbols() {
-            Ok(syms) => self.cached_symbols.store(Arc::new(syms)),
-            Err(e) => warn!("failed to refresh symbols cache: {e}"),
-        }
-        match self.read_pool.all_refs() {
-            Ok(refs) => self.cached_refs.store(Arc::new(refs)),
-            Err(e) => warn!("failed to refresh refs cache: {e}"),
+            Err(e) => warn!("failed to refresh caches: {e}"),
         }
     }
 
@@ -326,8 +325,8 @@ impl ReconServer {
             recon_embed::VecReadPool::new(&vec_dir, 4)
                 .map_err(|e| recon_core::error::Error::Search(format!("vec read pool: {e}")))?,
         );
-        *self.embed_service.lock() = Some(svc);
-        *self.vec_read_pool.lock() = Some(pool);
+        self.embed_service.store(Some(svc));
+        self.vec_read_pool.store(Some(pool));
         *self.vec_writer.lock() = Some(vs);
         info!("embedding engine initialized");
         Ok(())
@@ -335,28 +334,39 @@ impl ReconServer {
 
     /// Run initial indexing of the repo (SQLite + Tantivy).
     pub async fn index_repo(&self) -> Result<(), recon_core::error::Error> {
-        let store = self.write_store.lock();
-        let mut tw = self.tantivy_writer.lock();
-        let stats = indexer::index_repo_incremental(
-            &store,
-            Some(&self.tantivy),
-            &self.repo_root,
-            tw.as_mut(),
-        )?;
-        // VACUUM after bulk indexing to reclaim free pages and shrink the DB file.
-        store
-            .incremental_vacuum()
-            .map_err(|e| recon_core::error::Error::Storage(format!("incremental_vacuum: {e}")))?;
+        // Phase A: index. Both writers locked together — `index_repo_incremental`
+        // writes to SQLite then commits Tantivy.
+        let stats = {
+            let store = self.write_store.lock();
+            let mut tw = self.tantivy_writer.lock();
+            indexer::index_repo_incremental(
+                &store,
+                Some(&self.tantivy),
+                &self.repo_root,
+                tw.as_mut(),
+            )?
+        }; // Both locks released here.
+
         info!(
             files = stats.files_indexed,
             symbols = stats.total_symbols,
             "initial indexing complete"
         );
-        drop(tw);
 
-        // Pre-warm the file path cache so tool calls don't hit SQLite on first query.
-        drop(store);
+        // Phase B: VACUUM with only the SQLite writer lock held — Tantivy
+        // is free for any concurrent reader. Runs once at startup, but
+        // keeping the lock surface narrow makes the function reusable.
+        {
+            let store = self.write_store.lock();
+            store.incremental_vacuum().map_err(|e| {
+                recon_core::error::Error::Storage(format!("incremental_vacuum: {e}"))
+            })?;
+        }
+
+        // Phase C: pre-warm caches (no locks held).
         self.refresh_caches();
+
+        // Phase D: pre-warm the repo_map cache via a short write-lock for the meta upsert.
         let store = self.write_store.lock();
 
         // Pre-warm the repo_map cache so the first user call is instant.
@@ -582,11 +592,11 @@ impl ReconServer {
         let cached_symbols = self.cached_symbols.clone();
         let cached_refs = self.cached_refs.clone();
         let shutdown_flag = self.shutdown_flag.clone();
-        // Clone the Arc handles once; the hot path inside the loop needs no locks.
+        // Snapshot the Arc handles once; the hot path inside the loop needs no locks.
         #[cfg(feature = "embed")]
-        let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.lock().clone();
+        let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.load_full();
         #[cfg(feature = "embed")]
-        let vec_pool: Option<Arc<recon_embed::VecReadPool>> = self.vec_read_pool.lock().clone();
+        let vec_pool: Option<Arc<recon_embed::VecReadPool>> = self.vec_read_pool.load_full();
         // Take the write handle — watcher owns it exclusively from here.
         #[cfg(feature = "embed")]
         let vec_writer: Option<recon_embed::VectorStore> = self.vec_writer.lock().take();
@@ -612,82 +622,113 @@ impl ReconServer {
                 const EMBED_BATCH: usize = 64;
                 match read_pool.all_symbols() {
                     Err(e) => warn!("embed catch-up: all_symbols: {e}"),
-                    Ok(all_syms) if all_syms.is_empty() => {}
                     Ok(all_syms) => {
-                        let all_ids: Vec<u64> = all_syms.iter().map(|s| s.id).collect();
-                        let existing = pool.existing_hashes(&all_ids).unwrap_or_else(|e| {
-                            warn!("embed catch-up: existing_hashes: {e}");
-                            AHashMap::new()
-                        });
-                        let to_embed: Vec<&recon_core::symbol::Symbol> = all_syms
-                            .iter()
-                            .filter(|s| existing.get(&s.id).map_or(true, |h| *h != s.body_hash))
-                            .collect();
-                        if to_embed.is_empty() {
-                            info!(
-                                total = all_syms.len(),
-                                "embed catch-up: all symbols already embedded"
-                            );
-                        } else {
-                            info!(
-                                total = all_syms.len(),
-                                missing = to_embed.len(),
-                                "embed catch-up: starting"
-                            );
-                            // Group by file so each source file is read exactly once.
-                            let mut by_file: AHashMap<
-                                &std::path::Path,
-                                Vec<&recon_core::symbol::Symbol>,
-                            > = AHashMap::new();
-                            for s in &to_embed {
-                                by_file.entry(s.path.as_path()).or_default().push(s);
-                            }
-                            let mut done = 0usize;
-                            for (rel_path, syms) in &by_file {
-                                let file_bytes = match std::fs::read(repo_root.join(rel_path)) {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        warn!(?rel_path, "embed catch-up: cannot read file: {e}");
-                                        continue;
+                        // Orphan cleanup: any embed_meta row whose symbol no
+                        // longer exists in SQLite. Important after deletes that
+                        // happened before the watcher delete-fix shipped, or
+                        // when SQLite is wiped/restored out-of-band.
+                        let symbol_id_set: ahash::AHashSet<u64> =
+                            all_syms.iter().map(|s| s.id).collect();
+                        match pool.all_embed_ids() {
+                            Ok(embed_ids) => {
+                                let to_delete: Vec<u64> = embed_ids
+                                    .into_iter()
+                                    .filter(|id| !symbol_id_set.contains(id))
+                                    .collect();
+                                if !to_delete.is_empty() {
+                                    let count = to_delete.len();
+                                    if let Err(e) = writer.delete_by_symbol_ids(&to_delete) {
+                                        warn!("embed catch-up: orphan cleanup: {e}");
+                                    } else {
+                                        info!(
+                                            orphans = count,
+                                            "embed catch-up: removed orphan embeddings"
+                                        );
                                     }
-                                };
-                                for chunk in syms.chunks(EMBED_BATCH) {
-                                    let texts: Vec<String> = chunk
-                                        .iter()
-                                        .map(|s| {
-                                            let body = file_bytes
-                                                .get(s.byte_range.clone())
-                                                .and_then(|b| std::str::from_utf8(b).ok())
-                                                .unwrap_or("");
-                                            recon_embed::Embedder::format_symbol(s, body)
-                                        })
-                                        .collect();
-                                    let vecs = match svc.embed_batch(texts) {
-                                        Ok(v) => v,
+                                }
+                            }
+                            Err(e) => warn!("embed catch-up: all_embed_ids: {e}"),
+                        }
+
+                        if !all_syms.is_empty() {
+                            let all_ids: Vec<u64> = all_syms.iter().map(|s| s.id).collect();
+                            let existing = pool.existing_hashes(&all_ids).unwrap_or_else(|e| {
+                                warn!("embed catch-up: existing_hashes: {e}");
+                                AHashMap::new()
+                            });
+                            let to_embed: Vec<&recon_core::symbol::Symbol> = all_syms
+                                .iter()
+                                .filter(|s| existing.get(&s.id).is_none_or(|h| *h != s.body_hash))
+                                .collect();
+                            if to_embed.is_empty() {
+                                info!(
+                                    total = all_syms.len(),
+                                    "embed catch-up: all symbols already embedded"
+                                );
+                            } else {
+                                info!(
+                                    total = all_syms.len(),
+                                    missing = to_embed.len(),
+                                    "embed catch-up: starting"
+                                );
+                                // Group by file so each source file is read exactly once.
+                                let mut by_file: AHashMap<
+                                    &std::path::Path,
+                                    Vec<&recon_core::symbol::Symbol>,
+                                > = AHashMap::new();
+                                for s in &to_embed {
+                                    by_file.entry(s.path.as_path()).or_default().push(s);
+                                }
+                                let mut done = 0usize;
+                                for (rel_path, syms) in &by_file {
+                                    let file_bytes = match std::fs::read(repo_root.join(rel_path)) {
+                                        Ok(b) => b,
                                         Err(e) => {
-                                            warn!("embed catch-up: embed_batch: {e}");
+                                            warn!(
+                                                ?rel_path,
+                                                "embed catch-up: cannot read file: {e}"
+                                            );
                                             continue;
                                         }
                                     };
-                                    let entries: Vec<recon_embed::EmbedEntry> = chunk
-                                        .iter()
-                                        .zip(vecs)
-                                        .map(|(s, vec)| recon_embed::EmbedEntry {
-                                            id: s.id,
-                                            qualified_name: s.qualified_name.to_string(),
-                                            vector: vec,
-                                            body_hash: s.body_hash.to_vec(),
-                                            lang: s.lang.name().to_string(),
-                                        })
-                                        .collect();
-                                    if let Err(e) = writer.upsert_embeddings(&entries) {
-                                        warn!("embed catch-up: upsert: {e}");
+                                    for chunk in syms.chunks(EMBED_BATCH) {
+                                        let texts: Vec<String> = chunk
+                                            .iter()
+                                            .map(|s| {
+                                                let body = file_bytes
+                                                    .get(s.byte_range.clone())
+                                                    .and_then(|b| std::str::from_utf8(b).ok())
+                                                    .unwrap_or("");
+                                                recon_embed::Embedder::format_symbol(s, body)
+                                            })
+                                            .collect();
+                                        let vecs = match svc.embed_batch(texts) {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                warn!("embed catch-up: embed_batch: {e}");
+                                                continue;
+                                            }
+                                        };
+                                        let entries: Vec<recon_embed::EmbedEntry> = chunk
+                                            .iter()
+                                            .zip(vecs)
+                                            .map(|(s, vec)| recon_embed::EmbedEntry {
+                                                id: s.id,
+                                                qualified_name: s.qualified_name.to_string(),
+                                                vector: vec,
+                                                body_hash: s.body_hash.to_vec(),
+                                                lang: s.lang.name().to_string(),
+                                            })
+                                            .collect();
+                                        if let Err(e) = writer.upsert_embeddings(&entries) {
+                                            warn!("embed catch-up: upsert: {e}");
+                                        }
+                                        done += chunk.len();
                                     }
-                                    done += chunk.len();
                                 }
+                                info!(done, "embed catch-up: complete");
                             }
-                            info!(done, "embed catch-up: complete");
-                        }
+                        } // closes `if !all_syms.is_empty()`
                     }
                 }
             }
@@ -707,8 +748,88 @@ impl ReconServer {
                 };
                 // catch_unwind: a panic in one batch must not kill the watcher
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Phase 0: Partition into existing-on-disk vs deleted paths.
+                    // Filesystem state at this moment is the source of truth — an
+                    // editor's atomic-rename save (write-tmp + delete + rename)
+                    // collapses to "exists" by Phase 0 time, which is correct.
+                    let mut existing_paths: Vec<PathBuf> = Vec::with_capacity(changed_paths.len());
+                    let mut deleted_paths: Vec<PathBuf> = Vec::new();
+                    for path in changed_paths {
+                        if path.exists() {
+                            existing_paths.push(path);
+                        } else {
+                            deleted_paths.push(path);
+                        }
+                    }
+
+                    let mut did_delete = false;
+                    if !deleted_paths.is_empty() {
+                        // Snapshot symbol IDs BEFORE the SQLite cascade — embeddings
+                        // live in a separate db and must be cleaned up by ID.
+                        #[cfg(feature = "embed")]
+                        let mut deleted_symbol_ids: Vec<u64> = Vec::new();
+                        #[cfg(feature = "embed")]
+                        if vec_writer.is_some() {
+                            for abs_path in &deleted_paths {
+                                let rel_path =
+                                    abs_path.strip_prefix(&repo_root).unwrap_or(abs_path);
+                                match read_pool.symbols_for_path(rel_path) {
+                                    Ok(syms) => {
+                                        deleted_symbol_ids.extend(syms.into_iter().map(|s| s.id))
+                                    }
+                                    Err(e) => {
+                                        warn!(?rel_path, "watcher: symbols_for_path on delete: {e}")
+                                    }
+                                }
+                            }
+                        }
+
+                        // SQLite cascade — drops file + symbols + refs.
+                        {
+                            let store = write_store.lock();
+                            for abs_path in &deleted_paths {
+                                let rel_path =
+                                    abs_path.strip_prefix(&repo_root).unwrap_or(abs_path);
+                                debug!(?rel_path, "watcher: cascading delete");
+                                if let Err(e) = store.delete_file_cascade(rel_path) {
+                                    warn!(?rel_path, "watcher: delete_file_cascade: {e}");
+                                } else {
+                                    did_delete = true;
+                                }
+                            }
+                        }
+
+                        // Tantivy delete by path.
+                        {
+                            let mut tw = tantivy_writer.lock();
+                            if let Some(ref mut writer) = *tw {
+                                for abs_path in &deleted_paths {
+                                    let rel_path =
+                                        abs_path.strip_prefix(&repo_root).unwrap_or(abs_path);
+                                    tantivy.delete_path(writer, rel_path);
+                                }
+                                if let Err(e) = tantivy.commit(writer) {
+                                    warn!("watcher: tantivy commit (delete): {e}");
+                                }
+                            }
+                        }
+
+                        // Vector store delete — exclusive writer, no lock.
+                        // Note: orphan embeddings from deletes that happened before
+                        // this fix shipped are not cleaned up here; force-reindex
+                        // remains the recovery path for those.
+                        #[cfg(feature = "embed")]
+                        if let Some(ref writer) = vec_writer {
+                            if !deleted_symbol_ids.is_empty() {
+                                if let Err(e) = writer.delete_by_symbol_ids(&deleted_symbol_ids) {
+                                    warn!("watcher: vector delete: {e}");
+                                }
+                            }
+                        }
+                    }
+
                     // Phase 1: Filter to files that actually changed (lock-free via ReadPool)
-                    let to_parse: Vec<(PathBuf, Vec<u8>)> = changed_paths
+                    let to_parse: Vec<(PathBuf, Vec<u8>)> = existing_paths
                         .into_iter()
                         .filter_map(|path| {
                             let content = std::fs::read(&path).ok()?;
@@ -733,6 +854,13 @@ impl ReconServer {
                         .collect();
 
                     if to_parse.is_empty() {
+                        // Even with no parse work, deletes invalidate caches.
+                        if did_delete {
+                            cached_paths.store(Arc::new(Vec::new()));
+                            cached_file_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                            cached_symbols.store(Arc::new(Vec::new()));
+                            cached_refs.store(Arc::new(Vec::new()));
+                        }
                         return;
                     }
 
@@ -821,7 +949,7 @@ impl ReconServer {
 
                             let to_embed: Vec<&recon_core::symbol::Symbol> = all_syms
                                 .iter()
-                                .filter(|s| existing.get(&s.id).map_or(true, |h| *h != s.body_hash))
+                                .filter(|s| existing.get(&s.id).is_none_or(|h| *h != s.body_hash))
                                 .collect();
 
                             if to_embed.is_empty() {
@@ -1351,8 +1479,8 @@ impl ReconServer {
         let mut from_embedding = false;
         #[cfg(feature = "embed")]
         if results.is_empty() {
-            let svc = self.embed_service.lock().clone();
-            let pool = self.vec_read_pool.lock().clone();
+            let svc = self.embed_service.load_full();
+            let pool = self.vec_read_pool.load_full();
             if let (Some(svc), Some(pool)) = (svc, pool) {
                 let query = params.0.name.clone();
                 let query_vec =
@@ -1481,8 +1609,8 @@ impl ReconServer {
         // Semantic mode — fully lock-free via EmbedService channel + VecReadPool.
         #[cfg(feature = "embed")]
         if params.0.mode == "semantic" {
-            let svc = self.embed_service.lock().clone();
-            let pool = self.vec_read_pool.lock().clone();
+            let svc = self.embed_service.load_full();
+            let pool = self.vec_read_pool.load_full();
             match (svc, pool) {
                 (Some(svc), Some(pool)) => {
                     // embed_one blocks the caller waiting on the ONNX worker thread;
@@ -1880,13 +2008,15 @@ impl ReconServer {
             use recon_indexer::walker;
 
             if force {
-                // Full reindex: clear existing data first
+                // Full reindex: clear existing data first.
+                // One bulk transaction instead of N per-file deletes (was a
+                // multi-second hot spot on large repos due to per-file WAL
+                // fsyncs).
                 info!("force reindex: clearing existing data");
                 {
                     let store = write_store.lock();
-                    let all_paths = store.all_file_paths().unwrap_or_default();
-                    for path in &all_paths {
-                        let _ = store.delete_file_cascade(path);
+                    if let Err(e) = store.delete_all_files_cascade() {
+                        warn!("force reindex: bulk clear failed: {e}");
                     }
                     if let Some(ref mut writer) = tantivy_writer.lock().as_mut() {
                         let _ = tantivy.commit(writer);

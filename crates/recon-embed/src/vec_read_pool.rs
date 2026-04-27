@@ -109,6 +109,26 @@ impl VecReadPool {
         })
     }
 
+    /// Return every symbol ID currently present in the embedding store.
+    ///
+    /// Used by the watcher's catch-up pass to find orphan embeddings whose
+    /// underlying symbols have been deleted from SQLite — the diff
+    /// `embed_ids \ symbol_ids` is then fed to
+    /// [`crate::VectorStore::delete_by_symbol_ids`].
+    pub fn all_embed_ids(&self) -> Result<Vec<u64>, EmbedError> {
+        self.with(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id FROM embed_meta")
+                .map_err(|e| EmbedError::Store(format!("prepare ids: {e}")))?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, i64>(0).map(|v| v as u64))
+                .map_err(|e| EmbedError::Store(format!("query: {e}")))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| EmbedError::Store(format!("row: {e}")))?;
+            Ok(ids)
+        })
+    }
+
     /// Return the stored `body_hash` for each of the given IDs.
     ///
     /// IDs absent from the store are omitted — the caller treats them as

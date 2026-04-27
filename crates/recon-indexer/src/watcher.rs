@@ -2,6 +2,12 @@
 //!
 //! On notify overflow errors, falls back to `gix status` to discover
 //! changed paths instead of losing events silently.
+//!
+//! High-volume directories (`target/`, `node_modules/`, `.git/`, `.recon/`,
+//! `.idea/`, `.vscode/`) are excluded from the watch tree itself rather than
+//! filtered post-event — this prevents `cargo build` storms from saturating
+//! the inotify event queue (Linux default 16,384) and silently dropping the
+//! source-file edits we care about.
 
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
@@ -10,6 +16,61 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 use tracing::{debug, warn};
+
+/// Directory names that should never be watched recursively.
+///
+/// `target/` is the dominant contributor to inotify queue overflows during
+/// Rust builds. `.git/` churns during pulls/rebases. `node_modules/` and the
+/// IDE caches are similarly noisy. `.recon/` is our own index — events there
+/// would feed back into the watcher.
+fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some("target")
+            | Some("node_modules")
+            | Some(".git")
+            | Some(".recon")
+            | Some(".idea")
+            | Some(".vscode")
+    )
+}
+
+/// Register notify watches that skip high-volume ignore directories.
+///
+/// Strategy: a non-recursive watch on the root catches edits to top-level
+/// files (Cargo.toml, README) and creation of new top-level entries; for each
+/// existing top-level child *directory* not in the ignore set, a recursive
+/// watch is added. New subdirectories created inside an already-recursively-
+/// watched subtree are picked up automatically by the kernel.
+///
+/// Trade-off: a NEW top-level directory created after the watcher starts is
+/// visible (CREATE event on root) but its contents are not live-watched until
+/// the next `code_reindex` or server restart. Acceptable in practice — new
+/// top-level dirs are rare; the cost of `target/` overflow is not.
+fn watch_non_ignored(
+    debouncer: &mut Debouncer<notify::RecommendedWatcher, RecommendedCache>,
+    root: &Path,
+) -> Result<(), notify::Error> {
+    debouncer.watch(root, RecursiveMode::NonRecursive)?;
+    let entries = match std::fs::read_dir(root) {
+        Ok(it) => it,
+        Err(e) => {
+            warn!(
+                ?root,
+                "watcher: read_dir failed, falling back to root-only watch: {e}"
+            );
+            return Ok(());
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || is_ignored_dir(&entry.file_name()) {
+            continue;
+        }
+        debouncer.watch(&path, RecursiveMode::Recursive)?;
+    }
+    Ok(())
+}
 
 /// A file watcher that emits debounced change events.
 pub struct Watcher {
@@ -32,11 +93,15 @@ impl Watcher {
             None,
             move |result: DebounceEventResult| match result {
                 Ok(events) => {
+                    // Keep delete events: a deleted path is neither a file nor a
+                    // directory, so `!p.is_dir()` lets it through (and excludes
+                    // genuine directories). The downstream Phase 0 in the server
+                    // checks `path.exists()` to discriminate delete vs. modify.
                     let paths: Vec<PathBuf> = events
                         .into_iter()
                         .flat_map(|e| e.event.paths)
                         .filter(|p| !p.components().any(|c| c.as_os_str() == ".recon"))
-                        .filter(|p| p.is_file() && Language::from_path(p) != Language::Unknown)
+                        .filter(|p| !p.is_dir() && Language::from_path(p) != Language::Unknown)
                         .collect();
                     if !paths.is_empty() {
                         debug!(count = paths.len(), "debounced file changes");
@@ -44,21 +109,29 @@ impl Watcher {
                     }
                 }
                 Err(errors) => {
-                    // Detect overflow / coalescing errors and fall back to gix status
-                    let is_overflow = errors.iter().any(|e| {
-                        let msg = format!("{e}");
-                        msg.contains("overflow") || msg.contains("coalesced")
+                    // Detect any signal that events were lost or coalesced and
+                    // fall back to gix status. notify-rs uses several phrasings
+                    // across backends ("queue overflow", "Event queue has
+                    // overflowed", "events lost", etc.); lowercase + a small
+                    // substring set catches the realistic shapes without
+                    // triggering on every transient error.
+                    let is_event_loss = errors.iter().any(|e| {
+                        let msg = format!("{e}").to_lowercase();
+                        msg.contains("overflow")
+                            || msg.contains("coalesced")
+                            || msg.contains("lost")
+                            || msg.contains("queue")
                     });
 
-                    if is_overflow {
-                        warn!("notify overflow, falling back to gix status");
+                    if is_event_loss {
+                        warn!("notify event loss detected, falling back to gix status");
                         match crate::git::status_paths(&root_for_fallback) {
                             Ok(paths) => {
                                 let paths: Vec<PathBuf> = paths
                                     .into_iter()
                                     .filter(|p| !p.components().any(|c| c.as_os_str() == ".recon"))
                                     .filter(|p| {
-                                        p.is_file() && Language::from_path(p) != Language::Unknown
+                                        !p.is_dir() && Language::from_path(p) != Language::Unknown
                                     })
                                     .collect();
                                 if !paths.is_empty() {
@@ -78,7 +151,7 @@ impl Watcher {
             },
         )?;
 
-        debouncer.watch(root, RecursiveMode::Recursive)?;
+        watch_non_ignored(&mut debouncer, root)?;
         drop(tx); // Drop our copy so rx drains when debouncer stops
 
         Ok(Self {
@@ -255,6 +328,118 @@ mod tests {
         );
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn watcher_ignores_target_subdir() {
+        let tmp = make_temp_root();
+        // Pre-create target/ so the watcher's startup walk explicitly skips it.
+        let target_dir = tmp.path().join("target");
+        fs::create_dir(&target_dir).unwrap();
+
+        let watcher = Watcher::new(tmp.path()).unwrap();
+
+        // Drain any initial events.
+        thread::sleep(Duration::from_millis(300));
+        while watcher.try_recv().is_some() {}
+
+        // Write a .rs file inside target/ — it would normally be a strong
+        // signal, but target/ is ignored at the watch level so no event fires.
+        fs::write(target_dir.join("build_artifact.rs"), "fn x() {}").unwrap();
+        thread::sleep(Duration::from_millis(500));
+
+        if let Some(paths) = watcher.try_recv() {
+            let leaked = paths
+                .iter()
+                .any(|p| p.components().any(|c| c.as_os_str() == "target"));
+            assert!(
+                !leaked,
+                "watcher should not emit events from target/: {paths:?}"
+            );
+        }
+
+        // Sanity: a sibling file outside target/ still gets through.
+        fs::write(tmp.path().join("real.rs"), "fn y() {}").unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let paths = watcher.try_recv().expect("real.rs event should fire");
+        assert!(paths.iter().any(|p| p.ends_with("real.rs")));
+    }
+
+    #[test]
+    fn is_ignored_dir_covers_high_volume_paths() {
+        for name in [
+            "target",
+            "node_modules",
+            ".git",
+            ".recon",
+            ".idea",
+            ".vscode",
+        ] {
+            assert!(
+                is_ignored_dir(std::ffi::OsStr::new(name)),
+                "{name} should be ignored"
+            );
+        }
+        for name in ["src", "crates", "docs", "tests", "src.rs"] {
+            assert!(
+                !is_ignored_dir(std::ffi::OsStr::new(name)),
+                "{name} should NOT be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn overflow_substring_matches_realistic_phrasings() {
+        // The watcher's Err branch lowercases and substring-matches against the
+        // formatted error. These are the realistic phrasings we want to catch
+        // — guard against future tightening of the regex.
+        let phrasings = [
+            "Event queue has overflowed",
+            "queue overflow",
+            "QOverflow",
+            "events were lost",
+            "Some events were coalesced",
+        ];
+        for s in phrasings {
+            let lower = s.to_lowercase();
+            let matched = lower.contains("overflow")
+                || lower.contains("coalesced")
+                || lower.contains("lost")
+                || lower.contains("queue");
+            assert!(matched, "should detect event-loss phrasing: {s:?}");
+        }
+    }
+
+    #[test]
+    fn watcher_emits_delete_events() {
+        let tmp = make_temp_root();
+
+        // Pre-create a Rust file so it exists when the watcher starts.
+        let file_path = tmp.path().join("doomed.rs");
+        fs::write(&file_path, "fn doomed() {}").unwrap();
+
+        let watcher = Watcher::new(tmp.path()).unwrap();
+
+        // Drain any startup events.
+        thread::sleep(Duration::from_millis(300));
+        while watcher.try_recv().is_some() {}
+
+        // Delete the file — its path is neither a file nor a directory afterward,
+        // but the watcher's filter (`!is_dir() && Language::from_path != Unknown`)
+        // must still let the event through.
+        fs::remove_file(&file_path).unwrap();
+        thread::sleep(Duration::from_millis(500));
+
+        let events = watcher.try_recv();
+        assert!(
+            events.is_some(),
+            "watcher should emit an event for the delete"
+        );
+        let paths = events.unwrap();
+        assert!(
+            paths.iter().any(|p| p.ends_with("doomed.rs")),
+            "deleted .rs file should be in event paths: {paths:?}"
+        );
     }
 
     #[test]

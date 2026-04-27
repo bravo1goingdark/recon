@@ -93,8 +93,12 @@ impl Ide {
     /// Two layouts:
     /// - `Shared(path)` — rules block fenced by recon markers inside a file
     ///   the project may also use for unrelated content (`CLAUDE.md`,
-    ///   `AGENTS.md`).  Append-only; never created from scratch when missing
-    ///   for `CLAUDE.md` so we don't shadow a hand-curated context file.
+    ///   `AGENTS.md`).  Append-only.  Both `CLAUDE.md` and `AGENTS.md` are
+    ///   auto-created when missing — without this, `recon init` returned
+    ///   success while silently skipping the rules block, so the agent
+    ///   started without recon's `code_*`-first discovery and defaulted to
+    ///   `Read`/`Grep`/`Glob`.  Symmetric purge deletes the file again if
+    ///   the only thing it ever contained was the recon block.
     /// - `Dedicated(path, body)` — recon owns the file outright
     ///   (`.cursor/rules/recon.mdc`, `.windsurf/rules/recon.md`).  Purge can
     ///   simply delete it; no string surgery required.
@@ -102,7 +106,14 @@ impl Ide {
         match self {
             Ide::ClaudeCode => AgentTarget::Shared {
                 path: repo.join("CLAUDE.md"),
-                create_if_missing: false,
+                // Auto-create when missing (v0.2.2). Without this, projects
+                // without a hand-curated CLAUDE.md got `recon init --mcp cc`
+                // returning success while silently skipping the rules block —
+                // Claude Code would then start without the strict-policy
+                // discovery the recon workflow requires. The matching purge
+                // path deletes the file again if only the recon block was
+                // ever in it (`recon_only_remainder`).
+                create_if_missing: true,
             },
             Ide::OpenCode => AgentTarget::Shared {
                 path: repo.join("AGENTS.md"),
@@ -693,8 +704,17 @@ fn remove_agent_rules(ide: &Ide, repo: &Path) -> Result<()> {
             } else if !new_content.is_empty() && !new_content.ends_with('\n') {
                 new_content.push('\n');
             }
-            std::fs::write(&path, new_content)?;
-            eprintln!("Removed recon rules block from {}", path.display());
+            // If the file only ever held the recon block, delete it instead
+            // of leaving an empty husk behind. Whitespace-only counts as
+            // empty — a stray newline from the marker stripping shouldn't
+            // pin the file in place.
+            if new_content.trim().is_empty() {
+                std::fs::remove_file(&path)?;
+                eprintln!("Removed recon-only file {}", path.display());
+            } else {
+                std::fs::write(&path, new_content)?;
+                eprintln!("Removed recon rules block from {}", path.display());
+            }
         }
         AgentTarget::Dedicated { path, .. } => {
             if path.exists() {
@@ -2088,13 +2108,22 @@ mod tests {
     // ── write_agent_rules / remove_agent_rules ───────────────────────────────
 
     #[test]
-    fn write_agent_rules_claude_skips_when_file_missing() {
+    fn write_agent_rules_claude_creates_when_file_missing() {
         let dir = tempdir().unwrap();
+        // Pre-condition: no CLAUDE.md.
+        assert!(!dir.path().join("CLAUDE.md").exists());
+
         write_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+
+        let claude = dir.path().join("CLAUDE.md");
         assert!(
-            !dir.path().join("CLAUDE.md").exists(),
-            "must not create CLAUDE.md from scratch"
+            claude.exists(),
+            "init must create CLAUDE.md when missing so the rules block actually lands"
         );
+        let content = fs::read_to_string(&claude).unwrap();
+        assert!(content.contains(RECON_RULES_START));
+        assert!(content.contains(RECON_RULES_END));
+        assert!(content.contains("strict policy"));
     }
 
     #[test]
@@ -2184,6 +2213,39 @@ mod tests {
         remove_agent_rules(&Ide::Windsurf, dir.path()).unwrap();
         assert!(!dir.path().join(".cursor/rules/recon.mdc").exists());
         assert!(!dir.path().join(".windsurf/rules/recon.md").exists());
+    }
+
+    #[test]
+    fn remove_agent_rules_deletes_recon_only_claude_md() {
+        // Round-trip: init creates CLAUDE.md from scratch; purge must take
+        // it back out, otherwise we leak a file we created ourselves.
+        let dir = tempdir().unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+
+        write_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        assert!(claude.exists(), "init must have created CLAUDE.md");
+
+        remove_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        assert!(
+            !claude.exists(),
+            "purge must delete a recon-only CLAUDE.md, not leave an empty husk"
+        );
+    }
+
+    #[test]
+    fn remove_agent_rules_keeps_user_content_in_claude_md() {
+        // Inverse of the above: when CLAUDE.md had user content before init,
+        // purge strips only the marker block and keeps the file alive.
+        let dir = tempdir().unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+        fs::write(&claude, "# Project\n\nPersistent docs.\n").unwrap();
+
+        write_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+        remove_agent_rules(&Ide::ClaudeCode, dir.path()).unwrap();
+
+        let content = fs::read_to_string(&claude).unwrap();
+        assert!(content.contains("Persistent docs."));
+        assert!(!content.contains(RECON_RULES_START));
     }
 
     #[test]

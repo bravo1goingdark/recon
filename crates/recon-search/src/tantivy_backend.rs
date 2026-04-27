@@ -272,6 +272,17 @@ impl TantivyBackend {
         Ok(())
     }
 
+    /// Delete all documents for the given path.
+    ///
+    /// Caller must `commit` the writer afterward for the deletion to become
+    /// visible to readers. Used by the watcher when a source file is removed
+    /// from disk.
+    pub fn delete_path(&self, writer: &mut IndexWriter, path: &Path) {
+        let path_str = path.to_str().unwrap_or("");
+        let path_term = tantivy::Term::from_field_text(self.fields.path, path_str);
+        writer.delete_term(path_term);
+    }
+
     /// Commit pending changes and reload the reader.
     pub fn commit(&self, writer: &mut IndexWriter) -> Result<(), Error> {
         writer
@@ -607,6 +618,37 @@ mod tests {
 
         let hits = backend.search("Foo", 10).unwrap();
         assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn delete_path_removes_docs() {
+        let backend = TantivyBackend::open_memory().unwrap();
+        let mut writer = backend.writer(15_000_000).unwrap();
+
+        let symbols = [
+            make_sym(1, "kept", "k::kept", SymbolKind::Function),
+            make_sym(2, "removed", "r::removed", SymbolKind::Function),
+        ];
+        backend
+            .index_symbols(&mut writer, Path::new("src/keep.rs"), &symbols[..1])
+            .unwrap();
+        backend
+            .index_symbols(&mut writer, Path::new("src/gone.rs"), &symbols[1..])
+            .unwrap();
+        backend.commit(&mut writer).unwrap();
+        assert!(!backend.search("removed", 10).unwrap().is_empty());
+
+        backend.delete_path(&mut writer, Path::new("src/gone.rs"));
+        backend.commit(&mut writer).unwrap();
+
+        assert!(
+            backend.search("removed", 10).unwrap().is_empty(),
+            "deleted path's symbols should be gone"
+        );
+        assert!(
+            !backend.search("kept", 10).unwrap().is_empty(),
+            "other path's symbols should still be present"
+        );
     }
 
     #[test]

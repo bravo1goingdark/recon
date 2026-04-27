@@ -64,6 +64,35 @@ impl VectorStore {
         Ok(Self { conn })
     }
 
+    /// Delete embeddings and metadata for the given symbol IDs.
+    ///
+    /// Removes rows from both `symbol_embeddings` (vec0 virtual table) and
+    /// `embed_meta` in a single transaction. Unknown IDs are silently ignored.
+    /// Used by the watcher when a source file is deleted: the SQLite
+    /// `delete_file_cascade` removes the symbols, but embeddings — keyed by
+    /// symbol ID in a separate database — must be cleaned up explicitly.
+    pub fn delete_by_symbol_ids(&self, ids: &[u64]) -> Result<(), EmbedError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| EmbedError::Store(format!("begin tx: {e}")))?;
+        for id in ids {
+            tx.execute(
+                "DELETE FROM symbol_embeddings WHERE rowid = ?1",
+                params![*id as i64],
+            )
+            .map_err(|e| EmbedError::Store(format!("delete vec: {e}")))?;
+            tx.execute("DELETE FROM embed_meta WHERE id = ?1", params![*id as i64])
+                .map_err(|e| EmbedError::Store(format!("delete meta: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| EmbedError::Store(format!("commit: {e}")))?;
+        Ok(())
+    }
+
     /// Upsert embedding entries in a single transaction.
     ///
     /// `INSERT OR REPLACE` gives true upsert semantics: re-indexing a symbol
@@ -210,6 +239,89 @@ mod tests {
             .unwrap();
         assert_eq!(rust_only.len(), 1);
         assert_eq!(rust_only[0].0, 1);
+    }
+
+    #[test]
+    fn delete_by_symbol_ids_removes_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VectorStore::open(dir.path()).unwrap();
+        let pool = VecReadPool::new(dir.path(), 2).unwrap();
+
+        let entries = vec![
+            EmbedEntry {
+                id: 1,
+                qualified_name: "keep".into(),
+                vector: vec![0.1_f32; VECTOR_DIM],
+                body_hash: vec![0u8; 32],
+                lang: "rust".into(),
+            },
+            EmbedEntry {
+                id: 2,
+                qualified_name: "drop".into(),
+                vector: vec![0.9_f32; VECTOR_DIM],
+                body_hash: vec![1u8; 32],
+                lang: "rust".into(),
+            },
+        ];
+        store.upsert_embeddings(&entries).unwrap();
+
+        store.delete_by_symbol_ids(&[2]).unwrap();
+
+        let hashes = pool.existing_hashes(&[1, 2]).unwrap();
+        assert!(hashes.contains_key(&1), "id=1 should still be present");
+        assert!(!hashes.contains_key(&2), "id=2 should be deleted");
+    }
+
+    #[test]
+    fn delete_by_symbol_ids_empty_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VectorStore::open(dir.path()).unwrap();
+        store.delete_by_symbol_ids(&[]).unwrap();
+    }
+
+    #[test]
+    fn delete_by_symbol_ids_unknown_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VectorStore::open(dir.path()).unwrap();
+        // No entries inserted; deleting unknown IDs must succeed.
+        store.delete_by_symbol_ids(&[42, 99]).unwrap();
+    }
+
+    #[test]
+    fn all_embed_ids_lists_every_inserted_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VectorStore::open(dir.path()).unwrap();
+        let pool = VecReadPool::new(dir.path(), 2).unwrap();
+
+        let entries: Vec<EmbedEntry> = [10u64, 20, 30]
+            .iter()
+            .map(|&id| EmbedEntry {
+                id,
+                qualified_name: format!("sym{id}"),
+                vector: vec![0.1_f32; VECTOR_DIM],
+                body_hash: vec![0u8; 32],
+                lang: "rust".into(),
+            })
+            .collect();
+        store.upsert_embeddings(&entries).unwrap();
+
+        let mut ids = pool.all_embed_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![10, 20, 30]);
+
+        // Drives the orphan-cleanup diff used in the watcher catch-up:
+        // ids present in embed_meta but absent from a "live symbol set".
+        let live: ahash::AHashSet<u64> = [10, 30].into_iter().collect();
+        let orphans: Vec<u64> = ids.into_iter().filter(|id| !live.contains(id)).collect();
+        assert_eq!(orphans, vec![20]);
+    }
+
+    #[test]
+    fn all_embed_ids_on_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let _store = VectorStore::open(dir.path()).unwrap();
+        let pool = VecReadPool::new(dir.path(), 2).unwrap();
+        assert!(pool.all_embed_ids().unwrap().is_empty());
     }
 
     #[test]

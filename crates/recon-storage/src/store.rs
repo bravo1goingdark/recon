@@ -94,6 +94,30 @@ impl Store {
         Ok(())
     }
 
+    /// Delete every file row (and cascade to symbols, symbol_docs, refs, FTS)
+    /// in a single transaction.
+    ///
+    /// Used by `code_reindex --force` to truncate the index before a full
+    /// re-walk. Equivalent to calling [`Self::delete_file_cascade`] for every
+    /// indexed path, but with a single `BEGIN`/`COMMIT` instead of N — orders
+    /// of magnitude faster on large repos because WAL fsyncs once.
+    ///
+    /// Schema cascade: `DELETE FROM files` cascades to `symbols` (FK), which
+    /// cascades to `symbol_docs` (FK) and fires the FTS delete trigger.
+    /// `refs` has no FK and is cleared explicitly first.
+    pub fn delete_all_files_cascade(&self) -> Result<(), Error> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        tx.execute("DELETE FROM refs", [])
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        tx.execute("DELETE FROM files", [])
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     /// Delete a file and cascade to its symbols and refs.
     ///
     /// Single transaction: delete refs (explicit), then file (FK cascades to symbols).
@@ -1172,6 +1196,44 @@ mod tests {
         assert_eq!(store.symbol_count().unwrap(), 1);
         store.delete_file_cascade(Path::new("src/lib.rs")).unwrap();
         assert_eq!(store.symbol_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_all_files_cascade_clears_everything() {
+        let store = Store::open_memory().unwrap();
+        // make_symbol hardcodes path: "src/lib.rs" — that file row must exist
+        // for the FK in symbols.path to succeed.
+        store.upsert_file(&make_file_meta("src/lib.rs")).unwrap();
+        store.upsert_file(&make_file_meta("src/a.rs")).unwrap();
+        let id = store
+            .insert_symbol(&make_symbol("foo", "mod::foo", SymbolKind::Function))
+            .unwrap();
+        store
+            .insert_refs(&[Ref {
+                src_path: Arc::new(PathBuf::from("src/a.rs")),
+                src_symbol_id: id,
+                ident: CompactString::new("foo"),
+                dst_symbol_id: Some(id),
+                weight: 1.0,
+            }])
+            .unwrap();
+
+        assert!(!store.all_file_paths().unwrap().is_empty());
+        assert!(store.symbol_count().unwrap() >= 1);
+        assert!(!store.refs_for_ident("foo").unwrap().is_empty());
+
+        store.delete_all_files_cascade().unwrap();
+
+        assert!(store.all_file_paths().unwrap().is_empty());
+        assert_eq!(store.symbol_count().unwrap(), 0);
+        assert!(store.refs_for_ident("foo").unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_all_files_cascade_on_empty_db_is_noop() {
+        let store = Store::open_memory().unwrap();
+        store.delete_all_files_cascade().unwrap();
+        assert!(store.all_file_paths().unwrap().is_empty());
     }
 
     #[test]
