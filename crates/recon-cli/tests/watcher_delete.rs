@@ -47,7 +47,10 @@ async fn settle() {
 // 30 s upper bound and a Drop-guard that calls `shutdown_flag.store(true)` so
 // shutdown happens even on assertion failure.
 #[tokio::test]
-#[cfg_attr(target_os = "macos", ignore = "FSEvents in CI delivers events too slowly; see comment above")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "FSEvents in CI delivers events too slowly; see comment above"
+)]
 async fn watcher_removes_symbols_on_file_delete() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("doomed.rs");
@@ -86,7 +89,10 @@ async fn watcher_removes_symbols_on_file_delete() {
 }
 
 #[tokio::test]
-#[cfg_attr(target_os = "macos", ignore = "FSEvents in CI delivers events too slowly; see watcher_removes_symbols_on_file_delete")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "FSEvents in CI delivers events too slowly; see watcher_removes_symbols_on_file_delete"
+)]
 async fn watcher_handles_rename_as_delete_plus_create() {
     let dir = tempfile::tempdir().unwrap();
     let old_path = dir.path().join("renamed_from.rs");

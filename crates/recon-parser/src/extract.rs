@@ -116,8 +116,10 @@ impl<'a> Ctx<'a> {
             ) {
                 doc_parts.push(self.src[p.byte_range()].trim());
                 prev = p.prev_sibling();
-            } else if matches!(kind, "attribute_item" | "inner_attribute_item" | "decorator")
-            {
+            } else if matches!(
+                kind,
+                "attribute_item" | "inner_attribute_item" | "decorator"
+            ) {
                 // Skip past attributes/decorators that sit between a doc and the
                 // item (`#[derive(...)]`, `#[inline]`, Python `@decorator`, etc.).
                 prev = p.prev_sibling();
@@ -308,11 +310,7 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                     // Strip generics ("Foo<T>" -> "Foo") for the lookup; fall back
                     // to the enclosing scope id if the type is foreign or declared
                     // after the impl block.
-                    let base_name = type_name
-                        .split('<')
-                        .next()
-                        .unwrap_or(type_name)
-                        .trim();
+                    let base_name = type_name.split('<').next().unwrap_or(type_name).trim();
                     let type_id = ctx
                         .symbols
                         .iter()
@@ -321,9 +319,7 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                             s.name.as_str() == base_name
                                 && matches!(
                                     s.kind,
-                                    SymbolKind::Struct
-                                        | SymbolKind::Enum
-                                        | SymbolKind::Trait
+                                    SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait
                                 )
                         })
                         .map(|s| s.id)
@@ -1211,9 +1207,7 @@ pub enum Color { Red, Green }
             .find(|s| s.name.as_str() == "Foo")
             .expect("Foo missing");
         assert!(
-            foo.doc
-                .as_deref()
-                .is_some_and(|d| d.contains("Doc on Foo")),
+            foo.doc.as_deref().is_some_and(|d| d.contains("Doc on Foo")),
             "Foo doc must survive #[derive] attribute (got: {:?})",
             foo.doc
         );
@@ -1224,9 +1218,7 @@ pub enum Color { Red, Green }
             .find(|s| s.name.as_str() == "bar")
             .expect("bar missing");
         assert!(
-            bar.doc
-                .as_deref()
-                .is_some_and(|d| d.contains("Doc on bar")),
+            bar.doc.as_deref().is_some_and(|d| d.contains("Doc on bar")),
             "bar doc must survive #[inline] attribute (got: {:?})",
             bar.doc
         );
