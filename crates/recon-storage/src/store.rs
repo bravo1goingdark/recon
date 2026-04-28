@@ -277,6 +277,14 @@ impl Store {
             ])
             .map_err(|e| Error::Storage(e.to_string()))?;
 
+            // Remap parser-local IDs to DB rowids (see batch_index_files for rationale).
+            let offset: i64 = tx
+                .query_row("SELECT COALESCE(MAX(id), 0) FROM symbols", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            let remap = |local_id: u64| -> i64 { offset + local_id as i64 };
+
             // Batch symbols (doc stored separately)
             if !symbols.is_empty() {
                 let mut sym_stmt = tx
@@ -300,7 +308,7 @@ impl Store {
                             sym.qualified_name.as_str(),
                             sym.kind.label(),
                             sym.signature.as_deref(),
-                            sym.parent_id.map(|v| v as i64),
+                            sym.parent_id.map(remap),
                             sym.byte_range.start as i64,
                             sym.byte_range.end as i64,
                             *sym.line_range.start(),
@@ -331,9 +339,9 @@ impl Store {
                     ref_stmt
                         .execute(params![
                             path_key(&r.src_path),
-                            r.src_symbol_id as i64,
+                            remap(r.src_symbol_id),
                             r.ident.as_str(),
-                            r.dst_symbol_id.map(|v| v as i64),
+                            r.dst_symbol_id.map(remap),
                             r.weight,
                         ])
                         .map_err(|e| Error::Storage(e.to_string()))?;
@@ -412,6 +420,22 @@ impl Store {
                         meta.indexed_at,
                     ])
                     .map_err(|e| Error::Storage(e.to_string()))?;
+
+                // Remap parser-local IDs to DB rowids. The parser numbers
+                // symbols 1..=N within each file; SQLite auto-assigns rowids
+                // continuing from MAX(id). For parser-local id `L` the DB
+                // rowid is `offset + L`, where `offset = MAX(id)` BEFORE the
+                // first INSERT. parent_id (on symbols) and src_symbol_id /
+                // dst_symbol_id (on refs) all carry parser-local IDs that
+                // must be remapped before insert — without this, refs from
+                // every file after the first point at wrong global symbols.
+                let offset: i64 = tx
+                    .query_row("SELECT COALESCE(MAX(id), 0) FROM symbols", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                let remap = |local_id: u64| -> i64 { offset + local_id as i64 };
+
                 for sym in symbols {
                     sym_stmt
                         .execute(params![
@@ -420,7 +444,7 @@ impl Store {
                             sym.qualified_name.as_str(),
                             sym.kind.label(),
                             sym.signature.as_deref(),
-                            sym.parent_id.map(|v| v as i64),
+                            sym.parent_id.map(remap),
                             sym.byte_range.start as i64,
                             sym.byte_range.end as i64,
                             *sym.line_range.start(),
@@ -440,9 +464,9 @@ impl Store {
                     ref_stmt
                         .execute(params![
                             path_key(&r.src_path),
-                            r.src_symbol_id as i64,
+                            remap(r.src_symbol_id),
                             r.ident.as_str(),
-                            r.dst_symbol_id.map(|v| v as i64),
+                            r.dst_symbol_id.map(remap),
                             r.weight,
                         ])
                         .map_err(|e| Error::Storage(e.to_string()))?;

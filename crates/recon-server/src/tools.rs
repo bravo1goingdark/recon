@@ -129,6 +129,95 @@ pub struct ReindexParams {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct StatsParams {}
 
+/// Parameters for `code_path`.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct PathParams {
+    /// Source symbol name (bare or fully qualified).
+    pub src: String,
+    /// Destination symbol name (bare or fully qualified).
+    pub dst: String,
+    /// Maximum hops to explore. Default 8, hard cap 16.
+    #[serde(default = "default_max_hops")]
+    pub max_hops: u32,
+}
+
+fn default_max_hops() -> u32 {
+    recon_search::graph::DEFAULT_MAX_HOPS
+}
+
+/// Parameters for `code_callers` / `code_callees`.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CallersParams {
+    /// Symbol name (bare or fully qualified).
+    pub symbol: String,
+    /// Depth to explore (default 1, hard cap 6).
+    #[serde(default = "default_caller_depth")]
+    pub depth: u32,
+}
+
+fn default_caller_depth() -> u32 {
+    1
+}
+
+/// Parameters for `code_context`.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ContextParams {
+    /// Symbol name or query — bare names, qualified names, or fuzzy queries.
+    pub symbol: String,
+    /// Token budget for the bundled response. Default 2000.
+    #[serde(default = "default_context_budget")]
+    pub token_budget: usize,
+}
+
+fn default_context_budget() -> usize {
+    2000
+}
+
+/// Parameters for `code_impact`.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ImpactParams {
+    /// Symbol name (bare or fully qualified).
+    pub symbol: String,
+    /// Maximum tier depth (default 4, max 6).
+    #[serde(default = "default_impact_depth")]
+    pub depth: u32,
+}
+
+fn default_impact_depth() -> u32 {
+    4
+}
+
+/// Parameters for `code_subsystems`.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SubsystemsParams {
+    /// Maximum number of subsystems to return (default 50).
+    #[serde(default = "default_subsystem_limit")]
+    pub limit: usize,
+}
+
+fn default_subsystem_limit() -> usize {
+    50
+}
+
+/// Parameters for `code_subsystem`.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SubsystemParams {
+    /// Subsystem id (from `code_subsystems`).
+    pub id: u32,
+    /// Token budget for the subsystem skeleton. Default 1500.
+    #[serde(default = "default_subsystem_budget")]
+    pub token_budget: usize,
+}
+
+fn default_subsystem_budget() -> usize {
+    1500
+}
+
+/// Parameters for `code_savings`. Empty struct — included for shape
+/// uniformity with the other tool handlers.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SavingsParams {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Changelog — recon</title>
+<meta name="description" content="recon release notes — every shipped version, what changed, and why." />
+<meta name="robots" content="index,follow" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 80 80'%3E%3Cstyle%3Ecircle,line%7Bstroke:%23333%7D.dot%7Bfill:%23333%7D@media(prefers-color-scheme:dark)%7Bcircle,line%7Bstroke:%23e5e5e5%7D.dot%7Bfill:%23e5e5e5%7D%7D%3C/style%3E%3Ccircle class='dot' cx='40' cy='40' r='4'/%3E%3Ccircle cx='40' cy='40' r='14' fill='none' stroke-width='1.5'/%3E%3Ccircle cx='40' cy='40' r='24' fill='none' stroke-width='1' opacity='.55'/%3E%3Ccircle cx='40' cy='40' r='34' fill='none' stroke-width='1' opacity='.25'/%3E%3Cline x1='40' y1='40' x2='68' y2='20' stroke='%23b07040' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='68' cy='20' r='3.5' fill='%23b07040'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/css/shared.css">
+<link rel="stylesheet" href="/css/nav-menu.css">
+<style>
+  .legal{max-width:780px;margin:0 auto;padding:48px 40px 96px}
+  .legal .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:18px}
+  .legal h1{font-size:clamp(36px,5vw,52px);line-height:1;letter-spacing:-.03em;margin-bottom:14px}
+  .legal h1 em{font-style:italic;color:var(--clay)}
+  .legal .meta{font-family:var(--mono);font-size:12px;color:var(--ink-3);margin-bottom:36px;letter-spacing:.04em}
+  .legal a{color:var(--clay);text-decoration:underline;text-underline-offset:2px}
+  .legal a:hover{color:var(--ink)}
+
+  .release{position:relative;padding:24px 0 32px;border-top:1px solid var(--rule-soft)}
+  .release:first-of-type{border-top:1px solid var(--rule)}
+  .release header{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:6px;flex-wrap:wrap}
+  .release h2{font-size:26px;letter-spacing:-.02em;font-family:var(--serif);font-weight:400;margin:0}
+  .release h2 em{font-style:italic;color:var(--clay)}
+  .release .when{font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:.04em}
+  .release .tag{display:inline-block;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--clay);background:var(--clay-soft);padding:2px 9px;border-radius:2px;margin-bottom:10px}
+  .release .tag.fix{color:var(--ink-2);background:var(--paper-2)}
+  .release p{color:var(--ink-2);margin-bottom:10px}
+  .release ul{padding-left:22px;margin-bottom:8px}
+  .release li{color:var(--ink-2);margin-bottom:6px}
+  .release code{font-family:var(--mono);font-size:.85em;background:var(--paper-2);padding:1px 6px;border-radius:3px}
+
+  .callout{border-left:2px solid var(--clay);padding:12px 16px;background:var(--paper-2);margin:18px 0 28px;font-size:14px;color:var(--ink-2)}
+
+  @media (max-width:720px){
+    .legal{padding:36px 24px 64px}
+    .release h2{font-size:22px}
+  }
+</style>
+</head>
+<body>
+
+<nav class="top">
+  <a href="/" class="mark"><svg width="24" height="24" viewBox="0 0 80 80" fill="none"><circle cx="40" cy="40" r="4" fill="currentColor"/><circle cx="40" cy="40" r="14" stroke="currentColor" stroke-width="1.5"/><circle cx="40" cy="40" r="24" stroke="currentColor" stroke-width="1" opacity="0.55"/><circle cx="40" cy="40" r="34" stroke="currentColor" stroke-width="1" opacity="0.25"/><line x1="40" y1="40" x2="68" y2="20" stroke="var(--clay)" stroke-width="2" stroke-linecap="round"/><circle cx="68" cy="20" r="3.5" fill="var(--clay)"/></svg><span>recon<span class="dot"></span></span></a>
+  <ul>
+    <li><a href="/">Home</a></li>
+    <li><a href="/docs">Docs</a></li>
+    <li><a href="/pricing">Pricing</a></li>
+  </ul>
+  <div class="right">
+    <span id="nav-auth"><a href="/login" class="btn sm ghost">Sign in</a></span>
+    <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme"><span id="theme-icon">◑</span></button>
+    <button class="nav-burger" id="nav-burger" aria-label="Open menu" aria-controls="nav-sheet" aria-expanded="false">
+      <span class="bars"><span></span></span>
+    </button>
+  </div>
+</nav>
+
+<div class="nav-sheet" id="nav-sheet" role="dialog" aria-modal="true" aria-label="Site menu">
+  <ul>
+    <li><a href="/">Home</a></li>
+    <li><a href="/docs">Docs</a></li>
+    <li><a href="/pricing">Pricing</a></li>
+    <li><a href="/login">Sign in</a></li>
+  </ul>
+</div>
+
+<main class="legal">
+  <div class="eyebrow">Release notes</div>
+  <h1>Change<em>log</em></h1>
+  <div class="meta">Newest first · binaries published at <a href="https://github.com/bravo1goingdark/intel/releases">github.com/bravo1goingdark/intel/releases</a></div>
+
+  <div class="callout">
+    Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
+  </div>
+
+  <article class="release" id="v0-3-1">
+    <header>
+      <h2>v0.3.1</h2>
+      <span class="when">2026-04-28</span>
+    </header>
+    <span class="tag">Multi-language parity + token-savings telemetry</span>
+    <p>The two blockers between v0.3.0 and "I'll buy this" closed in one release: <b>multi-language parser parity</b> and <b>visible token-savings telemetry</b>.</p>
+    <p><b>Multi-language parity.</b> All five non-Rust extractors now walk function/method/class/struct bodies and emit identifier refs from a proper identifier arm. The reference graph is now meaningfully populated for every supported language; <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_context</code>, <code>code_impact</code>, and <code>code_subsystems</code> all work cross-language.</p>
+    <ul>
+      <li><b>Python</b> — <code>function_definition</code> / <code>class_definition</code> walk bodies; decorator identifiers attribute as refs to the decorated symbol; class bases produce refs.</li>
+      <li><b>JavaScript / TypeScript / TSX</b> — <code>function_declaration</code>, <code>method_definition</code>, <code>class_declaration</code>, <code>interface_declaration</code>, <code>enum_declaration</code>, <code>type_alias_declaration</code>, plus arrow functions assigned to const all walk. <code>extends Base implements Iface</code> produces refs.</li>
+      <li><b>Go</b> — function and method bodies walked; method receivers count as refs from the method.</li>
+      <li><b>Java</b> — methods, constructors, classes, interfaces, enums all walk. Generics like <code>List&lt;String&gt;</code> produce refs to every type identifier.</li>
+      <li><b>C / C++</b> — function definitions, struct/class/enum specifiers, template arguments all walk.</li>
+    </ul>
+
+    <p><b>Token-savings counter.</b> recon now tracks per-tool calls, response token estimates, and a baseline "what Read+Grep would have cost" figure. The difference is the tokens-saved number you see in <code>code_savings</code> and the <code>telemetry</code> block on <code>code_stats</code>.</p>
+    <ul>
+      <li>New <code>code_savings</code> tool — per-tool TSV breakdown of calls, response tokens, baseline tokens avoided, tokens saved, avg latency. Aggregate trailer at the bottom.</li>
+      <li><code>code_stats</code> gains a <code>telemetry</code> block (session uptime + lifetime totals). Backward compatible — existing fields unchanged.</li>
+      <li><b>Lock-free hot path.</b> Each tool call records via 4 atomic adds + a single tiktoken pass over the response. The threshold-driven flush is async via <code>tokio::spawn_blocking</code> so SQLite writes never block tool latency.</li>
+      <li><b>Lifetime persistence.</b> Counters round-trip through the SQLite <code>meta</code> table under <code>tel:tool:&lt;name&gt;</code> keys; <code>recon serve</code> hydrates on startup and synchronously flushes on shutdown.</li>
+      <li><b>Model-agnostic.</b> recon reports tokens — not dollars. Agents using it may run on Claude, GPT, Gemini, or a self-hosted model with its own price sheet; the conversion is yours to make. Per-tool baseline tokens are static, audit-friendly constants documented in <code>BASELINES</code>.</li>
+    </ul>
+
+    <p><b>Tests:</b> 482 across the workspace. Multi-language regression tests in <code>recon-parser::extract::tests</code> assert non-empty refs per language; <code>telemetry_persists_across_server_restarts</code> proves lifetime counters survive a clean shutdown/restart cycle.</p>
+  </article>
+
+  <article class="release" id="v0-3-0">
+    <header>
+      <h2>v0.3.0</h2>
+      <span class="when">2026-04-28</span>
+    </header>
+    <span class="tag">Graph-traversal tools</span>
+    <p>Seven new tools that turn the symbol reference graph into a first-class navigation surface — replacing chained <code>code_find_refs</code> walks with a single bounded BFS.</p>
+    <ul>
+      <li><b><code>code_path</code></b> — bidirectional BFS shortest path between two symbols (default 8 hops, max 16). Reports the exact chain or an <code>unresolved_hint</code> when the search hit a likely dyn-dispatch / FFI boundary.</li>
+      <li><b><code>code_callers</code> / <code>code_callees</code></b> — layered transitive traversal up to <code>depth</code> rings (default 1, max 6). Cycle-safe; per-tier fan-out cap 50 nodes; total-visit cap 50 000 nodes.</li>
+      <li><b><code>code_context</code></b> — one-shot bundle: signature + body + 5 callers + 5 callees + 3 types + 3 reaching tests. Replaces the canonical 4-call understand-X agent loop. Honors a token budget.</li>
+      <li><b><code>code_impact</code></b> — blast radius. Tiered transitive callers + transitively-reaching test functions. Use before refactors.</li>
+      <li><b><code>code_subsystems</code> / <code>code_subsystem</code></b> — repo orientation by weakly-connected components, ranked by hub. Architectural slices without directory lore.</li>
+    </ul>
+    <p><b>Engineered alongside</b>: a forward + reverse CSR call graph cached on the server (built lazily on first graph-tool call after each reindex), invalidated by the watcher alongside <code>cached_symbols</code> / <code>cached_refs</code>. Latency: <code>code_path</code> typically &lt; 5 ms on real repos.</p>
+    <p><b>Also fixed:</b> a parser/storage parser-local-id mismatch that caused refs in every file after the first to point at the wrong global symbol — invisible in single-file unit tests, broken in real multi-file workspaces.</p>
+    <p><a href="/docs#tools">Browse the new tool surface →</a></p>
+  </article>
+
+  <article class="release" id="v0-2-4">
+    <header>
+      <h2>v0.2.4</h2>
+      <span class="when">2026-04-27</span>
+    </header>
+    <span class="tag fix">Patch</span>
+    <ul>
+      <li>Skip the <code>watcher_delete</code> integration tests on macOS to keep the CI matrix green; the underlying watcher fix from v0.2.3 is unchanged.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-2-3">
+    <header>
+      <h2>v0.2.3</h2>
+      <span class="when">2026-04-26</span>
+    </header>
+    <span class="tag fix">Patch</span>
+    <ul>
+      <li>MCP tool fixes across <code>recon-parser</code>, <code>recon-server</code>, and <code>recon-search</code>.</li>
+      <li>Fixed a macOS pipeline hang in CI.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-2-2">
+    <header>
+      <h2>v0.2.2</h2>
+      <span class="when">2026-04-22</span>
+    </header>
+    <span class="tag">Release</span>
+    <ul>
+      <li><b>Watcher overhaul</b> — file save → queryable in &lt; 1 s, with a Phase 0 cascade that propagates deletes and renames immediately.</li>
+      <li>Tier-1 token diet in tool responses: skips <code>None</code> and empty fields so the wire payload stays lean.</li>
+      <li><code>code_search</code> hybrid mode is now deterministic.</li>
+      <li>Audit cleanups across the workspace.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-2-1">
+    <header>
+      <h2>v0.2.1</h2>
+      <span class="when">2026-04-15</span>
+    </header>
+    <span class="tag">Release</span>
+    <ul>
+      <li><code>recon init --mcp &lt;ide&gt;</code> now smoke-tests <code>recon serve</code> after writing the IDE config — you find out at install time, not when the agent first calls a tool.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-2-0">
+    <header>
+      <h2>v0.2.0</h2>
+      <span class="when">2026-04-10</span>
+    </header>
+    <span class="tag">Server-side repo enforcement</span>
+    <ul>
+      <li>Server-side <code>max_repos</code>: <code>recon init</code> now registers each repo's canonical-path SHA-256 fingerprint with the worker via atomic <code>POST /v1/account/repos</code>.</li>
+      <li><code>recon repos list</code> / <code>recon repos remove</code> for managing slots.</li>
+      <li><code>recon doctor [--json]</code> — health check across binary, license, credentials, worker reachability, index, MCP wiring, and agent rules.</li>
+      <li><code>recon purge --mcp &lt;ide&gt;</code> now also frees the server-side slot.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-1-1">
+    <header>
+      <h2>v0.1.1</h2>
+      <span class="when">2026-03-22</span>
+    </header>
+    <span class="tag fix">Patch</span>
+    <ul>
+      <li>Aligned the licence HMAC secret between the CLI and the worker — fixes intermittent licence-validation failures from v0.1.0.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-1-0">
+    <header>
+      <h2>v0.1.0</h2>
+      <span class="when">2026-03-12</span>
+    </header>
+    <span class="tag">Initial release</span>
+    <p>The first public cut. Twelve MCP tools, nine languages, one signed 24 MB Rust binary.</p>
+    <ul>
+      <li>Local-first index with tantivy + tree-sitter.</li>
+      <li>MCP server with the <code>code_*</code> tool family.</li>
+      <li>Cosign-signed release artefacts.</li>
+    </ul>
+  </article>
+</main>
+
+<footer class="site">
+  <div>© 2026 recon · code stays local</div>
+  <div><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="/refunds">Refunds</a> · <a href="/changelog">Changelog</a></div>
+</footer>
+
+<script src="/js/theme.js"></script>
+<script src="/js/auth.js"></script>
+<script src="/js/nav-menu.js"></script>
+</body>
+</html>

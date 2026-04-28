@@ -2,12 +2,12 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://mcprecon.pages.dev/</loc>
-    <lastmod>2026-04-20</lastmod>
+    <lastmod>2026-04-29</lastmod>
     <priority>1.0</priority>
   </url>
   <url>
     <loc>https://mcprecon.pages.dev/docs</loc>
-    <lastmod>2026-04-20</lastmod>
+    <lastmod>2026-04-29</lastmod>
     <priority>0.8</priority>
   </url>
   <url>
@@ -19,5 +19,25 @@
     <loc>https://mcprecon.pages.dev/login</loc>
     <lastmod>2026-04-20</lastmod>
     <priority>0.5</priority>
+  </url>
+  <url>
+    <loc>https://mcprecon.pages.dev/terms</loc>
+    <lastmod>2026-04-28</lastmod>
+    <priority>0.4</priority>
+  </url>
+  <url>
+    <loc>https://mcprecon.pages.dev/privacy</loc>
+    <lastmod>2026-04-28</lastmod>
+    <priority>0.4</priority>
+  </url>
+  <url>
+    <loc>https://mcprecon.pages.dev/refunds</loc>
+    <lastmod>2026-04-28</lastmod>
+    <priority>0.4</priority>
+  </url>
+  <url>
+    <loc>https://mcprecon.pages.dev/changelog</loc>
+    <lastmod>2026-04-29</lastmod>
+    <priority>0.6</priority>
   </url>
 </urlset>

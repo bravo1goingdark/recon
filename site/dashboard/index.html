@@ -168,6 +168,15 @@
     </div>
 
     <div class="tab-group">
+      <button type="button" role="tab" aria-selected="false" aria-controls="panel-savings"
+              class="tab-icon" data-tab="savings" title="Savings" aria-label="Savings">
+        <!-- Stylised bar-chart-with-trendline glyph. -->
+        <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3,17 9,12 13,15 21,5" fill="none"/><line x1="3" y1="20" x2="21" y2="20"/><line x1="3" y1="20" x2="3" y2="4"/></svg>
+      </button>
+      <div class="tab-label">Savings</div>
+    </div>
+
+    <div class="tab-group">
       <button type="button" role="tab" aria-selected="false" aria-controls="panel-danger"
               class="tab-icon danger" data-tab="danger" title="Delete account" aria-label="Delete account">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
@@ -221,6 +230,23 @@ recon init --mcp cc</pre>
       digest, never the path itself. Removing a row frees a slot toward your
       tier's <code>max_repos</code> limit; running <code>recon init</code> in
       that project again will register it back.
+    </p>
+  </section>
+
+  <!-- Panel: Savings. Token-savings rollups, Pro/Team only. The CLI
+       pushes one daily row per developer via POST /v1/account/savings;
+       this panel pulls aggregates via GET /v1/dashboard/savings.
+       Free tier sees an upsell card; paid tiers see a headline number,
+       inline-SVG sparkline of daily savings, and a per-day table. -->
+  <section class="tab-panel" id="panel-savings" role="tabpanel" aria-labelledby="tab-savings" hidden>
+    <div id="savings"><p class="empty">loading...</p></div>
+    <p style="font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5;max-width:640px">
+      recon is model-agnostic. We report tokens saved (vs the equivalent
+      Read+Grep+Glob path); convert against your provider's rate sheet
+      to get a dollar figure. Push from the CLI with
+      <code>recon savings push</code>, or set
+      <code>RECON_AUTO_PUSH_SAVINGS=1</code> in your IDE to push
+      automatically when each <code>recon serve</code> session ends.
     </p>
   </section>
 
@@ -323,7 +349,7 @@ recon init --mcp cc</pre>
 
 <footer class="site">
   <div>© 2026 recon</div>
-  <div>Code never leaves your machine</div>
+  <div><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="/refunds">Refunds</a> · <a href="/changelog">Changelog</a></div>
 </footer>
 
 <script src="/js/theme.js"></script>

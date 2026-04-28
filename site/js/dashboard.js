@@ -133,6 +133,206 @@ async function loadRepos() {
   renderRepos(data);
 }
 
+/**
+ * Fetch token-savings rollups (Pro/Team feature) and render the Savings
+ * tab. Lazy — called when the user clicks the Savings tab, not on
+ * initial dashboard load, so Free users never pay the round-trip.
+ *
+ * Server contract: GET /v1/dashboard/savings returns
+ *   { tier, range_days, daily: [{day, calls, …, tokens_saved}], totals, upsell? }
+ * Free tier yields range_days=0 + an upsell payload; we render an
+ * upgrade card without ever drawing the chart.
+ */
+async function loadSavings() {
+  var box = document.getElementById("savings");
+  if (!box) return;
+  box.innerHTML = '<p class="empty">loading...</p>';
+  try {
+    var resp = await authFetch("/v1/dashboard/savings");
+    if (!resp.ok) {
+      box.innerHTML =
+        '<p class="empty">Could not load savings (' +
+        escapeHtml(String(resp.status)) +
+        "). Try again later.</p>";
+      return;
+    }
+    var data = await resp.json();
+    renderSavings(data);
+  } catch (e) {
+    box.innerHTML =
+      '<p class="empty">Network error loading savings.</p>';
+  }
+}
+
+/**
+ * Format an integer with thousands separators. Used for the headline
+ * "tokens saved" number — a comma-separated 3,200,000 reads a lot
+ * better than 3200000 at this size on the page.
+ */
+function fmtInt(n) {
+  if (typeof n !== "number" || !isFinite(n)) return "0";
+  return n.toLocaleString("en-US");
+}
+
+/**
+ * Compress a long token count into "3.2M" / "850K" / "120" so the
+ * headline tile reads at a glance. Three significant figures with a
+ * single-letter suffix; never lossy in a way that changes the user's
+ * perception of the order of magnitude.
+ */
+function fmtCompact(n) {
+  if (typeof n !== "number" || !isFinite(n) || n < 0) return "0";
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + "B";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  return String(Math.round(n));
+}
+
+/**
+ * Render an inline SVG sparkline of the daily tokens-saved series.
+ * No external chart library — a single <polyline> element scaled into
+ * a 600×120 viewBox is all we need for a "is the trend going up?"
+ * visual. Returns the SVG string ready to inject into innerHTML.
+ *
+ * Empty series renders an inert "no data yet" placeholder so the
+ * layout never collapses on a first-time-paid user.
+ */
+function renderSparkline(daily) {
+  var W = 600, H = 120, PAD = 6;
+  if (!daily || daily.length === 0) {
+    return (
+      '<svg viewBox="0 0 ' +
+      W +
+      " " +
+      H +
+      '" style="width:100%;height:120px;background:var(--paper-2);border:1px solid var(--rule-soft);border-radius:4px">' +
+      '<text x="50%" y="50%" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="var(--ink-3)">push from `recon savings push` to populate</text>' +
+      "</svg>"
+    );
+  }
+  var values = daily.map(function (d) { return d.tokens_saved; });
+  var max = Math.max.apply(null, values);
+  var min = Math.min.apply(null, values);
+  if (max === 0) max = 1; // avoid div-by-zero on flat-zero series
+  var range = Math.max(1, max - min);
+  var stepX = (W - 2 * PAD) / Math.max(1, values.length - 1);
+  var points = values
+    .map(function (v, i) {
+      var x = PAD + i * stepX;
+      // Invert Y so high values are visually high.
+      var y = H - PAD - ((v - min) / range) * (H - 2 * PAD);
+      return x.toFixed(1) + "," + y.toFixed(1);
+    })
+    .join(" ");
+  return (
+    '<svg viewBox="0 0 ' +
+    W +
+    " " +
+    H +
+    '" style="width:100%;height:120px;background:var(--paper-2);border:1px solid var(--rule-soft);border-radius:4px;overflow:visible">' +
+    '<polyline points="' +
+    points +
+    '" fill="none" stroke="var(--clay)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
+    "</svg>"
+  );
+}
+
+/**
+ * Render the Savings panel body. Three states:
+ *   - upsell      → Free tier, render the upgrade card
+ *   - empty paid  → Pro/Team but no rows yet → render the "push from CLI" hint
+ *   - paid w/data → headline + sparkline + per-day table
+ */
+function renderSavings(data) {
+  var box = document.getElementById("savings");
+  if (!box) return;
+
+  if (data.upsell) {
+    var url = (data.upsell.upgrade_url || "/pricing").toString();
+    box.innerHTML =
+      '<div style="border:1px solid var(--rule);border-radius:6px;padding:24px;background:var(--paper-2)">' +
+      '<div style="font-size:13px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);margin-bottom:12px">Pro / Team feature</div>' +
+      '<h3 style="font-size:22px;letter-spacing:-.02em;margin-bottom:10px">Token-savings rollups</h3>' +
+      '<p style="color:var(--ink-2);max-width:60ch;margin-bottom:18px">' +
+      escapeHtml(data.upsell.message || "Upgrade to a paid plan to start aggregating token savings across your sessions.") +
+      "</p>" +
+      '<a class="btn primary sm" href="' +
+      escapeHtml(url) +
+      '">Upgrade your plan</a>' +
+      "</div>";
+    return;
+  }
+
+  var totals = data.totals || {};
+  var saved = totals.tokens_saved || 0;
+  var calls = totals.calls || 0;
+  var range = data.range_days || 0;
+  var daily = Array.isArray(data.daily) ? data.daily : [];
+
+  // Empty paid state: zero rows yet.
+  if (daily.length === 0) {
+    box.innerHTML =
+      '<div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:14px">' +
+      '<div style="font-size:38px;font-family:var(--serif);letter-spacing:-.02em">0 tokens</div>' +
+      '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
+      escapeHtml(String(range)) +
+      " days</div></div>" +
+      renderSparkline([]) +
+      '<p style="margin-top:14px;color:var(--ink-2);font-size:14px">No rollups pushed yet. Run <code>recon savings push</code> after using the MCP tools, or set <code>RECON_AUTO_PUSH_SAVINGS=1</code> to push automatically when each session ends.</p>';
+    return;
+  }
+
+  // Paid + data: headline + chart + table.
+  var rows = daily
+    .slice()
+    .reverse() // newest first in the table; chart stays time-ordered
+    .map(function (d) {
+      return (
+        "<tr>" +
+        '<td style="font-family:var(--mono);font-size:12px;color:var(--ink-2)">' +
+        escapeHtml(String(d.day)) +
+        "</td>" +
+        '<td style="text-align:right">' +
+        fmtInt(d.calls) +
+        "</td>" +
+        '<td style="text-align:right">' +
+        fmtInt(d.response_tokens) +
+        "</td>" +
+        '<td style="text-align:right">' +
+        fmtInt(d.baseline_tokens) +
+        "</td>" +
+        '<td style="text-align:right;color:var(--clay);font-weight:500">' +
+        fmtInt(d.tokens_saved) +
+        "</td>" +
+        "</tr>"
+      );
+    })
+    .join("");
+
+  box.innerHTML =
+    '<div style="display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;margin-bottom:8px">' +
+    '<div style="font-size:44px;font-family:var(--serif);letter-spacing:-.02em">' +
+    fmtCompact(saved) +
+    " tokens</div>" +
+    '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
+    escapeHtml(String(range)) +
+    " days · " +
+    fmtInt(calls) +
+    " tool calls</div></div>" +
+    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">vs. the Read+Grep+Glob equivalent path; convert against your provider&rsquo;s rate sheet for $.</div>' +
+    renderSparkline(daily) +
+    '<table style="margin-top:18px;width:100%;border-collapse:collapse;font-size:13px">' +
+    '<thead><tr style="border-bottom:1px solid var(--rule);text-align:left">' +
+    '<th style="padding:8px 4px;font-weight:500">Day</th>' +
+    '<th style="padding:8px 4px;font-weight:500;text-align:right">Calls</th>' +
+    '<th style="padding:8px 4px;font-weight:500;text-align:right">Response tokens</th>' +
+    '<th style="padding:8px 4px;font-weight:500;text-align:right">Baseline</th>' +
+    '<th style="padding:8px 4px;font-weight:500;text-align:right">Saved</th>' +
+    "</tr></thead><tbody>" +
+    rows +
+    "</tbody></table>";
+}
+
 function renderProfile(user) {
   var el = document.getElementById("profile");
   if (!el) return;
@@ -699,7 +899,16 @@ function wireTabs() {
   document.querySelectorAll(".tab-icon").forEach(function (btn) {
     btn.addEventListener("click", function () {
       var name = btn.getAttribute("data-tab");
-      if (name) activateTab(name);
+      if (!name) return;
+      activateTab(name);
+      // Lazy-load the Savings tab the first time it's opened so Free
+      // users never trigger a round-trip and paid users only pay it when
+      // they actually look at the panel. After a successful render
+      // we leave the DOM populated; subsequent re-clicks re-fetch so
+      // the sparkline reflects fresh pushes within the session.
+      if (name === "savings") {
+        loadSavings();
+      }
     });
   });
 }

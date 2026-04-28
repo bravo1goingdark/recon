@@ -6,4 +6,5 @@ pub mod license;
 pub mod repos;
 pub mod router;
 pub mod server;
+pub mod telemetry;
 pub mod tools;

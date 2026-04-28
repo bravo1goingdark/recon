@@ -40,6 +40,9 @@ import migration0007 from "../migrations/0007_webhook_events_seen.sql?raw";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error vite `?raw` import — string, no type declaration
 import migration0008 from "../migrations/0008_subscription_currency.sql?raw";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error vite `?raw` import — string, no type declaration
+import migration0009 from "../migrations/0009_usage_rollups.sql?raw";
 
 /**
  * Split a SQL file into individual statements.
@@ -84,6 +87,10 @@ const MIGRATIONS = [
     name: "0008_subscription_currency",
     queries: splitSql(migration0008 as string),
   },
+  {
+    name: "0009_usage_rollups",
+    queries: splitSql(migration0009 as string),
+  },
 ];
 
 /**
@@ -101,6 +108,7 @@ export async function resetDb(): Promise<void> {
     "subscriptions",
     "payments",
     "sessions",
+    "usage_rollups",
     "user_repos",
     "api_keys",
     "users",

@@ -4,6 +4,349 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.3.2] — 2026-04-29
+
+The savings dashboard. Pro/Team only.
+
+### Fixed — server lifecycle on revocation
+
+Before this release, `recon serve` did **not** shut itself down when
+the worker rejected its license (account deletion, key revoke,
+subscription hard-expiry) or when the user ran `recon logout` against
+a running session. The periodic re-validation task would mark the
+in-memory license `revoked = true` and wipe the credentials file, but
+the process kept running indefinitely:
+
+- **stdio**: held the IDE's stdio pipes open; every tool call
+  returned `LicenseExpired` with no clear "this server is dead" signal.
+- **HTTP** (`recon serve --port`): kept the listener bound on the
+  configured port even though no agent could authenticate against it.
+- watcher task, SQLite writer mutex, and telemetry counters all kept
+  accumulating useless work.
+
+`recon serve` now exits cleanly on any of:
+- worker returning `Rejected` from `/v1/license/validate` (account
+  deletion, key revoke, sub hard-expiry);
+- credentials transitioning Some→None mid-run (the user ran
+  `recon logout` against another shell);
+- SIGINT / SIGTERM (unchanged behaviour);
+- the IDE closing the stdio transport (unchanged behaviour).
+
+**Implementation:** new `tokio::sync::Notify` field on `ReconServer`
+plus two new methods, `request_shutdown()` (sets the flag and wakes
+waiters) and `await_shutdown_request()` (the consumer side, used by
+the serve `select!`). The periodic revalidation task fires
+`request_shutdown()` on Rejected; the stdio + HTTP serve loops add it
+as a third `select!` arm alongside signals and transport-close.
+
+Four new tests in `recon-server::server::tests` (request → await
+round-trip, fast-path short-circuit when already requested, idempotency
+of repeated requests, full `shutdown()` also wakes outstanding waiters).
+
+
+
+The local `code_savings` counter from v0.3.1 stays available to every
+user (it's just a query against `.recon/recon.db`), but team-level
+visibility — "how much did engineering save in API tokens this
+month?" — now flows through the worker into the recon dashboard at
+`mcprecon.pages.dev/dashboard`.
+
+### Added
+
+- **`POST /v1/account/savings`** — license-key-authed push endpoint.
+  Body: `{day, calls, response_tokens, baseline_tokens, tokens_saved,
+  latency_micros}`. Pro/Team get 200; Free gets 402 with an upsell
+  payload. Idempotent and **monotone**: the upsert is `MAX`-merged on
+  `(user_id, day)`, so a stale CLI cannot regress the stored counter
+  and re-runs cannot double-count. Day format strictly validated; all
+  counters validated as non-negative safe-int.
+- **`GET /v1/dashboard/savings`** — session-authed pull endpoint.
+  Returns the daily series + aggregate totals. Range cap by tier:
+  Free 0d (upsell payload, no D1 read), Pro 30d, Team 90d, Enterprise
+  365d. Honours `?range=N` down-shift, clamped to the cap. Hot path is
+  one equality+range scan on the `(user_id, day)` PK — index-only,
+  no second round-trip for totals (folded JS-side over ≤365 rows).
+- **`recon savings push`** — CLI subcommand. Reads the local
+  telemetry counters from `.recon/recon.db` (`tel:tool:*` meta keys),
+  aggregates today's snapshot, posts to the worker. Surfaces the
+  Pro-only 402 with a clean upgrade message instead of a stack trace.
+- **`recon savings show`** — local-only TSV print of the same numbers
+  (no network), so you can sanity-check what's about to be pushed.
+- **`RECON_AUTO_PUSH_SAVINGS=1`** — opt-in env var. When set,
+  `recon serve` runs `savings push` after every clean shutdown so the
+  dashboard stays current without the developer remembering.
+- **Dashboard "Savings" tab** — fifth tab on the account dashboard.
+  Big tokens-saved headline, inline-SVG sparkline of the daily series
+  (no chart library), per-day TSV table. Free tier sees an upgrade
+  card with a link to `/pricing`.
+- **Pricing page** — Pro/Team cards now list the savings-dashboard
+  retention as a feature line.
+
+### Database
+
+- New migration **`0009_usage_rollups.sql`** — table with composite PK
+  `(user_id, day)`, plus a covering `(day)` index for the future cron
+  compaction job ("delete rollups older than 90 days"). Migration runs
+  forward only; existing tests apply it via the `applyD1Migrations`
+  pattern in `worker/tests/setup.ts`.
+
+### Performance
+
+- Pull endpoint: **one** D1 round-trip per dashboard load. The PK
+  `(user_id, day)` makes the range filter `WHERE user_id = ? AND day
+  >= ? AND day <= ?` a contiguous B-tree slice; `day ASC` ordering is
+  already in PK order so no extra sort. Aggregation runs in JS over
+  the ≤365 returned rows — measurably faster than a second SUM()
+  round-trip across the network.
+- Push endpoint: single-statement `INSERT … ON CONFLICT … DO UPDATE
+  SET col = MAX(existing.col, excluded.col)` — atomic, idempotent,
+  monotone in one SQLite transaction. No application-level locking.
+
+### Privacy
+
+- The push payload is six integers per day per user. **No code, no
+  symbol names, no file paths, no query strings travel.** Same weight
+  as a SaaS reporting "you made N API calls today." The privacy
+  paragraph on the Docs telemetry section spells this out.
+- Free tier never pushes, never has rows in `usage_rollups`. The
+  table only accumulates for paying accounts.
+
+### Tests
+
+- 14 worker tests in `worker/tests/savings.test.ts` covering: Pro/Team
+  push acceptance, Free 402 + upsell shape, MAX-merge monotonicity,
+  fresh-write upsert, day-format validation, counter validation
+  (negative + non-integer rejection), 401 without auth, range cap by
+  tier, range down-shift + clamp, scope isolation across users.
+- 5 CLI unit tests in `recon-cli/src/savings.rs::tests` covering
+  the civil-from-days date math, today_utc shape, aggregation across
+  per-tool counters, savings clamp at zero, empty input.
+
+[0.3.2]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.2
+
+## [0.3.1] — 2026-04-28
+
+The two blockers between v0.3.0 and "I'll buy this" closed in one release:
+**multi-language parser parity** and **token-savings telemetry**.
+
+### Added — multi-language parity
+
+All five non-Rust extractors now walk function/method/class/struct bodies
+and emit identifier refs from their identifier arms. The reference graph
+is now meaningfully populated for every supported language; `code_path`,
+`code_callers`, `code_callees`, `code_context`, `code_impact`,
+`code_subsystems`, and `code_repo_map` work cross-language.
+
+- **Python** (`extract_python`): `function_definition` and
+  `class_definition` now walk their full bodies for identifier refs;
+  `decorated_definition` attributes the decorator's identifier as a ref
+  from the decorated symbol; class bases (e.g. `class Derived(Base):`)
+  produce refs to base classes.
+- **JavaScript / TypeScript / TSX** (`extract_js_ts`): `function_declaration`,
+  `method_definition`, `class_declaration`, `interface_declaration`,
+  `enum_declaration`, `type_alias_declaration`, plus arrow-function and
+  function-expression values inside `lexical_declaration` /
+  `variable_declaration` all walk their bodies. Identifier arm covers
+  `identifier`, `property_identifier`, `type_identifier`,
+  `shorthand_property_identifier`. `extends Base implements Iface` now
+  produces refs.
+- **Go** (`extract_go`): `function_declaration`, `method_declaration`,
+  and `type_spec` (struct / interface bodies) all walk for identifier
+  refs. Method receivers are now reported as refs from the method.
+- **Java** (`extract_java`): `method_declaration`, `constructor_declaration`,
+  `class_declaration`, `interface_declaration`, `enum_declaration` all
+  walk their bodies. Generics (`List<String>`) produce refs to all type
+  identifiers.
+- **C / C++** (`extract_c_cpp`): `function_definition` walks its body;
+  `struct_specifier` / `class_specifier` / `enum_specifier` walk their
+  full nodes for type-ref collection. Template arguments
+  (`std::vector<MyType>`) are captured.
+
+Per-language regression tests in `crates/recon-parser/src/extract.rs::tests`
+assert non-empty refs for each language on representative fixtures
+(`python_refs_extracted_from_function_body`,
+`python_refs_extracted_from_class_bases`,
+`typescript_refs_extracted_from_function_and_class`,
+`javascript_refs_extracted_from_function_body`,
+`go_refs_extracted_from_function_body`,
+`java_refs_extracted_from_method_body`,
+`cpp_refs_extracted_from_function_body`).
+
+### Added — token-savings telemetry
+
+A new `crates/recon-server/src/telemetry.rs` module tracks, per registered
+tool: call count, response token estimates, baseline tokens avoided
+(what Read+Grep would have cost), and per-handler latency. Atomics on the
+hot path; SQLite-backed lifetime persistence.
+
+- **`code_savings` tool** — returns a tab-separated breakdown of every
+  tool's calls / response tokens / baseline tokens / tokens saved /
+  average latency, followed by an aggregate trailer. Output uses
+  `Skeleton`.
+- **`code_stats`** now includes a `telemetry` block with session
+  uptime, total calls, response_tokens, baseline_tokens_avoided, and
+  tokens_saved. Backward compatible — added as a new top-level field;
+  existing fields unchanged.
+- **Persistence** — every `FLUSH_THRESHOLD` (default 50) tool calls,
+  the server spawns a `tokio::task::spawn_blocking` to write per-tool
+  counters to the SQLite `meta` table under `tel:tool:<name>` keys.
+  `ReconServer::shutdown` performs a synchronous flush so the trailing
+  window is captured before exit. Hydration on startup merges the
+  persisted lifetime counters into freshly-initialised atomics.
+- **Per-tool baselines** — conservative, audit-friendly token-cost
+  estimates documented in `BASELINES` with one-line rationales (e.g.
+  `code_repo_map: 20000 tokens — Read 5 files for orientation`).
+  Static constants by design.
+- **Model-agnostic by design** — recon reports *tokens* saved, not
+  dollars. Agents calling these tools may run on Claude, GPT, Gemini,
+  a self-hosted Llama, or anything else, each with its own pricing
+  and discount structure. Hard-coding a "$X saved" figure would
+  privilege one provider's list price; we leave the conversion to
+  the caller's actual rate sheet.
+- **Hot-path overhead** — each tool call adds 4 atomic adds + one
+  `tiktoken-rs` `estimate_tokens` pass over the response (≈ 250 µs for
+  a 2 KB response). The threshold-driven flush is async; the only
+  synchronous SQLite write is at shutdown. Worst-case telemetry cost
+  is bounded by the response size, never by tool latency.
+
+### Changed
+
+- **`ReconServer::new`** now takes `&store` to hydrate telemetry from
+  the meta table before the store is moved into the Mutex. No public
+  signature change.
+- **Watcher cache invalidation** also clears `cached_call_graph` along
+  with `cached_symbols` / `cached_refs` so graph tools rebuild against
+  fresh data after every save.
+
+### Performance
+
+- Telemetry record path is lock-free except on flush; flush is
+  async-spawned and protected by a mutex inside `Telemetry` so
+  concurrent flushes serialize without blocking the hot path.
+- Per-tool snapshot reads (used by `code_savings` and `code_stats`)
+  perform exactly one `Acquire` load per atomic, no allocation.
+
+### Tests
+
+- 7 new telemetry unit tests in `recon-server::telemetry::tests`
+  (baseline lookup, threshold trigger, hydrate round-trip,
+  saturating-subtraction, unknown-tool handling).
+- 12 new handler tests in `recon-server::server::tests` covering all
+  Phase-1+2 graph tools, `code_savings`, the `code_stats` telemetry
+  block, and a server-restart persistence round-trip.
+- 7 new per-language ref-extraction tests in
+  `recon-parser::extract::tests`.
+- Tool-description audit (`tool_descriptions_under_2kb`) extended with
+  `code_savings` (under 1 KB).
+
+### Risk register notes
+
+- Telemetry baselines are static. When new tools land, update
+  `BASELINES` first or the baseline lookup returns 0 (silent
+  zero-savings rather than a panic).
+- `ReconServer::shutdown` was previously safe to call multiple times;
+  it remains so. The synchronous telemetry flush takes the
+  `flush_guard` mutex, so a second concurrent shutdown serializes
+  cleanly.
+
+[0.3.1]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.1
+
+## [0.3.0] — 2026-04-28
+
+Graph-traversal MCP tools, end-to-end. Cuts the canonical
+`find_symbol → read_symbol → find_refs → search-for-tests` agent loop down
+to a single tool call; replaces chained `code_find_refs` walks with one
+n-hop traversal. Inspired by `graphify`, `codegraph`, and Anthropic's
+"MCP code execution" pattern — concrete recon shape: forward + reverse
+CSR over the existing `refs` table, lazy-built and cached alongside
+`cached_symbols` / `cached_refs`.
+
+### Added
+
+- **`code_path src dst [max_hops=8]`** — bidirectional BFS shortest path
+  between two symbols. Returns an ordered hop sequence with file:line per
+  hop. Reports `unresolved_hint` when the BFS terminates near a
+  dyn-dispatch / FFI boundary. Output uses ReferenceDigest with the new
+  `path` field.
+- **`code_callers symbol [depth=1]`** / **`code_callees [depth=1]`** —
+  layered transitive traversal up to `depth` rings (max 6). Cycle-safe;
+  per-tier fan-out cap 50; total-visit cap 50 000. Output uses
+  ReferenceDigest with the new `tiers` field.
+- **`code_context symbol_or_query`** — one-shot bundle replacing the
+  4-call understand-X loop: target skeleton + body + up to 5 callers / 5
+  callees / 3 types / 3 tests, honoring `token_budget` (default 2000)
+  with priority-ordered drop. Output uses SymbolCard with the new
+  `context` envelope.
+- **`code_impact symbol [depth=4]`** — blast radius. Tiered transitive
+  callers + transitively-reachable test functions. Test detection in
+  v0.3 is Rust-only (`tests::*` qnames + `test_*` / `Test*` heuristic);
+  cross-language detector is Phase 2 v0.4.x.
+- **`code_subsystems`** / **`code_subsystem <id>`** — repo orientation
+  via weakly-connected components of the reference graph. Each subsystem
+  reports its hub (highest-degree symbol), dominant directory, and
+  member count. v0.3 uses union-find connected components; v0.4.x will
+  upgrade to Leiden modularity-optimized clustering.
+- **Centrality in `code_stats`** — adds `top_in_degree` and
+  `top_out_degree` arrays (top-20 each, top-level symbols only).
+  PageRank/betweenness centrality columns deferred to v0.4.x with the
+  schema migration.
+- **New error variant `ReconErrorCode::ResourceExhausted`** for
+  graph-budget-exhausted paths (visit cap hit, fan-out cap hit). Stable
+  numeric code -32012, kebab-case kind `resource_exhausted`.
+
+### Fixed
+
+- **Parser now extracts call/use refs from inside Rust function bodies,
+  struct field types, and enum variant payloads.** Previously
+  `extract_rust` only recursed into module bodies and trait/impl
+  bodies — function bodies were skipped, so the reference graph had no
+  call edges at all. PageRank still produced reasonable rankings off
+  module-level refs, but `code_path`, `code_callers`, etc. would have
+  found empty graphs without this fix. (`crates/recon-parser/src/extract.rs`)
+- **Storage now remaps parser-local symbol ids to DB rowids on insert.**
+  Each file's parser starts `next_id` at 1; SQLite auto-assigns rowids
+  continuing from `MAX(id)`. `Ref::src_symbol_id` and `Symbol::parent_id`
+  carry parser-local ids, so without remap, every file after the first
+  has its refs and parent pointers point at wrong global symbols.
+  Affected: `batch_index_file` and `batch_index_files`. Existing single-
+  file tests passed because the first file's local ids happen to match
+  DB rowids when the table is empty.
+  (`crates/recon-storage/src/store.rs`)
+
+### Changed
+
+- **`RefDigestView`** gained optional `path`, `tiers`, `truncated`,
+  `unresolved_hint`, `tests` fields — all `skip_serializing_if` so
+  `code_find_refs` responses are byte-identical to v0.2.x.
+- **`SymbolCardView`** gained an optional `context` envelope —
+  `code_read_symbol` responses are byte-identical when no envelope is
+  attached.
+- **Server**: new `cached_call_graph: Arc<ArcSwapOption<CallGraph>>`
+  built lazily on first graph-tool call after each cache invalidation.
+  Watcher invalidation paths clear it alongside symbols/refs.
+
+### Performance
+
+- BFS over the cached forward+reverse CSR. `code_path` typical < 5 ms;
+  worst-case bounded by total-visited cap (50 000 nodes).
+- Connected components via path-compressed union-find — `O((V+E) α(V))`.
+- All tools share a single `CallGraph` instance per cache generation;
+  graph build is `O(V+E)` (~30–50 ms on a 500K-symbol repo) but amortizes
+  to O(1) per query after the first call.
+
+### Tests
+
+- 16 unit tests in `recon-search::graph` (path/callers/callees/cycle/
+  components/degree/per-tier-cap/visit-cap).
+- 6 new shape serde tests in `recon-core::shapes` (legacy shape byte-
+  compat + new mode shapes).
+- 17 new handler tests in `recon-server` covering all 7 new tools and
+  the new `code_stats` centrality fields.
+- Tool-description audit (`tool_descriptions_under_2kb`) extended with
+  the 7 new descriptions; longest is `code_context` at 1.4 KB.
+
+[0.3.0]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.0
+
 ## [0.2.4] — 2026-04-27
 
 v0.2.4 supersedes v0.2.3 — same fixes, plus a CI-only test skip for the two

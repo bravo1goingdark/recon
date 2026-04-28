@@ -4,10 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>recon docs — Local-first MCP server · Tools · Filter DSL · Benchmarks</title>
-<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 12 tools, 5 search tiers, PageRank repo map, filter DSL, incremental indexing, secret redaction." />
+<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 20 tools (12 base + 7 graph-traversal + 1 telemetry), 5 search tiers, PageRank repo map, weakly-connected-component subsystems, token-savings telemetry, 7 languages, filter DSL, incremental indexing, secret redaction." />
 <link rel="canonical" href="https://mcprecon.pages.dev/Docs.html" />
 <meta property="og:title" content="recon docs — Local-first MCP server" />
-<meta property="og:description" content="12 symbol-aware MCP tools. Signed 24 MB Rust binary. SQLite + Tantivy + fff-grep search tiers. Your code stays on your machine." />
+<meta property="og:description" content="20 symbol-aware MCP tools — graph-aware navigation, token-savings telemetry. Signed 24 MB Rust binary. SQLite + Tantivy + fff-grep search tiers. Your code stays on your machine." />
 <meta property="og:url" content="https://mcprecon.pages.dev/Docs.html" />
 <meta property="og:image" content="https://mcprecon.pages.dev/og.png" />
 <meta name="twitter:card" content="summary_large_image" />
@@ -210,7 +210,7 @@
       justify-content:center;color:var(--ink-3);transition:border-color .15s,color .15s;
       font-size:14px;
     "><span id="theme-icon">◑</span></button>
-    <div class="ship">v0.2.1 · <span>shipping</span></div>
+    <div class="ship">v0.3.1 · <span>shipping</span></div>
     <button class="nav-burger" id="nav-burger" aria-label="Open menu" aria-controls="nav-sheet" aria-expanded="false">
       <span class="bars"><span></span></span>
     </button>
@@ -321,7 +321,7 @@ curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 iwr https://mcprecon.pages.dev/install.ps1 | iex
 
 <span class="c"># pin a specific version</span>
-VERSION=v0.2.1 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+VERSION=v0.3.1 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
 <span class="c"># upgrade in place (lands the latest published release)</span>
 recon update</pre>
@@ -439,10 +439,10 @@ Released server-side repo slot</pre>
     <h3 id="cmd-doctor"><code>recon doctor [--json]</code></h3>
     <p>Run a battery of probes covering every surface a stuck install can fail on. Exit code is 1 if anything's broken — wire it into CI to catch regressions.</p>
 <pre>$ recon doctor
-recon doctor — 0.2.1 (x86_64-unknown-linux-gnu)
+recon doctor — 0.3.1 (x86_64-unknown-linux-gnu)
 repo: /home/me/proj
 
-[OK]    binary                        recon 0.2.1 (x86_64-unknown-linux-gnu)
+[OK]    binary                        recon 0.3.1 (x86_64-unknown-linux-gnu)
 [OK]    repo dir                      /home/me/proj writable
 [OK]    global config                 /home/me/.config/recon writable
 [OK]    license                       Pro (expires unix=1798761600)
@@ -462,13 +462,13 @@ Summary: 9 ok, 3 warn, 0 fail</pre>
     <h3 id="cmd-update"><code>recon update [--check] [--force]</code></h3>
     <p>Self-upgrade to the latest published release. Verifies the SHA-256 manifest and (with cosign present) the sigstore signature before swapping the binary.</p>
 <pre>$ recon update --check
-Latest: v0.2.1  (you're on v0.1.1)
+Latest: v0.3.1  (you're on v0.3.0)
 
 $ recon update
 Downloading recon-x86_64-unknown-linux-gnu.tar.gz...
 Verifying signature... OK
 Replacing /usr/local/bin/recon... OK
-Now on v0.2.1.</pre>
+Now on v0.3.1.</pre>
 
     <h3 id="cmd-version"><code>recon version</code></h3>
     <p>Print the binary's semver tag. Identical to <code>recon --version</code>; provided for shell scripts that want a stable subcommand.</p>
@@ -647,8 +647,9 @@ $ recon query code_repo_map '{"token_budget":500}'</pre>
     <!-- MCP TOOLS -->
     <h2 id="tools"><span class="no">08</span>MCP tools</h2>
 
-    <p>The 12 tools your AI agent calls when recon is wired up. Each is documented in the agent's tool listing — these are summarised here so you can audit what the agent has access to.</p>
+    <p>The 20 tools your AI agent calls when recon is wired up. Twelve symbol-and-text primitives, seven graph-aware traversals (added in v0.3.0), and one telemetry surface (added in v0.3.1). Each is documented in the agent's tool listing — these are summarised here so you can audit what the agent has access to.</p>
 
+    <h3>Symbol &amp; text primitives</h3>
     <table>
       <thead><tr><th>Tool</th><th>Replaces</th><th>What it does</th></tr></thead>
       <tbody>
@@ -663,9 +664,39 @@ $ recon query code_repo_map '{"token_budget":500}'</pre>
         <tr><td><code>code_find_strings</code></td><td>—</td><td>Literals and comments only.</td></tr>
         <tr><td><code>code_multi_find</code></td><td>—</td><td>Multi-pattern fan-out.</td></tr>
         <tr><td><code>code_reindex</code></td><td>—</td><td>Agent-triggered reindex.</td></tr>
-        <tr><td><code>code_stats</code></td><td>—</td><td>Index health report.</td></tr>
+        <tr><td><code>code_stats</code></td><td>—</td><td>Index health, top-N centrality, live token-savings block.</td></tr>
       </tbody>
     </table>
+
+    <h3>Graph-aware traversal <span style="color:var(--ink-3);font-weight:normal">— v0.3.0+</span></h3>
+
+    <p>These tools traverse the symbol reference graph that recon builds on every index. The graph is forward + reverse CSR — each tool runs a single bounded BFS and emits structured results without loading source files. Total-visit cap 50 000 nodes; per-tier fan-out cap 50 nodes; god-node queries terminate with a <code>truncated: true</code> marker rather than blowing up the response.</p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>Replaces</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>code_path</code></td><td>chained <code>code_find_refs</code></td><td>Shortest call-graph path between two symbols (bidirectional BFS, max 8 hops).</td></tr>
+        <tr><td><code>code_callers</code></td><td>chained refs</td><td>Transitive callers up to <code>depth</code> rings (default 1, max 6). Cycle-safe; tiered.</td></tr>
+        <tr><td><code>code_callees</code></td><td>chained refs</td><td>Transitive callees up to <code>depth</code> rings. What does X call?</td></tr>
+        <tr><td><code>code_context</code></td><td>4-call understand-X loop</td><td>One-shot bundle: signature, body, callers, callees, types, tests. Honors a token budget.</td></tr>
+        <tr><td><code>code_impact</code></td><td>—</td><td>Blast radius — transitive callers + reachable tests. "What might break if I change X?"</td></tr>
+        <tr><td><code>code_subsystems</code></td><td>—</td><td>Repo orientation by weakly-connected components. Each subsystem reports hub + dominant directory.</td></tr>
+        <tr><td><code>code_subsystem</code></td><td>—</td><td>Drill into one subsystem id from <code>code_subsystems</code> with a token-budgeted skeleton.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Token-savings telemetry <span style="color:var(--ink-3);font-weight:normal">— v0.3.1</span></h3>
+
+    <p>recon tracks per-tool calls, response-token estimates, and a baseline "what Read+Grep would have cost" figure. The difference is the tokens-saved number. Counters are lock-free atomics on the hot path; the SQLite <code>meta</code> table persists lifetime totals across restarts. recon is <b>model-agnostic</b> — agents using it may run on Claude, GPT, Gemini, or a self-hosted model, each with its own price sheet. We report tokens saved and let you convert against whatever you actually pay.</p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>Replaces</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>code_savings</code></td><td>—</td><td>Per-tool TSV: calls, response tokens, baseline avoided, tokens saved, avg latency. Plus aggregate trailer.</td></tr>
+      </tbody>
+    </table>
+
+    <p>Same numbers also surface as a <code>telemetry</code> block on every <code>code_stats</code> call — so dashboards can poll a single endpoint.</p>
 
     <!-- FILTER DSL -->
     <h2 id="filter-dsl"><span class="no">09</span>Filter DSL</h2>
@@ -854,6 +885,12 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <!-- CHANGELOG -->
     <h2 id="changelog"><span class="no">15</span>Changelog</h2>
 
+    <p><b>v0.3.1</b> — Multi-language parser parity (Python, JS/TS, Go, Java, C/C++ extractors now walk function/class/struct bodies for identifier refs, so the call graph is meaningfully populated for every supported language). Token-savings counter: new <code>code_savings</code> tool, lock-free atomic counters with SQLite-backed lifetime persistence, telemetry block on <code>code_stats</code>. Model-agnostic — reports tokens saved, leaves dollar conversion to your provider's rate sheet. <a href="/changelog#v0-3-1">Full notes →</a></p>
+    <p><b>v0.3.0</b> — Seven graph-traversal tools: <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_context</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>. Built on a forward+reverse CSR call graph cached alongside <code>code_repo_map</code>'s symbol set. Replaces the canonical chained-<code>code_find_refs</code> agent loop with a single bounded BFS. Also fixes the parser/storage parser-local-id remap that silently mis-attributed refs across files. <a href="/changelog#v0-3-0">Full notes →</a></p>
+    <p><b>v0.2.4</b> — CI-only test skip on macOS so the <code>watcher_delete</code> integration tests don't keep the test binary alive past the workflow timeout. The watcher fix from v0.2.3 is unchanged. <a href="/changelog#v0-2-4">Full notes →</a></p>
+    <p><b>v0.2.3</b> — MCP tool fixes across <code>recon-parser</code>, <code>recon-server</code>, <code>recon-search</code>; resolved a macOS pipeline hang caused by a blocking <code>Watcher::recv()</code>. <a href="/changelog#v0-2-3">Full notes →</a></p>
+    <p><b>v0.2.2</b> — Watcher overhaul (file save → queryable in &lt; 1 s, deletes/renames cascade in Phase 0), tier-1 token diet on tool responses, deterministic <code>code_search</code> hybrid mode. <a href="/changelog#v0-2-2">Full notes →</a></p>
+    <p><b>v0.2.1</b> — <code>recon init --mcp &lt;ide&gt;</code> now smoke-tests <code>recon serve</code> after writing the IDE config. <a href="/changelog#v0-2-1">Full notes →</a></p>
     <p><b>v0.2.0</b> — Server-side repo enforcement.</p>
     <ul class="bul">
       <li>Server-side <code>max_repos</code>: <code>recon init</code> now registers each repo's canonical-path SHA-256 fingerprint with the worker via atomic <code>POST /v1/account/repos</code>.</li>
@@ -863,6 +900,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     </ul>
     <p><b>v0.1.1</b> — Fixed license HMAC secret mismatch between CLI and worker.</p>
     <p><b>v0.1.0</b> — Initial release. 12 tools, 9 languages, signed 24 MB Rust binary.</p>
+    <p style="margin-top:14px"><a href="/changelog">See the full changelog →</a></p>
 
     <!-- LICENSE -->
     <h2 id="license"><span class="no">16</span>License</h2>

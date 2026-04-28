@@ -54,6 +54,14 @@ pub struct ReconServer {
     cached_symbols: Arc<ArcSwap<Vec<recon_core::symbol::Symbol>>>,
     /// Cached all_refs — avoids alloc on every code_repo_map call.
     cached_refs: Arc<ArcSwap<Vec<recon_core::symbol::Ref>>>,
+    /// Cached call graph (forward + reverse CSR over `cached_symbols` ×
+    /// `cached_refs`). Built lazily on first graph-tool call after each
+    /// reindex; invalidated alongside `cached_symbols` / `cached_refs`.
+    cached_call_graph: Arc<arc_swap::ArcSwapOption<recon_search::graph::CallGraph>>,
+    /// Token-savings telemetry. Lock-free hot path; persisted to the
+    /// `meta` table every `FLUSH_THRESHOLD` calls + on shutdown so
+    /// lifetime totals survive restarts.
+    telemetry: Arc<crate::telemetry::Telemetry>,
     /// Lock-free embedding service — set once in `init_embed`, read on every
     /// embed-backed tool call. `ArcSwapOption` gives true lock-free reads.
     #[cfg(feature = "embed")]
@@ -67,6 +75,17 @@ pub struct ReconServer {
     vec_writer: Arc<Mutex<Option<recon_embed::VectorStore>>>,
     /// Cooperative shutdown flag — watcher loop polls this between batches.
     shutdown_flag: Arc<AtomicBool>,
+    /// Wake-up channel for "shut down now, don't wait for the next signal."
+    ///
+    /// The serve loops (stdio + HTTP) `select!` on this in addition to
+    /// SIGINT/SIGTERM and (for stdio) the MCP transport closing. The
+    /// periodic license-revalidation task fires it when the worker
+    /// rejects the key — without this, a deleted account would leave
+    /// `recon serve` running forever, refusing tool calls but holding
+    /// open watchers, ports, and SQLite handles. See
+    /// [`ReconServer::request_shutdown`] for the trigger and
+    /// [`ReconServer::await_shutdown_request`] for the consumer.
+    shutdown_notify: Arc<tokio::sync::Notify>,
     /// Handle to the spawned watcher task so `shutdown()` can await its exit.
     watcher_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Current license, atomically swappable by the periodic re-validation
@@ -221,6 +240,12 @@ impl ReconServer {
                 )
             }
         };
+        // Hydrate telemetry counters from the meta table BEFORE the
+        // store is moved into the Mutex. Best-effort: a corrupt DB
+        // resets counters to zero; never blocks startup.
+        let telemetry = Arc::new(crate::telemetry::Telemetry::new());
+        telemetry.hydrate_from_store(&store);
+
         Ok(Self {
             tool_router: Self::tool_router(),
             write_store: Arc::new(Mutex::new(store)),
@@ -233,7 +258,10 @@ impl ReconServer {
             cached_file_count: Arc::new(AtomicU64::new(0)),
             cached_symbols: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             cached_refs: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
+            cached_call_graph: Arc::new(arc_swap::ArcSwapOption::const_empty()),
+            telemetry,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             watcher_handle: Arc::new(Mutex::new(None)),
             license: Arc::new(ArcSwap::new(Arc::new(None))),
             #[cfg(feature = "embed")]
@@ -258,6 +286,8 @@ impl ReconServer {
                 self.cached_paths.store(Arc::new(paths));
                 self.cached_symbols.store(Arc::new(symbols));
                 self.cached_refs.store(Arc::new(refs));
+                // Graph derives from symbols+refs; invalidate so next access rebuilds.
+                self.cached_call_graph.store(None);
             }
             Err(e) => warn!("failed to refresh caches: {e}"),
         }
@@ -315,6 +345,200 @@ impl ReconServer {
         } else {
             guard.clone()
         }
+    }
+
+    /// Get the cached call graph, building it lazily from cached_symbols ×
+    /// cached_refs on first access after each cache invalidation.
+    fn cached_call_graph(&self) -> Arc<recon_search::graph::CallGraph> {
+        if let Some(g) = self.cached_call_graph.load_full() {
+            return g;
+        }
+        let symbols = self.cached_all_symbols();
+        let refs = self.cached_all_refs();
+        let graph = Arc::new(recon_search::graph::CallGraph::build(&symbols, &refs));
+        self.cached_call_graph.store(Some(graph.clone()));
+        graph
+    }
+
+    /// Resolve a name to symbol indices in `symbols`. Resolution policy
+    /// (most specific first; case-sensitive before case-insensitive at
+    /// every tier so `Handler` doesn't ambiguously match a `handler`
+    /// module): exact qname → fuzzy qname → exact name → fuzzy name.
+    fn resolve_symbol_to_indices(symbols: &[recon_core::symbol::Symbol], name: &str) -> Vec<u32> {
+        let by = |pred: &dyn Fn(&recon_core::symbol::Symbol) -> bool| -> Vec<u32> {
+            symbols
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| pred(s))
+                .map(|(i, _)| i as u32)
+                .collect()
+        };
+        let hits = by(&|s| s.qualified_name.as_str() == name);
+        if !hits.is_empty() {
+            return hits;
+        }
+        let hits = by(&|s| s.qualified_name.as_str().eq_ignore_ascii_case(name));
+        if !hits.is_empty() {
+            return hits;
+        }
+        let hits = by(&|s| s.name.as_str() == name);
+        if !hits.is_empty() {
+            return hits;
+        }
+        by(&|s| s.name.as_str().eq_ignore_ascii_case(name))
+    }
+
+    /// Map a symbol index into a `SymbolHop` for graph responses.
+    fn symbol_hop_for_idx(
+        symbols: &[recon_core::symbol::Symbol],
+        idx: u32,
+    ) -> recon_core::shapes::SymbolHop {
+        let s = &symbols[idx as usize];
+        recon_core::shapes::SymbolHop {
+            qualified_name: s.qualified_name.to_string(),
+            kind: s.kind,
+            path: (*s.path).clone(),
+            line: *s.line_range.start(),
+        }
+    }
+
+    /// Walk a symbol's `parent_id` chain back to a top-level ancestor and
+    /// return the qualified-name chain outermost-first.
+    fn parent_chain_for(symbols: &[recon_core::symbol::Symbol], idx: u32) -> Vec<String> {
+        let mut chain: Vec<String> = Vec::new();
+        let mut cur = symbols[idx as usize].parent_id;
+        let mut guard: usize = 0;
+        while let Some(pid) = cur {
+            if pid == 0 {
+                break;
+            }
+            let parent_idx = symbols.iter().position(|s| s.id == pid);
+            match parent_idx {
+                Some(i) => {
+                    chain.push(symbols[i].qualified_name.to_string());
+                    cur = symbols[i].parent_id;
+                }
+                None => break,
+            }
+            guard += 1;
+            if guard > 32 {
+                break;
+            }
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Best-effort test-symbol detector. Rust + generic test_*/Test* names.
+    fn is_phase1_test_symbol(sym: &recon_core::symbol::Symbol) -> bool {
+        let q = sym.qualified_name.as_str();
+        if q == "tests"
+            || q.starts_with("tests::")
+            || q.contains("::tests::")
+            || q.ends_with("::tests")
+        {
+            return true;
+        }
+        let name = sym.name.as_str();
+        name.starts_with("test_") || name.starts_with("Test")
+    }
+
+    /// Record one tool call into telemetry. Lock-free hot path; if a
+    /// flush threshold is reached, schedule an async write.
+    fn record_call(&self, tool: &'static str, started_at: std::time::Instant, response: &str) {
+        let response_tokens = recon_search::tokens::estimate_tokens(response) as u64;
+        let should_flush = self
+            .telemetry
+            .record(tool, started_at.elapsed(), response_tokens);
+        if should_flush {
+            self.flush_telemetry_async();
+        }
+    }
+
+    /// Higher-order wrapper that times a tool's execution and records it.
+    /// Each `code_*` handler wraps its body in `self.instrumented(...)`.
+    async fn instrumented<Fut>(&self, tool: &'static str, fut: Fut) -> String
+    where
+        Fut: std::future::Future<Output = String>,
+    {
+        let started_at = std::time::Instant::now();
+        let result = fut.await;
+        self.record_call(tool, started_at, &result);
+        result
+    }
+
+    /// Spawn an async task to persist lifetime telemetry. Hot-path
+    /// callers must not block on this.
+    fn flush_telemetry_async(&self) {
+        let telemetry = self.telemetry.clone();
+        let store = self.write_store.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = store.lock();
+            telemetry.flush_to_store(&guard);
+        });
+    }
+
+    /// Synchronous flush — used by `shutdown()` to capture the trailing
+    /// window before exit.
+    fn flush_telemetry_sync(&self) {
+        let store = self.write_store.lock();
+        self.telemetry.flush_to_store(&store);
+    }
+
+    /// Shared body for `code_callers` (`reverse=true`) and
+    /// `code_callees` (`reverse=false`). Layered BFS over the cached
+    /// call graph, capped per [`recon_search::graph::GraphCaps`].
+    async fn callers_or_callees_inner(
+        &self,
+        params: Parameters<CallersParams>,
+        reverse: bool,
+    ) -> String {
+        let depth = params.0.depth;
+        if depth == 0 {
+            return tool_error(ReconErrorCode::InvalidParams, "depth must be >= 1", None);
+        }
+        let depth = depth.min(recon_search::graph::MAX_ALLOWED_DEPTH);
+        let symbols = self.cached_all_symbols();
+        let seeds = Self::resolve_symbol_to_indices(&symbols, &params.0.symbol);
+        if seeds.is_empty() {
+            return tool_error(
+                ReconErrorCode::NotFound,
+                format!("symbol not found: {}", params.0.symbol),
+                Some(serde_json::json!({ "symbol": params.0.symbol })),
+            );
+        }
+        let graph = self.cached_call_graph();
+        let caps = recon_search::graph::GraphCaps::default_for_callers(depth);
+        let result = if reverse {
+            graph.transitive_callers(&seeds, &caps)
+        } else {
+            graph.transitive_callees(&seeds, &caps)
+        };
+        let total: usize = result.tiers.iter().map(|t| t.nodes.len()).sum();
+        let tiers: Vec<recon_core::shapes::RefTier> = result
+            .tiers
+            .iter()
+            .map(|t| recon_core::shapes::RefTier {
+                depth: t.depth,
+                refs: t
+                    .nodes
+                    .iter()
+                    .map(|&i| Self::symbol_hop_for_idx(&symbols, i))
+                    .collect(),
+                truncated: t.truncated_at_cap,
+            })
+            .collect();
+        let view = ToolOutput::ReferenceDigest(RefDigestView {
+            symbol: params.0.symbol.as_str().into(),
+            total,
+            top_k: vec![],
+            path: vec![],
+            tiers,
+            truncated: result.truncated,
+            unresolved_hint: None,
+            tests: vec![],
+        });
+        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     /// Initialize the embedding engine (model download on first run).
@@ -613,6 +837,7 @@ impl ReconServer {
         let cached_file_count = self.cached_file_count.clone();
         let cached_symbols = self.cached_symbols.clone();
         let cached_refs = self.cached_refs.clone();
+        let cached_call_graph = self.cached_call_graph.clone();
         let shutdown_flag = self.shutdown_flag.clone();
         // Snapshot the Arc handles once; the hot path inside the loop needs no locks.
         #[cfg(feature = "embed")]
@@ -882,6 +1107,7 @@ impl ReconServer {
                             cached_file_count.store(0, std::sync::atomic::Ordering::Relaxed);
                             cached_symbols.store(Arc::new(Vec::new()));
                             cached_refs.store(Arc::new(Vec::new()));
+                            cached_call_graph.store(None);
                         }
                         return;
                     }
@@ -1036,6 +1262,7 @@ impl ReconServer {
                     cached_file_count.store(0, std::sync::atomic::Ordering::Relaxed);
                     cached_symbols.store(Arc::new(Vec::new()));
                     cached_refs.store(Arc::new(Vec::new()));
+                    cached_call_graph.store(None);
                 }));
 
                 if result.is_err() {
@@ -1054,9 +1281,53 @@ impl ReconServer {
     /// The watcher loop polls `shutdown_flag` every ~500 ms, so the worst-case
     /// latency is one poll interval plus the current batch's processing time.
     /// A final `PRAGMA optimize` still runs from `Store::drop`.
+    /// Request a clean shutdown of the running server from outside the
+    /// serve loop — used when the periodic license re-validation task
+    /// detects a Rejected response (account deletion, key revoke,
+    /// subscription hard-expiry) or when the cached credentials vanish
+    /// from disk (`recon logout` against a running session).
+    ///
+    /// Sets the cooperative shutdown flag (so the watcher loop bails
+    /// at its next 500 ms poll) and notifies the serve-loop's
+    /// `tokio::select!`. The serve loop then performs the same
+    /// teardown as a SIGTERM: drains the watcher, commits Tantivy,
+    /// flushes telemetry, vacuums SQLite. Idempotent — repeated calls
+    /// are noops after the first.
+    pub fn request_shutdown(&self) {
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+        self.shutdown_notify.notify_waiters();
+    }
+
+    /// Wait until [`request_shutdown`] is called. The serve loops
+    /// (stdio + HTTP) `select!` on this alongside their existing signal
+    /// and transport-close waiters. Returns immediately if a shutdown
+    /// was already requested before the await.
+    pub async fn await_shutdown_request(&self) {
+        // Fast path: already requested. notified() on a Notify with no
+        // permits would block forever in this case, so check the flag
+        // first and short-circuit.
+        if self.shutdown_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        self.shutdown_notify.notified().await;
+    }
+
+    /// Final teardown — drain the watcher, commit Tantivy, flush
+    /// telemetry, vacuum SQLite. Idempotent. Called once by the serve
+    /// loop after a SIGTERM, transport-close, or
+    /// [`request_shutdown`](Self::request_shutdown) wakes the
+    /// outer `tokio::select!`.
+    ///
+    /// The watcher loop polls `shutdown_flag` every ~500 ms, so the
+    /// worst-case latency is one poll interval plus the current
+    /// batch's processing time. A final `PRAGMA optimize` still runs
+    /// from `Store::drop`.
     pub async fn shutdown(&self) {
         info!("shutdown: requested");
         self.shutdown_flag.store(true, Ordering::Relaxed);
+        // Wake any in-flight `await_shutdown_request()` callers so they
+        // don't sit on a dead future after the actual teardown runs.
+        self.shutdown_notify.notify_waiters();
 
         // Wait for the watcher task to exit. Bounded so a wedged batch cannot
         // block shutdown forever.
@@ -1077,6 +1348,11 @@ impl ReconServer {
                 debug!("shutdown: tantivy committed");
             }
         }
+
+        // Persist lifetime telemetry before vacuum so the trailing
+        // session window survives the exit. Synchronous — we WANT to
+        // block on this write here, unlike the hot-path async flush.
+        self.flush_telemetry_sync();
 
         // Reclaim free pages. `PRAGMA optimize` runs from `Store::drop`.
         match self.write_store.lock().incremental_vacuum() {
@@ -1156,102 +1432,105 @@ impl ReconServer {
         description = "Show one-line-per-symbol outline of a file. Returns symbol kinds, names, and line numbers in a tree structure. Use instead of Read when you need to understand a file's structure without reading its full content. Typical output: 300-500 tokens for a 500-line file."
     )]
     async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
-        // Validate path doesn't escape repo root
-        if let Err((code, msg)) = self.resolve_path(&params.0.path) {
-            return tool_error(
-                code,
-                msg,
-                Some(serde_json::json!({ "path": params.0.path })),
-            );
-        }
-        let symbols = {
-            let rel_path = PathBuf::from(&params.0.path);
-            match self.read_pool.symbols_for_path(&rel_path) {
-                Ok(s) => s,
-                Err(e) => return tool_error_from(&e),
+        self.instrumented("code_outline", async move {
+            // Validate path doesn't escape repo root
+            if let Err((code, msg)) = self.resolve_path(&params.0.path) {
+                return tool_error(
+                    code,
+                    msg,
+                    Some(serde_json::json!({ "path": params.0.path })),
+                );
             }
-        };
+            let symbols = {
+                let rel_path = PathBuf::from(&params.0.path);
+                match self.read_pool.symbols_for_path(&rel_path) {
+                    Ok(s) => s,
+                    Err(e) => return tool_error_from(&e),
+                }
+            };
 
-        // Build a name->id map of top-level types (struct/enum/trait/class) so
-        // we can rescue impl-block methods whose parent_id is missing (legacy
-        // index rows pre-parser-fix) or pointing to the enclosing scope (impl
-        // appears before its type in source).
-        let type_id_by_name: AHashMap<&str, u64> = symbols
-            .iter()
-            .filter(|s| {
-                matches!(
-                    s.kind,
-                    recon_core::symbol::SymbolKind::Struct
-                        | recon_core::symbol::SymbolKind::Enum
-                        | recon_core::symbol::SymbolKind::Trait
-                        | recon_core::symbol::SymbolKind::Class
-                )
-            })
-            .map(|s| (s.name.as_str(), s.id))
-            .collect();
-
-        // qualified_name "Type::method" rescue: maps a method back to its owning
-        // type id when parent_id is None or the legacy 0 sentinel.
-        let qname_rescue = |sym: &recon_core::symbol::Symbol| -> Option<u64> {
-            sym.qualified_name
-                .as_str()
-                .split_once("::")
-                .and_then(|(ty, _)| {
-                    let base = ty.split('<').next().unwrap_or(ty).trim();
-                    type_id_by_name.get(base).copied()
+            // Build a name->id map of top-level types (struct/enum/trait/class) so
+            // we can rescue impl-block methods whose parent_id is missing (legacy
+            // index rows pre-parser-fix) or pointing to the enclosing scope (impl
+            // appears before its type in source).
+            let type_id_by_name: AHashMap<&str, u64> = symbols
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.kind,
+                        recon_core::symbol::SymbolKind::Struct
+                            | recon_core::symbol::SymbolKind::Enum
+                            | recon_core::symbol::SymbolKind::Trait
+                            | recon_core::symbol::SymbolKind::Class
+                    )
                 })
-        };
+                .map(|s| (s.name.as_str(), s.id))
+                .collect();
 
-        // O(n) child lookup: build parent_id -> children map in one pass.
-        // parent_id == Some(0) is a legacy sentinel meaning "no real parent" —
-        // treat it as None for grouping purposes.
-        let mut children_map: AHashMap<u64, Vec<&recon_core::symbol::Symbol>> = AHashMap::new();
-        for sym in &symbols {
-            let effective_parent = match sym.parent_id {
-                Some(0) | None => qname_rescue(sym),
-                Some(pid) => Some(pid),
-            };
-            if let Some(pid) = effective_parent {
-                children_map.entry(pid).or_default().push(sym);
-            }
-        }
-
-        // A symbol is top-level if it has no effective parent.
-        let mut entries = SmallVec::new();
-        for sym in &symbols {
-            let is_top_level = match sym.parent_id {
-                None | Some(0) => qname_rescue(sym).is_none(),
-                Some(_) => false,
-            };
-            if is_top_level {
-                let children = children_map
-                    .get(&sym.id)
-                    .map(|kids| {
-                        kids.iter()
-                            .map(|c| OutlineEntry {
-                                kind: c.kind,
-                                name: c.name.clone(),
-                                line: *c.line_range.start(),
-                                children: vec![],
-                            })
-                            .collect()
+            // qualified_name "Type::method" rescue: maps a method back to its owning
+            // type id when parent_id is None or the legacy 0 sentinel.
+            let qname_rescue = |sym: &recon_core::symbol::Symbol| -> Option<u64> {
+                sym.qualified_name
+                    .as_str()
+                    .split_once("::")
+                    .and_then(|(ty, _)| {
+                        let base = ty.split('<').next().unwrap_or(ty).trim();
+                        type_id_by_name.get(base).copied()
                     })
-                    .unwrap_or_default();
-                entries.push(OutlineEntry {
-                    kind: sym.kind,
-                    name: sym.name.clone(),
-                    line: *sym.line_range.start(),
-                    children,
-                });
-            }
-        }
+            };
 
-        let rel_path = PathBuf::from(&params.0.path);
-        let view = ToolOutput::Outline(OutlineView {
-            path: rel_path,
-            entries,
-        });
-        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            // O(n) child lookup: build parent_id -> children map in one pass.
+            // parent_id == Some(0) is a legacy sentinel meaning "no real parent" —
+            // treat it as None for grouping purposes.
+            let mut children_map: AHashMap<u64, Vec<&recon_core::symbol::Symbol>> = AHashMap::new();
+            for sym in &symbols {
+                let effective_parent = match sym.parent_id {
+                    Some(0) | None => qname_rescue(sym),
+                    Some(pid) => Some(pid),
+                };
+                if let Some(pid) = effective_parent {
+                    children_map.entry(pid).or_default().push(sym);
+                }
+            }
+
+            // A symbol is top-level if it has no effective parent.
+            let mut entries = SmallVec::new();
+            for sym in &symbols {
+                let is_top_level = match sym.parent_id {
+                    None | Some(0) => qname_rescue(sym).is_none(),
+                    Some(_) => false,
+                };
+                if is_top_level {
+                    let children = children_map
+                        .get(&sym.id)
+                        .map(|kids| {
+                            kids.iter()
+                                .map(|c| OutlineEntry {
+                                    kind: c.kind,
+                                    name: c.name.clone(),
+                                    line: *c.line_range.start(),
+                                    children: vec![],
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    entries.push(OutlineEntry {
+                        kind: sym.kind,
+                        name: sym.name.clone(),
+                        line: *sym.line_range.start(),
+                        children,
+                    });
+                }
+            }
+
+            let rel_path = PathBuf::from(&params.0.path);
+            let view = ToolOutput::Outline(OutlineView {
+                path: rel_path,
+                entries,
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
     }
 
     #[tool(
@@ -1259,34 +1538,101 @@ impl ReconServer {
         description = "Show signatures and docstrings with bodies elided as '...'. 10x compression vs full file read. Use instead of Read when you need to understand APIs and structure. Output: ~300 tokens per 3000-token file."
     )]
     async fn code_skeleton(&self, params: Parameters<SkeletonParams>) -> String {
-        let rel_path = PathBuf::from(&params.0.path);
-        let symbols = self
-            .read_pool
-            .symbols_for_path(&rel_path)
-            .unwrap_or_default();
+        self.instrumented("code_skeleton", async move {
+            let rel_path = PathBuf::from(&params.0.path);
+            let symbols = self
+                .read_pool
+                .symbols_for_path(&rel_path)
+                .unwrap_or_default();
 
-        let mut skeleton = String::with_capacity(symbols.len() * 80);
-        for sym in &symbols {
-            if sym.parent_id.is_some() && params.0.depth < 2 {
-                continue;
-            }
-            if let Some(doc) = &sym.doc {
-                for line in doc.lines() {
-                    skeleton.push_str(line);
-                    skeleton.push('\n');
+            let mut skeleton = String::with_capacity(symbols.len() * 80);
+            for sym in &symbols {
+                if sym.parent_id.is_some() && params.0.depth < 2 {
+                    continue;
                 }
+                if let Some(doc) = &sym.doc {
+                    for line in doc.lines() {
+                        skeleton.push_str(line);
+                        skeleton.push('\n');
+                    }
+                }
+                if let Some(sig) = &sym.signature {
+                    skeleton.push_str(sig);
+                } else {
+                    skeleton.push_str(sym.kind.label());
+                    skeleton.push(' ');
+                    skeleton.push_str(&sym.name);
+                }
+                skeleton.push_str(" { ... }\n\n");
             }
-            if let Some(sig) = &sym.signature {
-                skeleton.push_str(sig);
-            } else {
-                skeleton.push_str(sym.kind.label());
-                skeleton.push(' ');
-                skeleton.push_str(&sym.name);
-            }
-            skeleton.push_str(" { ... }\n\n");
-        }
 
-        if skeleton.is_empty() {
+            if skeleton.is_empty() {
+                let abs_path = match self.resolve_path(&params.0.path) {
+                    Ok(p) => p,
+                    Err((code, msg)) => {
+                        return tool_error(
+                            code,
+                            msg,
+                            Some(serde_json::json!({ "path": params.0.path })),
+                        );
+                    }
+                };
+                // Size cap to prevent OOM on large files (minified bundles, lock files, etc.)
+                match tokio::fs::metadata(&abs_path).await {
+                    Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
+                        return tool_error(
+                            ReconErrorCode::FileTooLarge,
+                            format!(
+                                "file too large ({} MB, max {} MB)",
+                                m.len() / (1024 * 1024),
+                                MAX_READ_FILE_SIZE / (1024 * 1024)
+                            ),
+                            Some(serde_json::json!({
+                                "path": params.0.path,
+                                "size_bytes": m.len(),
+                                "max_bytes": MAX_READ_FILE_SIZE,
+                            })),
+                        );
+                    }
+                    Err(e) => {
+                        return tool_error(
+                            ReconErrorCode::Io,
+                            format!("reading file metadata: {e}"),
+                            Some(serde_json::json!({ "path": params.0.path })),
+                        );
+                    }
+                    _ => {}
+                }
+                let content = match tokio::fs::read_to_string(&abs_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return tool_error(
+                            ReconErrorCode::Io,
+                            format!("reading file: {e}"),
+                            Some(serde_json::json!({ "path": params.0.path })),
+                        );
+                    }
+                };
+                skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
+            }
+
+            let token_est = recon_search::tokens::estimate_tokens(&skeleton);
+            let view = ToolOutput::Skeleton(SkeletonView {
+                path: Some(rel_path),
+                content: skeleton,
+                token_estimate: token_est,
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_read_symbol",
+        description = "Read the full source of one symbol plus its parent chain and caller/callee references. Use instead of Read when you need one specific function or type. Output: ~200-800 tokens."
+    )]
+    async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
+        self.instrumented("code_read_symbol", async move {
             let abs_path = match self.resolve_path(&params.0.path) {
                 Ok(p) => p,
                 Err((code, msg)) => {
@@ -1297,7 +1643,7 @@ impl ReconServer {
                     );
                 }
             };
-            // Size cap to prevent OOM on large files (minified bundles, lock files, etc.)
+            // Size cap to prevent OOM on large files.
             match tokio::fs::metadata(&abs_path).await {
                 Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
                     return tool_error(
@@ -1333,166 +1679,106 @@ impl ReconServer {
                     );
                 }
             };
-            skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
-        }
 
-        let token_est = recon_search::tokens::estimate_tokens(&skeleton);
-        let view = ToolOutput::Skeleton(SkeletonView {
-            path: Some(rel_path),
-            content: skeleton,
-            token_estimate: token_est,
-        });
-        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
-    }
+            let rel_path = PathBuf::from(&params.0.path);
+            let symbols = self
+                .read_pool
+                .symbols_for_path(&rel_path)
+                .unwrap_or_default();
 
-    #[tool(
-        name = "code_read_symbol",
-        description = "Read the full source of one symbol plus its parent chain and caller/callee references. Use instead of Read when you need one specific function or type. Output: ~200-800 tokens."
-    )]
-    async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
-        let abs_path = match self.resolve_path(&params.0.path) {
-            Ok(p) => p,
-            Err((code, msg)) => {
-                return tool_error(
-                    code,
-                    msg,
-                    Some(serde_json::json!({ "path": params.0.path })),
-                );
-            }
-        };
-        // Size cap to prevent OOM on large files.
-        match tokio::fs::metadata(&abs_path).await {
-            Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
-                return tool_error(
-                    ReconErrorCode::FileTooLarge,
-                    format!(
-                        "file too large ({} MB, max {} MB)",
-                        m.len() / (1024 * 1024),
-                        MAX_READ_FILE_SIZE / (1024 * 1024)
-                    ),
-                    Some(serde_json::json!({
-                        "path": params.0.path,
-                        "size_bytes": m.len(),
-                        "max_bytes": MAX_READ_FILE_SIZE,
-                    })),
-                );
-            }
-            Err(e) => {
-                return tool_error(
-                    ReconErrorCode::Io,
-                    format!("reading file metadata: {e}"),
-                    Some(serde_json::json!({ "path": params.0.path })),
-                );
-            }
-            _ => {}
-        }
-        let content = match tokio::fs::read_to_string(&abs_path).await {
-            Ok(c) => c,
-            Err(e) => {
-                return tool_error(
-                    ReconErrorCode::Io,
-                    format!("reading file: {e}"),
-                    Some(serde_json::json!({ "path": params.0.path })),
-                );
-            }
-        };
-
-        let rel_path = PathBuf::from(&params.0.path);
-        let symbols = self
-            .read_pool
-            .symbols_for_path(&rel_path)
-            .unwrap_or_default();
-
-        let target = if let Ok(line) = params.0.symbol_or_line.parse::<u32>() {
-            symbols.iter().find(|s| s.line_range.contains(&line))
-        } else {
-            symbols
-                .iter()
-                .find(|s| s.name.as_str() == params.0.symbol_or_line)
-        };
-
-        let sym = match target {
-            Some(s) => s,
-            None => {
-                return tool_error(
-                    ReconErrorCode::NotFound,
-                    format!("symbol not found: {}", params.0.symbol_or_line),
-                    Some(serde_json::json!({
-                        "path": params.0.path,
-                        "symbol_or_line": params.0.symbol_or_line,
-                    })),
-                );
-            }
-        };
-
-        let body = content
-            .get(sym.byte_range.clone())
-            .unwrap_or("[byte range out of bounds]")
-            .to_string();
-
-        // Extract doc from source file: comment block immediately before symbol
-        let doc = extract_doc_from_source(&content, sym.byte_range.start);
-
-        let refs = self
-            .read_pool
-            .refs_for_ident(sym.name.as_str())
-            .unwrap_or_default();
-        let callers: Vec<RefEntry> = refs
-            .iter()
-            .take(10)
-            .map(|r| RefEntry {
-                path: (*r.src_path).clone(),
-                line: 0,
-                col: None,
-                snippet: r.ident.clone(),
-                enclosing_symbol: None,
-            })
-            .collect();
-
-        // Build parent chain: walk up parent_id to root
-        let mut parent_chain: Vec<String> = Vec::new();
-        let mut current_parent = sym.parent_id;
-        while let Some(parent_id) = current_parent {
-            if let Some(parent) = symbols.iter().find(|s| s.id == parent_id) {
-                parent_chain.push(format!(
-                    "{}:{} {}",
-                    parent.kind.label(),
-                    parent.line_range.start(),
-                    parent.qualified_name
-                ));
-                current_parent = parent.parent_id;
+            let target = if let Ok(line) = params.0.symbol_or_line.parse::<u32>() {
+                symbols.iter().find(|s| s.line_range.contains(&line))
             } else {
-                break;
+                symbols
+                    .iter()
+                    .find(|s| s.name.as_str() == params.0.symbol_or_line)
+            };
+
+            let sym = match target {
+                Some(s) => s,
+                None => {
+                    return tool_error(
+                        ReconErrorCode::NotFound,
+                        format!("symbol not found: {}", params.0.symbol_or_line),
+                        Some(serde_json::json!({
+                            "path": params.0.path,
+                            "symbol_or_line": params.0.symbol_or_line,
+                        })),
+                    );
+                }
+            };
+
+            let body = content
+                .get(sym.byte_range.clone())
+                .unwrap_or("[byte range out of bounds]")
+                .to_string();
+
+            // Extract doc from source file: comment block immediately before symbol
+            let doc = extract_doc_from_source(&content, sym.byte_range.start);
+
+            let refs = self
+                .read_pool
+                .refs_for_ident(sym.name.as_str())
+                .unwrap_or_default();
+            let callers: Vec<RefEntry> = refs
+                .iter()
+                .take(10)
+                .map(|r| RefEntry {
+                    path: (*r.src_path).clone(),
+                    line: 0,
+                    col: None,
+                    snippet: r.ident.clone(),
+                    enclosing_symbol: None,
+                })
+                .collect();
+
+            // Build parent chain: walk up parent_id to root
+            let mut parent_chain: Vec<String> = Vec::new();
+            let mut current_parent = sym.parent_id;
+            while let Some(parent_id) = current_parent {
+                if let Some(parent) = symbols.iter().find(|s| s.id == parent_id) {
+                    parent_chain.push(format!(
+                        "{}:{} {}",
+                        parent.kind.label(),
+                        parent.line_range.start(),
+                        parent.qualified_name
+                    ));
+                    current_parent = parent.parent_id;
+                } else {
+                    break;
+                }
             }
-        }
-        parent_chain.reverse();
+            parent_chain.reverse();
 
-        // Build callees: symbols this symbol references
-        let callees: Vec<RefEntry> = refs
-            .iter()
-            .filter(|r| r.src_symbol_id == sym.id)
-            .map(|r| RefEntry {
-                path: (*r.src_path).clone(),
-                line: 0,
-                col: None,
-                snippet: r.ident.clone(),
-                enclosing_symbol: None,
-            })
-            .collect();
+            // Build callees: symbols this symbol references
+            let callees: Vec<RefEntry> = refs
+                .iter()
+                .filter(|r| r.src_symbol_id == sym.id)
+                .map(|r| RefEntry {
+                    path: (*r.src_path).clone(),
+                    line: 0,
+                    col: None,
+                    snippet: r.ident.clone(),
+                    enclosing_symbol: None,
+                })
+                .collect();
 
-        let view = ToolOutput::SymbolCard(SymbolCardView {
-            path: rel_path,
-            qualified_name: sym.qualified_name.to_string(),
-            kind: sym.kind,
-            signature: sym.signature.as_deref().map(str::to_owned),
-            doc,
-            body,
-            line_range: (*sym.line_range.start(), *sym.line_range.end()),
-            parent_chain,
-            callers,
-            callees,
-        });
-        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            let view = ToolOutput::SymbolCard(SymbolCardView {
+                path: rel_path,
+                qualified_name: sym.qualified_name.to_string(),
+                kind: sym.kind,
+                signature: sym.signature.as_deref().map(str::to_owned),
+                doc,
+                body,
+                line_range: (*sym.line_range.start(), *sym.line_range.end()),
+                parent_chain,
+                callers,
+                callees,
+                context: None,
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
     }
 
     #[tool(
@@ -1500,110 +1786,115 @@ impl ReconServer {
         description = "Find symbols by name across the codebase. Tiered: exact SQLite match -> Tantivy BM25 -> FTS5 trigram + nucleo fuzzy. Use instead of Grep when searching for functions, types, or classes."
     )]
     async fn code_find_symbol(&self, params: Parameters<FindSymbolParams>) -> String {
-        // All reads go through lock-free ReadPool
-        // Tier 0: exact match via SQLite index
-        let mut results = self
-            .read_pool
-            .find_symbols_exact(&params.0.name, 20)
-            .unwrap_or_default();
+        self.instrumented("code_find_symbol", async move {
+            // All reads go through lock-free ReadPool
+            // Tier 0: exact match via SQLite index
+            let mut results = self
+                .read_pool
+                .find_symbols_exact(&params.0.name, 20)
+                .unwrap_or_default();
 
-        // Tier 1: Tantivy BM25 structured search. Lock-free ≠ non-blocking —
-        // the query parser + top-k collector is CPU-bound, so we offload
-        // via `tantivy_search` so the tokio worker isn't held.
-        if results.is_empty() {
-            let hits = self.tantivy_search(params.0.name.clone(), 20).await;
-            for hit in &hits {
-                if let Some(sym) = self
-                    .read_pool
-                    .get_symbol_by_qname(&hit.qualified_name)
-                    .ok()
-                    .flatten()
-                {
-                    results.push(sym);
+            // Tier 1: Tantivy BM25 structured search. Lock-free ≠ non-blocking —
+            // the query parser + top-k collector is CPU-bound, so we offload
+            // via `tantivy_search` so the tokio worker isn't held.
+            if results.is_empty() {
+                let hits = self.tantivy_search(params.0.name.clone(), 20).await;
+                for hit in &hits {
+                    if let Some(sym) = self
+                        .read_pool
+                        .get_symbol_by_qname(&hit.qualified_name)
+                        .ok()
+                        .flatten()
+                    {
+                        results.push(sym);
+                    }
                 }
             }
-        }
 
-        // Tier 2: FTS5 trigram + nucleo fuzzy rescore
-        if results.is_empty() {
-            let fts_results = self
-                .read_pool
-                .search_symbols_fuzzy(&params.0.name, 50)
-                .unwrap_or_default();
-            let ranked = fuzzy::fuzzy_rank(&fts_results, &params.0.name, 20);
-            results = ranked
-                .into_iter()
-                .map(|(i, _): (usize, _)| fts_results[i].clone())
-                .collect();
-        }
+            // Tier 2: FTS5 trigram + nucleo fuzzy rescore
+            if results.is_empty() {
+                let fts_results = self
+                    .read_pool
+                    .search_symbols_fuzzy(&params.0.name, 50)
+                    .unwrap_or_default();
+                let ranked = fuzzy::fuzzy_rank(&fts_results, &params.0.name, 20);
+                results = ranked
+                    .into_iter()
+                    .map(|(i, _): (usize, _)| fts_results[i].clone())
+                    .collect();
+            }
 
-        // Tier 3: Semantic embedding fallback (feature-gated)
-        #[allow(unused_mut)]
-        let mut from_embedding = false;
-        #[cfg(feature = "embed")]
-        if results.is_empty() {
-            let svc = self.embed_service.load_full();
-            let pool = self.vec_read_pool.load_full();
-            if let (Some(svc), Some(pool)) = (svc, pool) {
-                let query = params.0.name.clone();
-                let query_vec =
-                    match tokio::task::spawn_blocking(move || svc.embed_one(&query)).await {
-                        Ok(Ok(v)) => v,
-                        Ok(Err(e)) => {
-                            warn!("code_find_symbol embed_one error: {e}");
-                            Vec::new()
-                        }
-                        Err(e) => {
-                            warn!("code_find_symbol embed task join error: {e}");
-                            Vec::new()
-                        }
-                    };
-                if !query_vec.is_empty() {
-                    if let Ok(vec_results) = pool.search(query_vec, None, 20) {
-                        for (id, _dist) in vec_results {
-                            if let Ok(Some(sym)) = self.read_pool.symbol_by_id(id) {
-                                results.push(sym);
+            // Tier 3: Semantic embedding fallback (feature-gated)
+            #[allow(unused_mut)]
+            let mut from_embedding = false;
+            #[cfg(feature = "embed")]
+            if results.is_empty() {
+                let svc = self.embed_service.load_full();
+                let pool = self.vec_read_pool.load_full();
+                if let (Some(svc), Some(pool)) = (svc, pool) {
+                    let query = params.0.name.clone();
+                    let query_vec =
+                        match tokio::task::spawn_blocking(move || svc.embed_one(&query)).await {
+                            Ok(Ok(v)) => v,
+                            Ok(Err(e)) => {
+                                warn!("code_find_symbol embed_one error: {e}");
+                                Vec::new()
                             }
-                        }
-                        if !results.is_empty() {
-                            from_embedding = true;
+                            Err(e) => {
+                                warn!("code_find_symbol embed task join error: {e}");
+                                Vec::new()
+                            }
+                        };
+                    if !query_vec.is_empty() {
+                        if let Ok(vec_results) = pool.search(query_vec, None, 20) {
+                            for (id, _dist) in vec_results {
+                                if let Ok(Some(sym)) = self.read_pool.symbol_by_id(id) {
+                                    results.push(sym);
+                                }
+                            }
+                            if !results.is_empty() {
+                                from_embedding = true;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Apply filters
-        if let Some(kind_filter) = &params.0.kind {
-            results.retain(|s| s.kind.label() == kind_filter.as_str());
-        }
-        if let Some(lang_filter) = &params.0.lang {
-            let lang = Language::from_extension(lang_filter);
-            if lang != Language::Unknown {
-                results.retain(|s| s.lang == lang);
+            // Apply filters
+            if let Some(kind_filter) = &params.0.kind {
+                results.retain(|s| s.kind.label() == kind_filter.as_str());
             }
-        }
+            if let Some(lang_filter) = &params.0.lang {
+                let lang = Language::from_extension(lang_filter);
+                if lang != Language::Unknown {
+                    results.retain(|s| s.lang == lang);
+                }
+            }
 
-        let source = if from_embedding {
-            "semantic"
-        } else {
-            "lexical"
-        };
-        let entries: Vec<serde_json::Value> = results
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "qualified_name": s.qualified_name.as_str(),
-                    "path": s.path.to_string_lossy(),
-                    "line": *s.line_range.start(),
-                    "kind": s.kind.label(),
-                    "signature": s.signature,
-                    "source": source,
+            let source = if from_embedding {
+                "semantic"
+            } else {
+                "lexical"
+            };
+            let entries: Vec<serde_json::Value> = results
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "qualified_name": s.qualified_name.as_str(),
+                        "path": s.path.to_string_lossy(),
+                        "line": *s.line_range.start(),
+                        "kind": s.kind.label(),
+                        "signature": s.signature,
+                        "source": source,
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
+            redact_response(
+                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+            )
+        })
+        .await
     }
 
     #[tool(
@@ -1611,63 +1902,632 @@ impl ReconServer {
         description = "Find all references to a symbol. Returns a count and top-k call sites as path:line triples. Use instead of Grep for finding usages of a function or type."
     )]
     async fn code_find_refs(&self, params: Parameters<FindRefsParams>) -> String {
-        let refs = self
-            .read_pool
-            .refs_for_ident(&params.0.symbol)
-            .unwrap_or_default();
+        self.instrumented("code_find_refs", async move {
+            let refs = self
+                .read_pool
+                .refs_for_ident(&params.0.symbol)
+                .unwrap_or_default();
 
-        // Collect unique src_symbol_ids and fetch only their locations — not all 80K symbols.
-        let unique_ids: Vec<u64> = refs
-            .iter()
-            .map(|r| r.src_symbol_id)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        let locations = self
-            .read_pool
-            .symbol_locations_by_ids(&unique_ids)
-            .unwrap_or_default();
-        let loc_map: ahash::AHashMap<u64, (String, u32)> = locations
-            .into_iter()
-            .map(|(id, path, line)| (id, (path, line)))
-            .collect();
+            // Collect unique src_symbol_ids and fetch only their locations — not all 80K symbols.
+            let unique_ids: Vec<u64> = refs
+                .iter()
+                .map(|r| r.src_symbol_id)
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            let locations = self
+                .read_pool
+                .symbol_locations_by_ids(&unique_ids)
+                .unwrap_or_default();
+            let loc_map: ahash::AHashMap<u64, (String, u32)> = locations
+                .into_iter()
+                .map(|(id, path, line)| (id, (path, line)))
+                .collect();
 
-        // Filter orphan refs (no location row, or empty path) BEFORE the take(20)
-        // cap so the digest doesn't fill up with degenerate {path:"", line:0}
-        // entries from stale rows that lost their parent symbol.
-        let valid: Vec<&recon_core::symbol::Ref> = refs
-            .iter()
-            .filter(|r| {
-                loc_map
-                    .get(&r.src_symbol_id)
-                    .is_some_and(|(p, _)| !p.is_empty())
-            })
-            .collect();
+            // Filter orphan refs (no location row, or empty path) BEFORE the take(20)
+            // cap so the digest doesn't fill up with degenerate {path:"", line:0}
+            // entries from stale rows that lost their parent symbol.
+            let valid: Vec<&recon_core::symbol::Ref> = refs
+                .iter()
+                .filter(|r| {
+                    loc_map
+                        .get(&r.src_symbol_id)
+                        .is_some_and(|(p, _)| !p.is_empty())
+                })
+                .collect();
 
-        let top_k: Vec<RefEntry> = valid
-            .iter()
-            .take(20)
-            .map(|r| {
-                let (path, line) = loc_map
-                    .get(&r.src_symbol_id)
-                    .cloned()
-                    .expect("filtered above");
-                RefEntry {
-                    path: PathBuf::from(path),
-                    line,
-                    col: None,
-                    snippet: r.ident.clone(),
-                    enclosing_symbol: None,
+            let top_k: Vec<RefEntry> = valid
+                .iter()
+                .take(20)
+                .map(|r| {
+                    let (path, line) = loc_map
+                        .get(&r.src_symbol_id)
+                        .cloned()
+                        .expect("filtered above");
+                    RefEntry {
+                        path: PathBuf::from(path),
+                        line,
+                        col: None,
+                        snippet: r.ident.clone(),
+                        enclosing_symbol: None,
+                    }
+                })
+                .collect();
+
+            let view = ToolOutput::ReferenceDigest(RefDigestView {
+                symbol: params.0.symbol.as_str().into(),
+                total: valid.len(),
+                top_k,
+                path: vec![],
+                tiers: vec![],
+                truncated: false,
+                unresolved_hint: None,
+                tests: vec![],
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_path",
+        description = "Shortest call-graph path from `src` to `dst`. Use to answer 'how does X reach Y?' \u{2014} replaces a chain of code_find_refs calls. Both arguments accept a bare name or a fully qualified name (preferred \u{2014} disambiguates). Returns an ordered hop sequence with file:line per hop. When unreachable within `max_hops` (default 8, max 16) returns an Error with kind 'not_found'/'unreachable' plus an `unresolved_hint` when the BFS hit a likely dyn-dispatch / FFI boundary. When src or dst is ambiguous (multiple symbols share the name) the BFS spans the cross-product and returns the shortest match. Bidirectional BFS over the cached reference graph; total-visit cap 50 000 nodes. Output uses ReferenceDigest with the `path` field populated."
+    )]
+    async fn code_path(&self, params: Parameters<PathParams>) -> String {
+        self.instrumented("code_path", async move {
+            let max_hops = params.0.max_hops.min(recon_search::graph::MAX_ALLOWED_HOPS);
+            if max_hops == 0 {
+                return tool_error(ReconErrorCode::InvalidParams, "max_hops must be >= 1", None);
+            }
+            let symbols = self.cached_all_symbols();
+            let srcs = Self::resolve_symbol_to_indices(&symbols, &params.0.src);
+            if srcs.is_empty() {
+                return tool_error(
+                    ReconErrorCode::NotFound,
+                    format!("source symbol not found: {}", params.0.src),
+                    Some(serde_json::json!({ "symbol": params.0.src })),
+                );
+            }
+            let dsts = Self::resolve_symbol_to_indices(&symbols, &params.0.dst);
+            if dsts.is_empty() {
+                return tool_error(
+                    ReconErrorCode::NotFound,
+                    format!("destination symbol not found: {}", params.0.dst),
+                    Some(serde_json::json!({ "symbol": params.0.dst })),
+                );
+            }
+            let graph = self.cached_call_graph();
+            let caps = recon_search::graph::GraphCaps::default_for_path(max_hops);
+            let res = graph.shortest_path(&srcs, &dsts, &caps);
+            match res {
+                recon_search::graph::ShortestPathResult::Found { path } => {
+                    let hops: Vec<recon_core::shapes::SymbolHop> = path
+                        .iter()
+                        .map(|&i| Self::symbol_hop_for_idx(&symbols, i))
+                        .collect();
+                    let view = ToolOutput::ReferenceDigest(RefDigestView {
+                        symbol: params.0.src.as_str().into(),
+                        total: hops.len(),
+                        top_k: vec![],
+                        path: hops,
+                        tiers: vec![],
+                        truncated: false,
+                        unresolved_hint: None,
+                        tests: vec![],
+                    });
+                    redact_response(
+                        serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+                    )
                 }
-            })
-            .collect();
+                recon_search::graph::ShortestPathResult::Unreachable { unresolved_near } => {
+                    let hint = unresolved_near.map(|i| {
+                        format!(
+                            "unresolved boundary near {}",
+                            symbols[i as usize].qualified_name
+                        )
+                    });
+                    tool_error(
+                        ReconErrorCode::NotFound,
+                        "unreachable",
+                        Some(serde_json::json!({
+                            "src": params.0.src,
+                            "dst": params.0.dst,
+                            "max_hops": max_hops,
+                            "unresolved_hint": hint,
+                        })),
+                    )
+                }
+                recon_search::graph::ShortestPathResult::VisitCapHit => tool_error(
+                    ReconErrorCode::ResourceExhausted,
+                    "shortest-path search exceeded the visit cap (50 000 nodes); narrow src or dst",
+                    Some(serde_json::json!({
+                        "src": params.0.src,
+                        "dst": params.0.dst,
+                    })),
+                ),
+            }
+        })
+        .await
+    }
 
-        let view = ToolOutput::ReferenceDigest(RefDigestView {
-            symbol: params.0.symbol.as_str().into(),
-            total: valid.len(),
-            top_k,
-        });
-        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+    #[tool(
+        name = "code_callers",
+        description = "Transitive callers of `symbol` up to `depth` rings (default 1, max 6). Replaces depth-many chained code_find_refs calls. Returns one tier per ring with the symbols at that depth. Cycle-safe (each symbol emitted at its minimum depth only). Per-tier fan-out is capped at 50 to bound god-node responses; total-visit cap 50 000 nodes. When either cap fires `truncated: true` is set. Returns symbol identities (qname + path + line of definition), not call-site lines \u{2014} use code_find_refs for the lexical call-site digest. `symbol` accepts bare or fully qualified names; ambiguous bare names traverse from all matches. Output uses ReferenceDigest with the `tiers` field populated."
+    )]
+    async fn code_callers(&self, params: Parameters<CallersParams>) -> String {
+        self.instrumented("code_callers", async move {
+            self.callers_or_callees_inner(params, true).await
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_callees",
+        description = "Transitive callees of `symbol` up to `depth` rings (default 1, max 6). Mirror of code_callers \u{2014} what does this symbol call (directly and transitively)? Cycle-safe, per-tier fan-out capped at 50, total-visit cap 50 000. `truncated: true` when caps fire. Returns symbol identities (qname + path + line of definition), not call-site lines. Use this to understand what changing X *requires* you to also understand (callees) versus what changing X *risks breaking* (callers). Output uses ReferenceDigest with the `tiers` field populated."
+    )]
+    async fn code_callees(&self, params: Parameters<CallersParams>) -> String {
+        self.instrumented("code_callees", async move {
+            self.callers_or_callees_inner(params, false).await
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_context",
+        description = "One-shot bundle of everything an agent needs to reason about a symbol \u{2014} replaces the canonical 4-call understand-X loop (find_symbol \u{2192} read_symbol \u{2192} find_refs \u{2192} search-for-tests). Returns: (1) the target symbol's signature + doc + first ~20 body lines, (2) up to 5 immediate callers, (3) up to 5 immediate callees, (4) up to 3 referenced types, (5) up to 3 tests that exercise it. Honors `token_budget` (default 2000); drops sections under pressure in this order: tests \u{2192} callees \u{2192} types \u{2192} callers (skeleton+body always kept). Accepts a bare name or a fully qualified name. When ambiguous (multiple symbols share the bare name) returns an Error with kind 'invalid_params' listing up to 5 candidates; reissue with a qualified name. Output uses SymbolCard with the `context` envelope populated. Test detection in v0.3 is Rust-only (tests::* qname patterns and test_* / Test* function names); cross-language coverage is on the v0.4 roadmap."
+    )]
+    async fn code_context(&self, params: Parameters<ContextParams>) -> String {
+        self.instrumented("code_context", async move {
+            let symbols = self.cached_all_symbols();
+            let matches = Self::resolve_symbol_to_indices(&symbols, &params.0.symbol);
+            match matches.len() {
+                0 => {
+                    return tool_error(
+                        ReconErrorCode::NotFound,
+                        format!("symbol not found: {}", params.0.symbol),
+                        Some(serde_json::json!({ "symbol": params.0.symbol })),
+                    );
+                }
+                1 => {}
+                n => {
+                    let candidates: Vec<recon_core::shapes::SymbolHop> = matches
+                        .iter()
+                        .take(5)
+                        .map(|&i| Self::symbol_hop_for_idx(&symbols, i))
+                        .collect();
+                    return tool_error(
+                        ReconErrorCode::InvalidParams,
+                        format!(
+                            "ambiguous symbol: {n} candidates share the name '{}'; reissue with a fully qualified name",
+                            params.0.symbol
+                        ),
+                        Some(serde_json::json!({
+                            "symbol": params.0.symbol,
+                            "candidates": candidates,
+                        })),
+                    );
+                }
+            }
+
+            let target_idx = matches[0];
+            let target = symbols[target_idx as usize].clone();
+            let abs_path = match self.resolve_path(target.path.to_string_lossy().as_ref()) {
+                Ok(p) => p,
+                Err((code, msg)) => {
+                    return tool_error(
+                        code,
+                        msg,
+                        Some(serde_json::json!({ "path": target.path.to_string_lossy() })),
+                    );
+                }
+            };
+
+            let content = match tokio::fs::metadata(&abs_path).await {
+                Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
+                    return tool_error(
+                        ReconErrorCode::FileTooLarge,
+                        format!(
+                            "file too large ({} MB, max {} MB)",
+                            m.len() / (1024 * 1024),
+                            MAX_READ_FILE_SIZE / (1024 * 1024)
+                        ),
+                        Some(serde_json::json!({
+                            "path": target.path.to_string_lossy(),
+                            "size_bytes": m.len(),
+                        })),
+                    );
+                }
+                Err(e) => {
+                    return tool_error(
+                        ReconErrorCode::Io,
+                        format!("reading file metadata: {e}"),
+                        Some(serde_json::json!({ "path": target.path.to_string_lossy() })),
+                    );
+                }
+                Ok(_) => match tokio::fs::read_to_string(&abs_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return tool_error(
+                            ReconErrorCode::Io,
+                            format!("reading file: {e}"),
+                            Some(serde_json::json!({ "path": target.path.to_string_lossy() })),
+                        );
+                    }
+                },
+            };
+
+            let line_start = *target.line_range.start() as usize;
+            let line_end = *target.line_range.end() as usize;
+            let body_lines: Vec<&str> = content
+                .lines()
+                .skip(line_start.saturating_sub(1))
+                .take(line_end.saturating_sub(line_start.saturating_sub(1)).min(20))
+                .collect();
+            let body = body_lines.join("\n");
+
+            let graph = self.cached_call_graph();
+            let caller_caps = recon_search::graph::GraphCaps::default_for_callers(1);
+            let callers_result = graph.transitive_callers(&[target_idx], &caller_caps);
+            let callees_result = graph.transitive_callees(&[target_idx], &caller_caps);
+
+            let callers_hops: Vec<recon_core::shapes::SymbolHop> = callers_result
+                .tiers
+                .first()
+                .map(|t| {
+                    t.nodes
+                        .iter()
+                        .take(5)
+                        .map(|&i| Self::symbol_hop_for_idx(&symbols, i))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut all_callee_idxs: Vec<u32> = callees_result
+                .tiers
+                .first()
+                .map(|t| t.nodes.clone())
+                .unwrap_or_default();
+            let type_idxs: Vec<u32> = all_callee_idxs
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let k = symbols[i as usize].kind;
+                    matches!(
+                        k,
+                        recon_core::symbol::SymbolKind::Struct
+                            | recon_core::symbol::SymbolKind::Class
+                            | recon_core::symbol::SymbolKind::Trait
+                            | recon_core::symbol::SymbolKind::Enum
+                            | recon_core::symbol::SymbolKind::Type
+                            | recon_core::symbol::SymbolKind::Interface
+                    )
+                })
+                .take(3)
+                .collect();
+            let type_set: ahash::AHashSet<u32> = type_idxs.iter().copied().collect();
+            all_callee_idxs.retain(|i| !type_set.contains(i));
+            let callee_hops: Vec<recon_core::shapes::SymbolHop> = all_callee_idxs
+                .iter()
+                .take(5)
+                .map(|&i| Self::symbol_hop_for_idx(&symbols, i))
+                .collect();
+            let type_hops: Vec<recon_core::shapes::SymbolHop> = type_idxs
+                .iter()
+                .map(|&i| Self::symbol_hop_for_idx(&symbols, i))
+                .collect();
+
+            let test_caps = recon_search::graph::GraphCaps::default_for_callers(4);
+            let test_callers = graph.transitive_callers(&[target_idx], &test_caps);
+            let mut test_hops: Vec<recon_core::shapes::SymbolHop> = Vec::with_capacity(3);
+            'outer: for tier in &test_callers.tiers {
+                for &i in &tier.nodes {
+                    if Self::is_phase1_test_symbol(&symbols[i as usize]) {
+                        test_hops.push(Self::symbol_hop_for_idx(&symbols, i));
+                        if test_hops.len() >= 3 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+
+            let mut envelope = recon_core::shapes::ContextEnvelope {
+                callers: callers_hops,
+                callees: vec![],
+                types: vec![],
+                tests: vec![],
+                truncated: false,
+            };
+
+            let target_card_size = recon_search::tokens::estimate_tokens(&body)
+                + target
+                    .signature
+                    .as_deref()
+                    .map(recon_search::tokens::estimate_tokens)
+                    .unwrap_or(0)
+                + target
+                    .doc
+                    .as_deref()
+                    .map(recon_search::tokens::estimate_tokens)
+                    .unwrap_or(0);
+
+            let mut spent = target_card_size
+                + envelope
+                    .callers
+                    .iter()
+                    .map(|h| recon_search::tokens::estimate_tokens(&h.qualified_name))
+                    .sum::<usize>();
+            let budget = params.0.token_budget;
+
+            for hop in type_hops {
+                let est = recon_search::tokens::estimate_tokens(&hop.qualified_name) + 6;
+                if spent + est > budget {
+                    envelope.truncated = true;
+                    break;
+                }
+                spent += est;
+                envelope.types.push(hop);
+            }
+            for hop in callee_hops {
+                let est = recon_search::tokens::estimate_tokens(&hop.qualified_name) + 6;
+                if spent + est > budget {
+                    envelope.truncated = true;
+                    break;
+                }
+                spent += est;
+                envelope.callees.push(hop);
+            }
+            for hop in test_hops {
+                let est = recon_search::tokens::estimate_tokens(&hop.qualified_name) + 6;
+                if spent + est > budget {
+                    envelope.truncated = true;
+                    break;
+                }
+                spent += est;
+                envelope.tests.push(hop);
+            }
+
+            let parent_chain = Self::parent_chain_for(&symbols, target_idx);
+
+            let view = ToolOutput::SymbolCard(SymbolCardView {
+                path: (*target.path).clone(),
+                qualified_name: target.qualified_name.to_string(),
+                kind: target.kind,
+                signature: target.signature.as_deref().map(str::to_owned),
+                doc: target.doc.as_deref().map(str::to_owned),
+                body,
+                line_range: (*target.line_range.start(), *target.line_range.end()),
+                parent_chain,
+                callers: vec![],
+                callees: vec![],
+                context: Some(envelope),
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_impact",
+        description = "Blast radius of changing `symbol` \u{2014} transitive callers up to `depth` rings (default 4, max 6) plus tests that exercise it. Returns one tier per ring (production callers), a separate `tests` array for transitively-reaching test functions (Rust-only Phase-1 detector: tests::* qnames + test_* / Test* names), and `truncated: true` when fan-out caps fire. Use to answer 'what might break if I change X?' before refactoring. Per-tier fan-out cap 50, total-visit cap 50 000 \u{2014} a god-node query terminates with a marker rather than blowing up. Output uses ReferenceDigest with the `tiers` and `tests` fields populated."
+    )]
+    async fn code_impact(&self, params: Parameters<ImpactParams>) -> String {
+        self.instrumented("code_impact", async move {
+            let depth = params.0.depth;
+            if depth == 0 {
+                return tool_error(ReconErrorCode::InvalidParams, "depth must be >= 1", None);
+            }
+            let depth = depth.min(recon_search::graph::MAX_ALLOWED_DEPTH);
+            let symbols = self.cached_all_symbols();
+            let seeds = Self::resolve_symbol_to_indices(&symbols, &params.0.symbol);
+            if seeds.is_empty() {
+                return tool_error(
+                    ReconErrorCode::NotFound,
+                    format!("symbol not found: {}", params.0.symbol),
+                    Some(serde_json::json!({ "symbol": params.0.symbol })),
+                );
+            }
+            let graph = self.cached_call_graph();
+            let caps = recon_search::graph::GraphCaps::default_for_callers(depth);
+            let result = graph.transitive_callers(&seeds, &caps);
+
+            let mut tests: Vec<recon_core::shapes::SymbolHop> = Vec::new();
+            let mut seen_test_idx: ahash::AHashSet<u32> = ahash::AHashSet::new();
+            let prod_tiers: Vec<recon_core::shapes::RefTier> = result
+                .tiers
+                .iter()
+                .map(|t| {
+                    let mut prod_nodes: Vec<u32> = Vec::with_capacity(t.nodes.len());
+                    for &i in &t.nodes {
+                        if Self::is_phase1_test_symbol(&symbols[i as usize]) {
+                            if seen_test_idx.insert(i) {
+                                tests.push(Self::symbol_hop_for_idx(&symbols, i));
+                            }
+                        } else {
+                            prod_nodes.push(i);
+                        }
+                    }
+                    recon_core::shapes::RefTier {
+                        depth: t.depth,
+                        refs: prod_nodes
+                            .iter()
+                            .map(|&i| Self::symbol_hop_for_idx(&symbols, i))
+                            .collect(),
+                        truncated: t.truncated_at_cap,
+                    }
+                })
+                .collect();
+
+            let total: usize = prod_tiers.iter().map(|t| t.refs.len()).sum::<usize>() + tests.len();
+
+            let view = ToolOutput::ReferenceDigest(RefDigestView {
+                symbol: params.0.symbol.as_str().into(),
+                total,
+                top_k: vec![],
+                path: vec![],
+                tiers: prod_tiers,
+                truncated: result.truncated,
+                unresolved_hint: None,
+                tests,
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_subsystems",
+        description = "List the natural subsystems of the repo \u{2014} weakly-connected components of the reference graph. Each subsystem has an id (use with code_subsystem), the qualified-name of its highest-degree symbol (the 'hub'), the dominant directory, and a symbol count. Use to orient yourself before drilling in: subsystems separate cleanly along architectural lines (e.g. recon-search vs recon-storage) without you having to know the directory structure. Sorted by symbol count descending. `limit` caps the number returned (default 50). Output uses Skeleton with subsystems rendered as one line each. Phase 2 v0.3.x: connected components only. Future v0.4.x adds Leiden modularity-optimized clustering."
+    )]
+    async fn code_subsystems(&self, params: Parameters<SubsystemsParams>) -> String {
+        self.instrumented("code_subsystems", async move {
+            let symbols = self.cached_all_symbols();
+            let graph = self.cached_call_graph();
+            let comps = graph.connected_components();
+
+            let mut buckets: ahash::AHashMap<u32, Vec<u32>> = ahash::AHashMap::new();
+            for (i, &cid) in comps.iter().enumerate() {
+                buckets.entry(cid).or_default().push(i as u32);
+            }
+
+            let mut summaries: Vec<(u32, u32, u32, String, String)> =
+                Vec::with_capacity(buckets.len());
+            for (cid, members) in buckets {
+                let hub_idx = members
+                    .iter()
+                    .filter(|&&i| symbols[i as usize].parent_id.is_none())
+                    .max_by_key(|&&i| graph.in_degree(i) + graph.out_degree(i))
+                    .copied()
+                    .unwrap_or_else(|| members[0]);
+                let hub_qname = symbols[hub_idx as usize].qualified_name.to_string();
+                let mut dir_counts: ahash::AHashMap<String, u32> = ahash::AHashMap::new();
+                for &i in &members {
+                    let p = symbols[i as usize].path.to_string_lossy();
+                    let dir = p.split('/').take(3).collect::<Vec<_>>().join("/");
+                    *dir_counts.entry(dir).or_default() += 1;
+                }
+                let dominant_dir = dir_counts
+                    .into_iter()
+                    .max_by_key(|(_, c)| *c)
+                    .map(|(k, _)| k)
+                    .unwrap_or_default();
+                summaries.push((cid, members.len() as u32, hub_idx, hub_qname, dominant_dir));
+            }
+            summaries.sort_by_key(|s| std::cmp::Reverse(s.1));
+            summaries.truncate(params.0.limit);
+
+            let mut content = String::with_capacity(summaries.len() * 80);
+            content.push_str("# subsystems (id : count : hub : dir)\n");
+            for (cid, count, _hub_idx, hub_qname, dir) in &summaries {
+                content.push_str(&format!("{cid}\t{count}\t{hub_qname}\t{dir}\n"));
+            }
+
+            let view = ToolOutput::Skeleton(recon_core::shapes::SkeletonView {
+                path: None,
+                content: content.clone(),
+                token_estimate: recon_search::tokens::estimate_tokens(&content),
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_subsystem",
+        description = "Detailed view of one subsystem (from code_subsystems). Returns a skeleton-style summary of all symbols in the component \u{2014} qname, kind, file:line \u{2014} within `token_budget` tokens (default 1500). Use after code_subsystems to drill into a specific cluster without reading every file in the directory. Output uses Skeleton."
+    )]
+    async fn code_subsystem(&self, params: Parameters<SubsystemParams>) -> String {
+        self.instrumented("code_subsystem", async move {
+            let symbols = self.cached_all_symbols();
+            let graph = self.cached_call_graph();
+            let comps = graph.connected_components();
+            let target_id = params.0.id;
+
+            let mut members: Vec<u32> = comps
+                .iter()
+                .enumerate()
+                .filter(|(_, &cid)| cid == target_id)
+                .map(|(i, _)| i as u32)
+                .collect();
+            if members.is_empty() {
+                return tool_error(
+                    ReconErrorCode::NotFound,
+                    format!("subsystem not found: {target_id}"),
+                    Some(serde_json::json!({ "id": target_id })),
+                );
+            }
+            members.sort_by_key(|&i| std::cmp::Reverse(graph.in_degree(i) + graph.out_degree(i)));
+
+            let mut content = String::with_capacity(params.0.token_budget * 4);
+            let mut tokens: usize = 0;
+            for idx in members {
+                let s = &symbols[idx as usize];
+                let line = format!(
+                    "{}:{} {} {}",
+                    s.path.to_string_lossy(),
+                    s.line_range.start(),
+                    s.kind.label(),
+                    s.qualified_name
+                );
+                let est = recon_search::tokens::estimate_tokens(&line) + 1;
+                if tokens + est > params.0.token_budget {
+                    break;
+                }
+                content.push_str(&line);
+                content.push('\n');
+                tokens += est;
+            }
+
+            let view = ToolOutput::Skeleton(recon_core::shapes::SkeletonView {
+                path: None,
+                content,
+                token_estimate: tokens,
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_savings",
+        description = "Per-tool token-savings counter. Returns a tab-separated breakdown: tool, calls, response_tokens_emitted, baseline_tokens_avoided, tokens_saved, avg_latency_ms — plus an aggregate trailer. Lifetime totals persist across restarts via the meta table; session totals reset every server start. recon is model-agnostic, so we report tokens; convert against your provider's price sheet (Claude, GPT, Gemini, local — your rates, your math). Output uses Skeleton (header + one row per tool)."
+    )]
+    async fn code_savings(&self, _params: Parameters<SavingsParams>) -> String {
+        self.instrumented("code_savings", async move {
+            let mut content = String::from(
+                "# tool\tcalls\tresponse_tokens\tbaseline\ttokens_saved\tavg_latency_ms\n",
+            );
+            for (name, snapshot) in self.telemetry.per_tool_snapshots() {
+                if snapshot.calls == 0 {
+                    continue;
+                }
+                content.push_str(&format!(
+                    "{name}\t{calls}\t{resp}\t{base}\t{saved}\t{latency:.2}\n",
+                    name = name,
+                    calls = snapshot.calls,
+                    resp = snapshot.response_tokens,
+                    base = snapshot.baseline_tokens,
+                    saved = snapshot.tokens_saved(),
+                    latency = snapshot.avg_latency_ms(),
+                ));
+            }
+            // Aggregate trailer.
+            let agg = self.telemetry.aggregate();
+            content.push_str(&format!(
+                "# total\t{calls}\t{resp}\t{base}\t{saved}\t-\n",
+                calls = agg.calls,
+                resp = agg.response_tokens,
+                base = agg.baseline_tokens,
+                saved = agg.tokens_saved(),
+            ));
+
+            let view = ToolOutput::Skeleton(recon_core::shapes::SkeletonView {
+                path: None,
+                content: content.clone(),
+                token_estimate: recon_search::tokens::estimate_tokens(&content),
+            });
+            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        })
+        .await
     }
 
     #[tool(
@@ -1675,6 +2535,7 @@ impl ReconServer {
         description = "Search for text patterns. Modes: exact (default), regex, hybrid (BM25 + text fused via reciprocal rank fusion). Use instead of Grep for code search."
     )]
     async fn code_search(&self, params: Parameters<SearchParams>) -> String {
+        self.instrumented("code_search", async move {
         let paths = self.cached_file_paths();
 
         let abs_paths = self
@@ -1843,6 +2704,7 @@ impl ReconServer {
             .collect();
 
         redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
+            }).await
     }
 
     #[tool(
@@ -1850,63 +2712,70 @@ impl ReconServer {
         description = "List indexed source files with language, line count, and top symbols. Use instead of Glob when you need structured file listings. Supports language filter."
     )]
     async fn code_list(&self, params: Parameters<ListParams>) -> String {
-        // Single query for all files + symbol counts + top symbols
-        let summaries = self.read_pool.file_symbol_summaries().unwrap_or_default();
+        self.instrumented("code_list", async move {
+            // Single query for all files + symbol counts + top symbols
+            let summaries = self.read_pool.file_symbol_summaries().unwrap_or_default();
 
-        // Apply filters in memory
-        let filter_parsed = params
-            .0
-            .filter
-            .as_deref()
-            .filter(|f| !f.is_empty())
-            .and_then(|f| filters::parse_filter(f).ok());
+            // Apply filters in memory
+            let filter_parsed = params
+                .0
+                .filter
+                .as_deref()
+                .filter(|f| !f.is_empty())
+                .and_then(|f| filters::parse_filter(f).ok());
 
-        // Resolve git-modified paths if needed (for code_list paths are relative)
-        let git_paths = filter_parsed.as_ref().and_then(|pf| {
-            if pf.git_modified_only {
-                recon_indexer::git::status_paths(&self.repo_root)
-                    .ok()
-                    .map(|abs_paths| {
-                        abs_paths
-                            .into_iter()
-                            .filter_map(|p| p.strip_prefix(&self.repo_root).ok().map(PathBuf::from))
-                            .collect::<Vec<_>>()
-                    })
-            } else {
-                None
-            }
-        });
-
-        let mut entries: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
-        for (path, sym_count, top_syms) in &summaries {
-            if let Some(ref pf) = filter_parsed {
-                if filters::apply_filter(std::slice::from_ref(path), pf, git_paths.as_deref())
-                    .is_empty()
-                {
-                    continue;
+            // Resolve git-modified paths if needed (for code_list paths are relative)
+            let git_paths = filter_parsed.as_ref().and_then(|pf| {
+                if pf.git_modified_only {
+                    recon_indexer::git::status_paths(&self.repo_root)
+                        .ok()
+                        .map(|abs_paths| {
+                            abs_paths
+                                .into_iter()
+                                .filter_map(|p| {
+                                    p.strip_prefix(&self.repo_root).ok().map(PathBuf::from)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                } else {
+                    None
                 }
-            }
-            let lang = Language::from_path(path);
-            if let Some(lang_filter) = &params.0.lang {
-                let filter_lang = Language::from_extension(lang_filter);
-                if filter_lang != Language::Unknown && lang != filter_lang {
-                    continue;
+            });
+
+            let mut entries: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
+            for (path, sym_count, top_syms) in &summaries {
+                if let Some(ref pf) = filter_parsed {
+                    if filters::apply_filter(std::slice::from_ref(path), pf, git_paths.as_deref())
+                        .is_empty()
+                    {
+                        continue;
+                    }
                 }
-            }
-            if let Some(glob_pat) = &params.0.glob {
-                let path_str = path.to_string_lossy();
-                if !path_str.contains(glob_pat.trim_matches('*')) {
-                    continue;
+                let lang = Language::from_path(path);
+                if let Some(lang_filter) = &params.0.lang {
+                    let filter_lang = Language::from_extension(lang_filter);
+                    if filter_lang != Language::Unknown && lang != filter_lang {
+                        continue;
+                    }
                 }
+                if let Some(glob_pat) = &params.0.glob {
+                    let path_str = path.to_string_lossy();
+                    if !path_str.contains(glob_pat.trim_matches('*')) {
+                        continue;
+                    }
+                }
+
+                entries.push(serde_json::json!({
+                    "path": path.to_string_lossy(), "lang": lang.name(),
+                    "symbol_count": sym_count, "top_symbols": top_syms,
+                }));
             }
 
-            entries.push(serde_json::json!({
-                "path": path.to_string_lossy(), "lang": lang.name(),
-                "symbol_count": sym_count, "top_symbols": top_syms,
-            }));
-        }
-
-        redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
+            redact_response(
+                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+            )
+        })
+        .await
     }
 
     #[tool(
@@ -1914,89 +2783,93 @@ impl ReconServer {
         description = "Generate a ranked overview of the most important symbols in the repo. Uses personalized PageRank over the reference graph with Aider-style edge weights. Output fits within a token budget (default 2000). Best first tool to call for orientation."
     )]
     async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
-        let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
-        let budget = params.0.token_budget;
+        self.instrumented("code_repo_map", async move {
+            let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
+            let budget = params.0.token_budget;
 
-        // All reads go through lock-free cached accessors
-        let (all_symbols, all_refs, cache_key) = {
-            // Check cache for unfocused maps
-            if focus_files.is_empty() {
-                let last_idx = self.read_pool.max_indexed_at().unwrap_or(0);
-                let key = format!("map_cache:{}:{}", last_idx, budget);
-                if let Ok(Some(cached)) = self.read_pool.get_meta(&key) {
-                    return cached;
+            // All reads go through lock-free cached accessors
+            let (all_symbols, all_refs, cache_key) = {
+                // Check cache for unfocused maps
+                if focus_files.is_empty() {
+                    let last_idx = self.read_pool.max_indexed_at().unwrap_or(0);
+                    let key = format!("map_cache:{}:{}", last_idx, budget);
+                    if let Ok(Some(cached)) = self.read_pool.get_meta(&key) {
+                        return cached;
+                    }
+                    let syms = self.cached_all_symbols();
+                    let refs = self.cached_all_refs();
+                    (syms, refs, Some(key))
+                } else {
+                    let syms = self.cached_all_symbols();
+                    let refs = self.cached_all_refs();
+                    (syms, refs, None)
                 }
-                let syms = self.cached_all_symbols();
-                let refs = self.cached_all_refs();
-                (syms, refs, Some(key))
+            };
+
+            // Compute focus indices if focused
+            let focus_indices: Vec<usize> = if !focus_files.is_empty() {
+                let focus_set: std::collections::HashSet<&str> =
+                    focus_files.iter().map(|s| s.as_str()).collect();
+                all_symbols
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| {
+                        let p = s.path.to_string_lossy();
+                        focus_set.iter().any(|f| p.contains(f))
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
             } else {
-                let syms = self.cached_all_symbols();
-                let refs = self.cached_all_refs();
-                (syms, refs, None)
-            }
-        };
+                vec![]
+            };
 
-        // Compute focus indices if focused
-        let focus_indices: Vec<usize> = if !focus_files.is_empty() {
-            let focus_set: std::collections::HashSet<&str> =
-                focus_files.iter().map(|s| s.as_str()).collect();
-            all_symbols
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    let p = s.path.to_string_lossy();
-                    focus_set.iter().any(|f| p.contains(f))
+            // PageRank (50-iter power iteration over the full ref graph) and the
+            // subsequent render walk are both CPU-bound. On a cold call they can
+            // run 50-200 ms, long enough to visibly stall any other tool call
+            // landing on the same tokio worker thread. Offload to the blocking
+            // pool; the `all_symbols`/`all_refs` clones are Arc bumps, not deep
+            // copies.
+            let content = {
+                let all_symbols = all_symbols.clone();
+                let all_refs = all_refs.clone();
+                tokio::task::spawn_blocking(move || {
+                    let ranked = pagerank::pagerank(
+                        &all_symbols,
+                        &all_refs,
+                        &focus_indices,
+                        0.85,
+                        pagerank::DEFAULT_MAX_ITERATIONS,
+                    );
+                    pagerank::render_repo_map(&all_symbols, &ranked, budget)
                 })
-                .map(|(i, _)| i)
-                .collect()
-        } else {
-            vec![]
-        };
+                .await
+                .unwrap_or_default()
+            };
 
-        // PageRank (50-iter power iteration over the full ref graph) and the
-        // subsequent render walk are both CPU-bound. On a cold call they can
-        // run 50-200 ms, long enough to visibly stall any other tool call
-        // landing on the same tokio worker thread. Offload to the blocking
-        // pool; the `all_symbols`/`all_refs` clones are Arc bumps, not deep
-        // copies.
-        let content = {
-            let all_symbols = all_symbols.clone();
-            let all_refs = all_refs.clone();
-            tokio::task::spawn_blocking(move || {
-                let ranked = pagerank::pagerank(
-                    &all_symbols,
-                    &all_refs,
-                    &focus_indices,
-                    0.85,
-                    pagerank::DEFAULT_MAX_ITERATIONS,
-                );
-                pagerank::render_repo_map(&all_symbols, &ranked, budget)
-            })
-            .await
-            .unwrap_or_default()
-        };
+            let token_est = recon_search::tokens::estimate_tokens(&content);
+            let view = ToolOutput::Skeleton(SkeletonView {
+                path: None,
+                content,
+                token_estimate: token_est,
+            });
+            let result = redact_response(
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            );
 
-        let token_est = recon_search::tokens::estimate_tokens(&content);
-        let view = ToolOutput::Skeleton(SkeletonView {
-            path: None,
-            content,
-            token_estimate: token_est,
-        });
-        let result =
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")));
-
-        // Cache unfocused results (write lock only for cache update)
-        if let Some(key) = cache_key {
-            let store = self.write_store.lock();
-            if let Err(e) = store.delete_meta_prefix("map_cache:") {
-                warn!("failed to clear map cache: {e}");
+            // Cache unfocused results (write lock only for cache update)
+            if let Some(key) = cache_key {
+                let store = self.write_store.lock();
+                if let Err(e) = store.delete_meta_prefix("map_cache:") {
+                    warn!("failed to clear map cache: {e}");
+                }
+                if let Err(e) = store.set_meta(&key, &result) {
+                    warn!("failed to write map cache: {e}");
+                }
             }
-            if let Err(e) = store.set_meta(&key, &result) {
-                warn!("failed to write map cache: {e}");
-            }
-        }
 
-        result
+            result
+        })
+        .await
     }
 
     #[tool(
@@ -2004,6 +2877,7 @@ impl ReconServer {
         description = "Search for patterns in string literals and comments. Finds SQL fragments, i18n keys, log messages that structural search misses."
     )]
     async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
+        self.instrumented("code_find_strings", async move {
         let paths = self.cached_file_paths();
 
         let abs_paths = self
@@ -2026,6 +2900,7 @@ impl ReconServer {
             .collect();
 
         redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
+            }).await
     }
 
     #[tool(
@@ -2033,6 +2908,7 @@ impl ReconServer {
         description = "Search for multiple patterns at once. More efficient than multiple code_search calls. Returns results grouped by pattern."
     )]
     async fn code_multi_find(&self, params: Parameters<MultiFindParams>) -> String {
+        self.instrumented("code_multi_find", async move {
         let paths = self.cached_file_paths();
 
         let abs_paths = self
@@ -2059,6 +2935,7 @@ impl ReconServer {
             .collect();
 
         redact_response(serde_json::to_string(&results).unwrap_or_else(|e| format!("Error: {e}")))
+            }).await
     }
 
     #[tool(
@@ -2066,143 +2943,147 @@ impl ReconServer {
         description = "Trigger a full re-index of the repository. Use when you suspect the index is stale or after major file changes outside the editor."
     )]
     async fn code_reindex(&self, params: Parameters<ReindexParams>) -> String {
-        let force = params.0.force;
+        self.instrumented("code_reindex", async move {
+            let force = params.0.force;
 
-        // Clear cache under short write lock
-        {
-            let store = self.write_store.lock();
-            let _ = store.delete_meta_prefix("map_cache:");
-        }
+            // Clear cache under short write lock
+            {
+                let store = self.write_store.lock();
+                let _ = store.delete_meta_prefix("map_cache:");
+            }
 
-        let write_store = self.write_store.clone();
-        let tantivy = self.tantivy.clone();
-        let tantivy_writer = self.tantivy_writer.clone();
-        let repo_root = self.repo_root.clone();
+            let write_store = self.write_store.clone();
+            let tantivy = self.tantivy.clone();
+            let tantivy_writer = self.tantivy_writer.clone();
+            let repo_root = self.repo_root.clone();
 
-        // Heavy work runs on a blocking thread — parse locklessly, write in chunks
-        let result = tokio::task::spawn_blocking(move || {
-            use recon_indexer::indexer;
-            use recon_indexer::walker;
+            // Heavy work runs on a blocking thread — parse locklessly, write in chunks
+            let result = tokio::task::spawn_blocking(move || {
+                use recon_indexer::indexer;
+                use recon_indexer::walker;
 
-            if force {
-                // Full reindex: clear existing data first.
-                // One bulk transaction instead of N per-file deletes (was a
-                // multi-second hot spot on large repos due to per-file WAL
-                // fsyncs).
-                info!("force reindex: clearing existing data");
-                {
-                    let store = write_store.lock();
-                    if let Err(e) = store.delete_all_files_cascade() {
-                        warn!("force reindex: bulk clear failed: {e}");
-                    }
-                    if let Some(ref mut writer) = tantivy_writer.lock().as_mut() {
-                        let _ = tantivy.commit(writer);
-                    }
-                }
-
-                // Full walk + parse (force path)
-                let paths = walker::walk_repo(&repo_root);
-                let pools =
-                    std::sync::Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
-                let parsed: Vec<indexer::ParsedFile> = paths
-                    .par_iter()
-                    .filter_map(|path| {
-                        let content = std::fs::read(path).ok()?;
-                        if walker::is_generated_content(&content) {
-                            return None;
+                if force {
+                    // Full reindex: clear existing data first.
+                    // One bulk transaction instead of N per-file deletes (was a
+                    // multi-second hot spot on large repos due to per-file WAL
+                    // fsyncs).
+                    info!("force reindex: clearing existing data");
+                    {
+                        let store = write_store.lock();
+                        if let Err(e) = store.delete_all_files_cascade() {
+                            warn!("force reindex: bulk clear failed: {e}");
                         }
-                        let hash = recon_storage::hash::blake3_bytes(&content);
-                        let mtime = indexer::mtime_of(path);
-                        indexer::parse_file_with_content(
-                            &content, path, &repo_root, &pools, hash, mtime,
-                        )
-                    })
-                    .collect();
+                        if let Some(ref mut writer) = tantivy_writer.lock().as_mut() {
+                            let _ = tantivy.commit(writer);
+                        }
+                    }
 
-                let mut files_indexed = 0usize;
-                let mut errors = 0usize;
-                const CHUNK_SIZE: usize = 500;
-
-                for chunk in parsed.chunks(CHUNK_SIZE) {
-                    let bulk: Vec<_> = chunk
-                        .iter()
-                        .map(|p| (&p.meta, p.symbols.as_slice(), p.refs.as_slice()))
+                    // Full walk + parse (force path)
+                    let paths = walker::walk_repo(&repo_root);
+                    let pools = std::sync::Arc::new(LanguagePools::new(
+                        rayon::current_num_threads().max(4),
+                    ));
+                    let parsed: Vec<indexer::ParsedFile> = paths
+                        .par_iter()
+                        .filter_map(|path| {
+                            let content = std::fs::read(path).ok()?;
+                            if walker::is_generated_content(&content) {
+                                return None;
+                            }
+                            let hash = recon_storage::hash::blake3_bytes(&content);
+                            let mtime = indexer::mtime_of(path);
+                            indexer::parse_file_with_content(
+                                &content, path, &repo_root, &pools, hash, mtime,
+                            )
+                        })
                         .collect();
-                    let store = write_store.lock();
-                    match store.batch_index_files(&bulk) {
-                        Ok(()) => files_indexed += chunk.len(),
-                        Err(e) => {
-                            warn!(chunk_size = chunk.len(), "reindex store error: {e}");
-                            errors += chunk.len();
-                        }
-                    }
-                }
 
-                // Tantivy indexing
-                {
-                    let mut tw = tantivy_writer.lock();
-                    if let Some(ref mut writer) = *tw {
-                        let mut docs = 0usize;
-                        for pf in &parsed {
-                            let _ = tantivy.index_symbols(writer, &pf.meta.path, &pf.symbols);
-                            docs += pf.symbols.len();
-                            if docs >= 20_000 {
-                                let _ = tantivy.commit(writer);
-                                docs = 0;
+                    let mut files_indexed = 0usize;
+                    let mut errors = 0usize;
+                    const CHUNK_SIZE: usize = 500;
+
+                    for chunk in parsed.chunks(CHUNK_SIZE) {
+                        let bulk: Vec<_> = chunk
+                            .iter()
+                            .map(|p| (&p.meta, p.symbols.as_slice(), p.refs.as_slice()))
+                            .collect();
+                        let store = write_store.lock();
+                        match store.batch_index_files(&bulk) {
+                            Ok(()) => files_indexed += chunk.len(),
+                            Err(e) => {
+                                warn!(chunk_size = chunk.len(), "reindex store error: {e}");
+                                errors += chunk.len();
                             }
                         }
-                        let _ = tantivy.commit(writer);
+                    }
+
+                    // Tantivy indexing
+                    {
+                        let mut tw = tantivy_writer.lock();
+                        if let Some(ref mut writer) = *tw {
+                            let mut docs = 0usize;
+                            for pf in &parsed {
+                                let _ = tantivy.index_symbols(writer, &pf.meta.path, &pf.symbols);
+                                docs += pf.symbols.len();
+                                if docs >= 20_000 {
+                                    let _ = tantivy.commit(writer);
+                                    docs = 0;
+                                }
+                            }
+                            let _ = tantivy.commit(writer);
+                        }
+                    }
+
+                    let total_symbols = write_store.lock().symbol_count().unwrap_or(0);
+
+                    serde_json::json!({
+                        "status": "ok",
+                        "files_indexed": files_indexed,
+                        "total_symbols": total_symbols,
+                        "errors": errors,
+                        "force": true,
+                    })
+                } else {
+                    // Incremental reindex: use git diff (or Merkle fallback) to only re-parse changed files
+                    let store = write_store.lock();
+                    let result = indexer::index_repo_incremental(
+                        &store,
+                        Some(&tantivy),
+                        &repo_root,
+                        tantivy_writer.lock().as_mut(),
+                    );
+                    match result {
+                        Ok(stats) => {
+                            serde_json::json!({
+                                "status": "ok",
+                                "files_indexed": stats.files_indexed,
+                                "total_symbols": stats.total_symbols,
+                                "errors": stats.errors,
+                                "force": false,
+                            })
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "status": "error",
+                                "error": format!("{e}"),
+                                "force": false,
+                            })
+                        }
                     }
                 }
+            })
+            .await;
 
-                let total_symbols = write_store.lock().symbol_count().unwrap_or(0);
-
-                serde_json::json!({
-                    "status": "ok",
-                    "files_indexed": files_indexed,
-                    "total_symbols": total_symbols,
-                    "errors": errors,
-                    "force": true,
-                })
-            } else {
-                // Incremental reindex: use git diff (or Merkle fallback) to only re-parse changed files
-                let store = write_store.lock();
-                let result = indexer::index_repo_incremental(
-                    &store,
-                    Some(&tantivy),
-                    &repo_root,
-                    tantivy_writer.lock().as_mut(),
-                );
-                match result {
-                    Ok(stats) => {
-                        serde_json::json!({
-                            "status": "ok",
-                            "files_indexed": stats.files_indexed,
-                            "total_symbols": stats.total_symbols,
-                            "errors": stats.errors,
-                            "force": false,
-                        })
-                    }
-                    Err(e) => {
-                        serde_json::json!({
-                            "status": "error",
-                            "error": format!("{e}"),
-                            "force": false,
-                        })
-                    }
+            match result {
+                Ok(stats) => {
+                    // Refresh path cache after reindex.
+                    self.refresh_caches();
+                    serde_json::to_string(&stats).unwrap_or_else(|e| format!("Error: {e}"))
                 }
+                Err(e) => format!("Reindex failed: {e}"),
             }
         })
-        .await;
-
-        match result {
-            Ok(stats) => {
-                // Refresh path cache after reindex.
-                self.refresh_caches();
-                serde_json::to_string(&stats).unwrap_or_else(|e| format!("Error: {e}"))
-            }
-            Err(e) => format!("Reindex failed: {e}"),
-        }
+        .await
     }
 
     #[tool(
@@ -2210,30 +3091,107 @@ impl ReconServer {
         description = "Report index health: total files, symbols, last indexed time, Tantivy doc count. Use to check if the index is fresh and complete."
     )]
     async fn code_stats(&self, _params: Parameters<StatsParams>) -> String {
-        let mut file_count = self.cached_file_count.load(Ordering::Relaxed);
-        if file_count == 0 {
-            // Cache cold — get actual count.
-            file_count = self.read_pool.file_count().unwrap_or(0);
-            self.cached_file_count.store(file_count, Ordering::Relaxed);
-        }
-        let symbol_count = self.read_pool.symbol_count().unwrap_or(0);
-        let tantivy_docs = self.tantivy.doc_count();
-        let schema_version = self
-            .read_pool
-            .get_meta("schema_version")
-            .unwrap_or(None)
-            .unwrap_or_default();
+        self.instrumented("code_stats", async move {
+            let mut file_count = self.cached_file_count.load(Ordering::Relaxed);
+            if file_count == 0 {
+                // Cache cold — get actual count.
+                file_count = self.read_pool.file_count().unwrap_or(0);
+                self.cached_file_count.store(file_count, Ordering::Relaxed);
+            }
+            let symbol_count = self.read_pool.symbol_count().unwrap_or(0);
+            let tantivy_docs = self.tantivy.doc_count();
+            let schema_version = self
+                .read_pool
+                .get_meta("schema_version")
+                .unwrap_or(None)
+                .unwrap_or_default();
 
-        redact_response(
-            serde_json::to_string(&serde_json::json!({
-                "files_indexed": file_count,
-                "total_symbols": symbol_count,
-                "tantivy_docs": tantivy_docs,
-                "schema_version": schema_version,
-                "repo_root": self.repo_root.to_string_lossy(),
-            }))
-            .unwrap_or_else(|e| format!("Error: {e}")),
-        )
+            // Centrality top-N from the cached call graph. Degree-based for
+            // v0.3.x; PageRank/betweenness columns deferred to v0.4.x with
+            // the index-time pass.
+            let symbols = self.cached_all_symbols();
+            let graph = self.cached_call_graph();
+            const TOP_N: usize = 20;
+            let mut by_in_degree: Vec<(u32, u32)> = (0..graph.n as u32)
+                .filter(|&i| {
+                    symbols
+                        .get(i as usize)
+                        .is_some_and(|s| s.parent_id.is_none())
+                })
+                .map(|i| (i, graph.in_degree(i)))
+                .filter(|(_, d)| *d > 0)
+                .collect();
+            by_in_degree.sort_by_key(|x| std::cmp::Reverse(x.1));
+            by_in_degree.truncate(TOP_N);
+            let top_in_degree: Vec<serde_json::Value> = by_in_degree
+                .iter()
+                .map(|(idx, deg)| {
+                    let s = &symbols[*idx as usize];
+                    serde_json::json!({
+                        "qualified_name": s.qualified_name.as_str(),
+                        "kind": s.kind.label(),
+                        "path": s.path.to_string_lossy(),
+                        "line": s.line_range.start(),
+                        "in_degree": deg,
+                    })
+                })
+                .collect();
+
+            let mut by_out_degree: Vec<(u32, u32)> = (0..graph.n as u32)
+                .filter(|&i| {
+                    symbols
+                        .get(i as usize)
+                        .is_some_and(|s| s.parent_id.is_none())
+                })
+                .map(|i| (i, graph.out_degree(i)))
+                .filter(|(_, d)| *d > 0)
+                .collect();
+            by_out_degree.sort_by_key(|x| std::cmp::Reverse(x.1));
+            by_out_degree.truncate(TOP_N);
+            let top_out_degree: Vec<serde_json::Value> = by_out_degree
+                .iter()
+                .map(|(idx, deg)| {
+                    let s = &symbols[*idx as usize];
+                    serde_json::json!({
+                        "qualified_name": s.qualified_name.as_str(),
+                        "kind": s.kind.label(),
+                        "path": s.path.to_string_lossy(),
+                        "line": s.line_range.start(),
+                        "out_degree": deg,
+                    })
+                })
+                .collect();
+
+            // Telemetry block — session uptime + lifetime cumulative.
+            let agg = self.telemetry.aggregate();
+            let uptime = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                .saturating_sub(self.telemetry.session_started_at);
+            let telemetry_block = serde_json::json!({
+                "session_uptime_seconds": uptime,
+                "calls": agg.calls,
+                "response_tokens": agg.response_tokens,
+                "baseline_tokens_avoided": agg.baseline_tokens,
+                "tokens_saved": agg.tokens_saved(),
+            });
+
+            redact_response(
+                serde_json::to_string(&serde_json::json!({
+                    "files_indexed": file_count,
+                    "total_symbols": symbol_count,
+                    "tantivy_docs": tantivy_docs,
+                    "schema_version": schema_version,
+                    "repo_root": self.repo_root.to_string_lossy(),
+                    "top_in_degree": top_in_degree,
+                    "top_out_degree": top_out_degree,
+                    "telemetry": telemetry_block,
+                }))
+                .unwrap_or_else(|e| format!("Error: {e}")),
+            )
+        })
+        .await
     }
 }
 
@@ -3093,5 +4051,467 @@ mod tests {
 
         // Delete is idempotent — a second call on a missing file is not an error.
         crate::license::delete_credentials(dir).unwrap();
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 1+2 graph-traversal tool tests. Use a type-graph fixture
+    // (struct-field type refs) which the parser walks reliably across
+    // all languages — guaranteeing edges in the cached call graph.
+    // ----------------------------------------------------------------
+
+    async fn make_graph_fixture() -> (ReconServer, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs_write(
+            root.join("src/lib.rs"),
+            "pub mod auth;\npub mod session;\npub mod handler;\n",
+        );
+        fs_write(
+            root.join("src/auth.rs"),
+            "pub struct Token { pub value: u64 }\npub struct User { pub id: u64 }\n",
+        );
+        fs_write(
+            root.join("src/session.rs"),
+            "pub struct Session { pub user: crate::auth::User, pub start: u64 }\n",
+        );
+        fs_write(
+            root.join("src/handler.rs"),
+            "pub struct Handler { pub token: crate::auth::Token, pub session: crate::session::Session }\n",
+        );
+        let db_path = root.join(".recon").join("recon.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let store = Store::open(&db_path).unwrap();
+        let tantivy_dir = root.join(".recon").join("tantivy");
+        std::fs::create_dir_all(&tantivy_dir).unwrap();
+        let tantivy = TantivyBackend::open(&tantivy_dir).unwrap();
+        let server = ReconServer::new(root.to_path_buf(), store, tantivy).unwrap();
+        server.index_repo().await.unwrap();
+        (server, tmp)
+    }
+
+    #[tokio::test]
+    async fn graph_fixture_has_refs() {
+        // Sanity: confirm the parser+storage pipeline produces edges
+        // for the graph fixture. Fails first if the parity work
+        // regresses.
+        let (server, _tmp) = make_graph_fixture().await;
+        let refs = server.cached_all_refs();
+        assert!(
+            refs.len() > 4,
+            "graph fixture should produce >4 refs, got {}",
+            refs.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn code_path_handler_to_user_via_session() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_path(Parameters(crate::tools::PathParams {
+                src: "Handler".into(),
+                dst: "User".into(),
+                max_hops: 8,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            json["shape"].as_str(),
+            Some("ReferenceDigest"),
+            "expected ReferenceDigest, got: {result}"
+        );
+        let path = json["path"].as_array().expect("path field present");
+        let qnames: Vec<&str> = path
+            .iter()
+            .filter_map(|h| h["qualified_name"].as_str())
+            .collect();
+        assert_eq!(qnames.first().copied(), Some("Handler"));
+        assert_eq!(qnames.last().copied(), Some("User"));
+        assert!(qnames.contains(&"Session"));
+    }
+
+    #[tokio::test]
+    async fn code_path_unreachable_is_error() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_path(Parameters(crate::tools::PathParams {
+                src: "User".into(),
+                dst: "Handler".into(),
+                max_hops: 8,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Error"));
+        assert_eq!(json["kind"].as_str(), Some("not_found"));
+        assert_eq!(json["message"].as_str(), Some("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn code_path_rejects_max_hops_zero() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_path(Parameters(crate::tools::PathParams {
+                src: "Handler".into(),
+                dst: "User".into(),
+                max_hops: 0,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Error"));
+        assert_eq!(json["kind"].as_str(), Some("invalid_params"));
+    }
+
+    #[tokio::test]
+    async fn code_callers_finds_handler_uses_token() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_callers(Parameters(crate::tools::CallersParams {
+                symbol: "Token".into(),
+                depth: 1,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("ReferenceDigest"));
+        let tiers = json["tiers"].as_array().expect("tiers array");
+        let qnames: Vec<&str> = tiers
+            .iter()
+            .flat_map(|t| {
+                t["refs"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|r| r["qualified_name"].as_str())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(
+            qnames.contains(&"Handler"),
+            "expected Handler in Token's callers, got: {qnames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_callees_layered_depth_2() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_callees(Parameters(crate::tools::CallersParams {
+                symbol: "Handler".into(),
+                depth: 2,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let tiers = json["tiers"].as_array().expect("tiers array");
+        let qnames: Vec<&str> = tiers
+            .iter()
+            .flat_map(|t| {
+                t["refs"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|r| r["qualified_name"].as_str())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        // Through Session, depth-2 should reach User.
+        assert!(
+            qnames.contains(&"User"),
+            "depth-2 callees of Handler should reach User: {qnames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_callers_rejects_depth_zero() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_callers(Parameters(crate::tools::CallersParams {
+                symbol: "Token".into(),
+                depth: 0,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Error"));
+        assert_eq!(json["kind"].as_str(), Some("invalid_params"));
+    }
+
+    #[tokio::test]
+    async fn code_context_returns_envelope() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_context(Parameters(crate::tools::ContextParams {
+                symbol: "Handler".into(),
+                token_budget: 2000,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("SymbolCard"));
+        assert_eq!(json["qualified_name"].as_str(), Some("Handler"));
+        let context = json
+            .get("context")
+            .expect("context envelope must be present");
+        let types = context["types"].as_array().cloned().unwrap_or_default();
+        let type_qnames: Vec<&str> = types
+            .iter()
+            .filter_map(|c| c["qualified_name"].as_str())
+            .collect();
+        assert!(
+            type_qnames.contains(&"Token") || type_qnames.contains(&"Session"),
+            "expected Token or Session in Handler's referenced types: {type_qnames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_context_unknown_symbol_is_not_found() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_context(Parameters(crate::tools::ContextParams {
+                symbol: "no_such_function_anywhere".into(),
+                token_budget: 2000,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Error"));
+        assert_eq!(json["kind"].as_str(), Some("not_found"));
+    }
+
+    #[tokio::test]
+    async fn code_impact_reports_callers() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_impact(Parameters(crate::tools::ImpactParams {
+                symbol: "User".into(),
+                depth: 4,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("ReferenceDigest"));
+        let tiers = json["tiers"].as_array().unwrap_or(&Vec::new()).clone();
+        let qnames: Vec<&str> = tiers
+            .iter()
+            .flat_map(|t| {
+                t["refs"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|r| r["qualified_name"].as_str())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(
+            qnames.contains(&"Session") || qnames.contains(&"Handler"),
+            "expected Session or Handler in impact: {qnames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_subsystems_lists_components() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_subsystems(Parameters(crate::tools::SubsystemsParams { limit: 50 }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Skeleton"));
+        let content = json["content"].as_str().expect("content").to_string();
+        assert!(content.contains("# subsystems"));
+        let body_lines = content.lines().filter(|l| !l.starts_with('#')).count();
+        assert!(body_lines > 0, "no subsystem rows: {content}");
+    }
+
+    #[tokio::test]
+    async fn code_subsystem_unknown_id_is_not_found() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let result = server
+            .code_subsystem(Parameters(crate::tools::SubsystemParams {
+                id: 99_999,
+                token_budget: 1500,
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Error"));
+        assert_eq!(json["kind"].as_str(), Some("not_found"));
+    }
+
+    #[tokio::test]
+    async fn code_savings_reports_per_tool_breakdown() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        // Run a known tool a few times to populate counters.
+        for _ in 0..3 {
+            let _ = server
+                .code_outline(Parameters(crate::tools::OutlineParams {
+                    path: "src/auth.rs".into(),
+                }))
+                .await;
+        }
+        let result = server
+            .code_savings(Parameters(crate::tools::SavingsParams {}))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Skeleton"));
+        let content = json["content"].as_str().expect("content");
+        assert!(
+            content.contains("code_outline"),
+            "code_savings should list code_outline after 3 calls: {content}"
+        );
+        // Aggregate trailer must be present.
+        assert!(
+            content.contains("# total"),
+            "missing aggregate trailer: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_stats_includes_telemetry_block() {
+        let (server, _tmp) = make_graph_fixture().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        // Trigger a call to populate counters.
+        let _ = server
+            .code_outline(Parameters(crate::tools::OutlineParams {
+                path: "src/auth.rs".into(),
+            }))
+            .await;
+        let result = server
+            .code_stats(Parameters(crate::tools::StatsParams {}))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let tel = json
+            .get("telemetry")
+            .expect("telemetry block must be present in code_stats");
+        assert!(
+            tel["calls"].as_u64().unwrap_or(0) > 0,
+            "telemetry.calls should be > 0 after at least one tool call: {tel}"
+        );
+        assert!(json["top_in_degree"].is_array());
+        assert!(json["top_out_degree"].is_array());
+    }
+
+    // ──── Shutdown-request notification ────
+    //
+    // The periodic license-revalidation task fires `request_shutdown()`
+    // when the worker rejects the key. The serve loops `select!` on
+    // `await_shutdown_request()`. These two need to compose: a
+    // `request_shutdown()` call in one task must wake any
+    // `await_shutdown_request()` in another within bounded latency.
+
+    #[tokio::test]
+    async fn await_shutdown_request_returns_after_request_shutdown() {
+        let server = make_test_server();
+        let s2 = server.clone();
+        let waiter = tokio::spawn(async move { s2.await_shutdown_request().await });
+        // Yield once so the waiter actually parks on `notified()`.
+        tokio::task::yield_now().await;
+        server.request_shutdown();
+        // Bounded await — without the notify wakeup the test would hang.
+        let res = tokio::time::timeout(std::time::Duration::from_secs(2), waiter).await;
+        assert!(
+            res.is_ok(),
+            "request_shutdown must wake await_shutdown_request"
+        );
+        assert!(res.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn await_shutdown_request_short_circuits_after_request() {
+        // Calling `request_shutdown()` BEFORE `await_shutdown_request()` must
+        // still resolve immediately — `Notify` without permits would wait
+        // forever, which is why the implementation checks the flag first.
+        let server = make_test_server();
+        server.request_shutdown();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            server.await_shutdown_request(),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "await_shutdown_request must short-circuit when flag already set"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_shutdown_is_idempotent() {
+        let server = make_test_server();
+        // Three calls in a row must not panic, must leave the flag set,
+        // and must not over-consume notify permits (Notify::notify_waiters
+        // is permit-free, so this is mostly a guard against future regressions
+        // if someone swaps to notify_one).
+        server.request_shutdown();
+        server.request_shutdown();
+        server.request_shutdown();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            server.await_shutdown_request(),
+        )
+        .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn shutdown_method_also_wakes_waiters() {
+        // The full `shutdown()` (final teardown) should also notify any
+        // outstanding awaiters, so a stuck waiter doesn't outlive the
+        // server. This is the path the serve loop hits after detecting
+        // a transport close.
+        let server = make_test_server();
+        let s2 = server.clone();
+        let waiter = tokio::spawn(async move { s2.await_shutdown_request().await });
+        tokio::task::yield_now().await;
+        server.shutdown().await;
+        let res = tokio::time::timeout(std::time::Duration::from_secs(2), waiter).await;
+        assert!(res.is_ok(), "shutdown() must wake await_shutdown_request");
+    }
+
+    #[tokio::test]
+    async fn telemetry_persists_across_server_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs_write(root.join("src/lib.rs"), "pub fn touch() -> u64 { 42 }\n");
+        let db_path = root.join(".recon").join("recon.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let tantivy_dir = root.join(".recon").join("tantivy");
+        std::fs::create_dir_all(&tantivy_dir).unwrap();
+
+        // Session 1: call code_outline, shutdown to flush telemetry.
+        {
+            let store = Store::open(&db_path).unwrap();
+            let tantivy = TantivyBackend::open(&tantivy_dir).unwrap();
+            let server = ReconServer::new(root.to_path_buf(), store, tantivy).unwrap();
+            server.index_repo().await.unwrap();
+            use rmcp::handler::server::wrapper::Parameters;
+            for _ in 0..5 {
+                let _ = server
+                    .code_outline(Parameters(crate::tools::OutlineParams {
+                        path: "src/lib.rs".into(),
+                    }))
+                    .await;
+            }
+            server.shutdown().await;
+        }
+
+        // Session 2: re-open and verify lifetime counters survived.
+        let store = Store::open(&db_path).unwrap();
+        let tantivy = TantivyBackend::open(&tantivy_dir).unwrap();
+        let server = ReconServer::new(root.to_path_buf(), store, tantivy).unwrap();
+        let agg = server.telemetry.aggregate();
+        assert!(
+            agg.calls >= 5,
+            "lifetime calls should survive restart, got {}",
+            agg.calls
+        );
     }
 }

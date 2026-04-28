@@ -119,6 +119,41 @@ pub struct SymbolCardView {
     /// Outgoing references (callees).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callees: Vec<RefEntry>,
+    /// Bundled context envelope populated by `code_context`.
+    ///
+    /// When omitted (the common case for `code_read_symbol`), the response
+    /// is byte-identical to v0.2.x. When present, it carries up to a few
+    /// each of caller/callee/type/test summaries that the agent would
+    /// otherwise need 4+ separate tool calls to assemble.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextEnvelope>,
+}
+
+/// Bundled context for a symbol — replaces the canonical 4-call
+/// "understand X" loop with a single response.
+///
+/// Sections are emitted only when non-empty. The sum of section sizes is
+/// bounded by the requesting tool's `token_budget` argument; sections are
+/// dropped in priority order (tests → callees → types → callers) when the
+/// bundle would exceed budget. The `truncated` flag marks any drop.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextEnvelope {
+    /// Up to N immediate callers, ranked by importance.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<SymbolHop>,
+    /// Up to N immediate callees.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub callees: Vec<SymbolHop>,
+    /// Top-K types this symbol depends on (struct/class/trait/enum returns
+    /// or parameters).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<SymbolHop>,
+    /// Up to N tests that exercise this symbol (transitive caller-of-test).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<SymbolHop>,
+    /// True if any section was dropped to fit the token budget.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
 }
 
 /// A reference entry (compact).
@@ -142,15 +177,91 @@ pub struct RefEntry {
     pub enclosing_symbol: Option<CompactString>,
 }
 
-/// Reference digest — count + top-k sites.
+/// Reference digest — count + top-k sites, optionally a graph path or tiers.
+///
+/// Three modes share this view to keep the tool surface inside the canonical
+/// 5-shape envelope:
+///
+/// 1. `code_find_refs` — populates `total` + `top_k` only.
+/// 2. `code_path` — populates `path` (ordered hop sequence). `top_k` is
+///    omitted; `total` is the path length.
+/// 3. `code_callers` / `code_callees` / `code_impact` — populate `tiers`
+///    (one per BFS ring). `top_k` is omitted; `total` is the sum of
+///    distinct nodes across all tiers.
+///
+/// All extension fields are skip-when-empty — a `code_find_refs` response
+/// is byte-identical to v0.2.x.
 #[derive(Debug, Clone, Serialize)]
 pub struct RefDigestView {
     /// Symbol name being queried.
     pub symbol: CompactString,
-    /// Total number of references found.
+    /// Total number of references / nodes / hops, depending on mode.
     pub total: usize,
-    /// Top-k reference entries by weight.
+    /// Top-k reference entries by weight (lexical mode only). Always emitted
+    /// — preserves byte-identical output for `code_find_refs` clients that
+    /// depend on the field's presence.
     pub top_k: Vec<RefEntry>,
+    /// Ordered hop sequence — `path[0]` is the source, `path[last]` is the
+    /// destination. Used by `code_path`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<SymbolHop>,
+    /// Layered BFS tiers — `tiers[k]` is the (k+1)-th ring of callers /
+    /// callees. Used by `code_callers`, `code_callees`, `code_impact`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<RefTier>,
+    /// True if the underlying traversal was capped (visit-limit or per-tier
+    /// fan-out). Agents should treat the result as a partial answer rather
+    /// than a definitive set when this is set.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    /// Best-effort hint about why a path was not found. Populated by
+    /// `code_path` when the BFS reached an unresolved boundary (likely
+    /// dynamic dispatch, FFI, or external functions). Format:
+    /// `"unresolved near <qname>"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved_hint: Option<String>,
+    /// Layered list of test-symbol hops that exercise the queried symbol.
+    /// Populated by `code_impact` only — the rest of the tools omit it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<SymbolHop>,
+}
+
+/// One hop in a graph-traversal result — a symbol identified by its
+/// qualified name + file location.
+///
+/// This is intentionally distinct from `RefEntry`: a [`RefEntry`] describes
+/// a *call site* (a single line in some caller's body), while a
+/// [`SymbolHop`] describes a *symbol definition* (the function being
+/// called, with its declaration line). Graph tools traffic in symbol
+/// identities; lexical search traffics in call sites.
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolHop {
+    /// Fully qualified name (e.g. `crate::auth::validate`).
+    pub qualified_name: String,
+    /// Symbol kind — helps the agent disambiguate fn vs method vs trait.
+    pub kind: SymbolKind,
+    /// Source file containing the symbol.
+    pub path: PathBuf,
+    /// Declaration line (1-indexed).
+    pub line: u32,
+}
+
+/// One ring of a layered BFS — depth + the nodes reached at that depth.
+#[derive(Debug, Clone, Serialize)]
+pub struct RefTier {
+    /// Hops from the seed (1 = direct callers/callees, 2 = next ring, ...).
+    pub depth: u32,
+    /// Symbol hops in this tier.
+    pub refs: Vec<SymbolHop>,
+    /// True if this tier was capped at the per-tier fan-out limit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+/// Helper for `serde(skip_serializing_if)` on `bool` fields — omit when false.
+#[inline]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Diagnostic messages.
@@ -261,6 +372,11 @@ mod tests {
                 snippet: "let x = Foo::bar();".into(),
                 enclosing_symbol: Some("main".into()),
             }],
+            path: vec![],
+            tiers: vec![],
+            truncated: false,
+            unresolved_hint: None,
+            tests: vec![],
         });
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"total\":42"));
@@ -335,6 +451,7 @@ mod tests {
             parent_chain: vec![],
             callers: vec![],
             callees: vec![],
+            context: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         for field in &[
@@ -399,6 +516,7 @@ mod tests {
                 snippet: "parse_token".into(),
                 enclosing_symbol: None,
             }],
+            context: None,
         });
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"shape\":\"SymbolCard\""));
@@ -472,5 +590,171 @@ mod tests {
         let view = ToolOutput::Diagnostics(DiagView { entries: vec![] });
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"entries\":[]"));
+    }
+
+    #[test]
+    fn ref_digest_legacy_shape_byte_identical() {
+        // A `code_find_refs`-style payload — none of the new graph fields set.
+        // Must serialize without `path`, `tiers`, `truncated`, `unresolved_hint`,
+        // or `tests` keys so v0.2.x clients see identical bytes. (Substring
+        // search would false-match `RefEntry.path` inside `top_k`, so we parse
+        // the JSON and assert on top-level keys only.)
+        let view = RefDigestView {
+            symbol: "foo".into(),
+            total: 3,
+            top_k: vec![RefEntry {
+                path: PathBuf::from("src/lib.rs"),
+                line: 10,
+                col: None,
+                snippet: "foo()".into(),
+                enclosing_symbol: None,
+            }],
+            path: vec![],
+            tiers: vec![],
+            truncated: false,
+            unresolved_hint: None,
+            tests: vec![],
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = parsed.as_object().expect("RefDigest serializes as object");
+        for ghost in &["path", "tiers", "truncated", "unresolved_hint", "tests"] {
+            assert!(
+                !obj.contains_key(*ghost),
+                "{ghost} must be omitted at top level when empty: {json}"
+            );
+        }
+        assert!(obj.contains_key("top_k"));
+        assert!(obj.contains_key("symbol"));
+        assert!(obj.contains_key("total"));
+    }
+
+    #[test]
+    fn ref_digest_path_mode_serde() {
+        // `top_k` is always emitted (even when empty) — see RefDigestView
+        // doc. The `path` field is what distinguishes path-mode responses.
+        let view = RefDigestView {
+            symbol: "main".into(),
+            total: 3,
+            top_k: vec![],
+            path: vec![
+                SymbolHop {
+                    qualified_name: "crate::main".into(),
+                    kind: SymbolKind::Function,
+                    path: PathBuf::from("src/main.rs"),
+                    line: 1,
+                },
+                SymbolHop {
+                    qualified_name: "crate::init".into(),
+                    kind: SymbolKind::Function,
+                    path: PathBuf::from("src/init.rs"),
+                    line: 1,
+                },
+                SymbolHop {
+                    qualified_name: "crate::config_load".into(),
+                    kind: SymbolKind::Function,
+                    path: PathBuf::from("src/config.rs"),
+                    line: 1,
+                },
+            ],
+            tiers: vec![],
+            truncated: false,
+            unresolved_hint: None,
+            tests: vec![],
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"path\""));
+        assert!(!json.contains("\"tiers\""));
+    }
+
+    #[test]
+    fn ref_digest_tiers_mode_serde() {
+        let view = RefDigestView {
+            symbol: "process".into(),
+            total: 2,
+            top_k: vec![],
+            path: vec![],
+            tiers: vec![RefTier {
+                depth: 1,
+                refs: vec![SymbolHop {
+                    qualified_name: "crate::caller".into(),
+                    kind: SymbolKind::Function,
+                    path: PathBuf::from("src/caller.rs"),
+                    line: 5,
+                }],
+                truncated: true,
+            }],
+            truncated: true,
+            unresolved_hint: None,
+            tests: vec![],
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"tiers\""));
+        assert!(json.contains("\"depth\":1"));
+        assert!(json.contains("\"truncated\":true"));
+    }
+
+    #[test]
+    fn symbol_card_context_envelope_serde() {
+        let view = SymbolCardView {
+            path: PathBuf::from("src/auth.rs"),
+            qualified_name: "auth::validate".into(),
+            kind: SymbolKind::Function,
+            signature: Some("pub fn validate(token: &str) -> bool".into()),
+            doc: None,
+            body: "...".into(),
+            line_range: (10, 12),
+            parent_chain: vec![],
+            callers: vec![],
+            callees: vec![],
+            context: Some(ContextEnvelope {
+                callers: vec![SymbolHop {
+                    qualified_name: "main".into(),
+                    kind: SymbolKind::Function,
+                    path: PathBuf::from("src/main.rs"),
+                    line: 5,
+                }],
+                callees: vec![],
+                types: vec![],
+                tests: vec![SymbolHop {
+                    qualified_name: "tests::test_validate".into(),
+                    kind: SymbolKind::Function,
+                    path: PathBuf::from("src/auth.rs"),
+                    line: 100,
+                }],
+                truncated: false,
+            }),
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"context\""));
+        assert!(json.contains("\"tests\""));
+        // truncated=false on the envelope must be omitted
+        let envelope_chunk = json.split("\"context\":").nth(1).unwrap();
+        assert!(
+            !envelope_chunk.starts_with("{\"callers\":[],"),
+            "empty inner sections must be omitted"
+        );
+    }
+
+    #[test]
+    fn symbol_card_context_omitted_when_none() {
+        let view = SymbolCardView {
+            path: PathBuf::from("src/x.rs"),
+            qualified_name: "x".into(),
+            kind: SymbolKind::Function,
+            signature: None,
+            doc: None,
+            body: "fn x(){}".into(),
+            line_range: (1, 1),
+            parent_chain: vec![],
+            callers: vec![],
+            callees: vec![],
+            context: None,
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            !json.contains("\"context\""),
+            "context=None must be omitted: {json}"
+        );
     }
 }

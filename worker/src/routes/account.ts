@@ -187,3 +187,136 @@ accountRoutes.delete("/repos/:fingerprint", async (c) => {
   }
   return new Response(null, { status: 204 });
 });
+
+// ── POST /v1/account/savings ──────────────────────────────────────────────────
+//
+// Accept a daily token-savings rollup from the CLI.
+//
+// Tier gating: Pro/Team only. Free returns 402. The dashboard panel and the
+// CLI both surface the upgrade path when this fires.
+//
+// Idempotency / monotonicity: the upsert is MAX-merged. A repeat push with
+// the same `day` cannot regress an already-stored counter — even if the
+// client's local DB rolled back or a stale daemon retried after a fresh
+// push. The trade is "may slightly under-credit on machines that re-create
+// the local DB," which is the right side of the trade for the dashboard
+// (we'd rather understate than overstate savings).
+
+/** Validate YYYY-MM-DD UTC date string. Strict: catches typos before
+ *  they wedge a bad row into the table. */
+function validDay(d: unknown): d is string {
+  if (typeof d !== "string" || d.length !== 10) return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  const t = Date.parse(d + "T00:00:00Z");
+  return Number.isFinite(t);
+}
+
+/** Validate that a counter looks sane: non-negative, finite, integer-shaped.
+ *  Caps each at 2^53 to stay inside Number safe-int range; D1 stores i64
+ *  but JSON.parse hands us f64 and rounding above 2^53 silently corrupts. */
+function validCount(n: unknown): n is number {
+  return (
+    typeof n === "number" &&
+    Number.isFinite(n) &&
+    Number.isInteger(n) &&
+    n >= 0 &&
+    n <= Number.MAX_SAFE_INTEGER
+  );
+}
+
+/** Tier-gate: Pro and Team can push; Free and unknowns cannot. Mirrors
+ *  the worker's tier strings in `lib/tiers.ts` and the api_keys.tier
+ *  column. Treats any non-recognised tier as Free for safety. */
+function canPushSavings(tier: string): boolean {
+  return tier === "Pro" || tier === "Team" || tier === "Enterprise";
+}
+
+accountRoutes.post("/savings", async (c) => {
+  let body: {
+    day?: unknown;
+    calls?: unknown;
+    response_tokens?: unknown;
+    baseline_tokens?: unknown;
+    tokens_saved?: unknown;
+    latency_micros?: unknown;
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (!validDay(body.day)) {
+    return c.json(
+      { error: "day must be a YYYY-MM-DD UTC date string" },
+      400,
+    );
+  }
+  if (
+    !validCount(body.calls) ||
+    !validCount(body.response_tokens) ||
+    !validCount(body.baseline_tokens) ||
+    !validCount(body.tokens_saved) ||
+    !validCount(body.latency_micros)
+  ) {
+    return c.json(
+      {
+        error:
+          "calls, response_tokens, baseline_tokens, tokens_saved, latency_micros must be non-negative integers",
+      },
+      400,
+    );
+  }
+
+  const user = c.get("user");
+  const apiKey = c.get("apiKey");
+
+  if (!canPushSavings(apiKey.tier)) {
+    return c.json(
+      {
+        error: "savings_push_requires_pro",
+        tier: apiKey.tier,
+        message:
+          "The savings dashboard is a Pro/Team feature. Upgrade your plan at https://mcprecon.pages.dev/pricing to enable usage rollups.",
+      },
+      402,
+    );
+  }
+
+  const db = c.env.RECON_DB;
+
+  // Single statement: insert the row, or MAX-merge each counter on
+  // conflict. SQLite's `excluded.col` references the proposed-but-conflicting
+  // values; `MAX(existing, proposed)` makes pushes monotone. updated_at is
+  // refreshed unconditionally so we have a "last seen" timestamp even when
+  // the counters didn't move.
+  await db
+    .prepare(
+      `INSERT INTO usage_rollups
+         (user_id, day, calls, response_tokens, baseline_tokens, tokens_saved, latency_micros)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, day) DO UPDATE SET
+         calls           = MAX(usage_rollups.calls,           excluded.calls),
+         response_tokens = MAX(usage_rollups.response_tokens, excluded.response_tokens),
+         baseline_tokens = MAX(usage_rollups.baseline_tokens, excluded.baseline_tokens),
+         tokens_saved    = MAX(usage_rollups.tokens_saved,    excluded.tokens_saved),
+         latency_micros  = MAX(usage_rollups.latency_micros,  excluded.latency_micros),
+         updated_at      = datetime('now')`,
+    )
+    .bind(
+      user.id,
+      body.day,
+      body.calls,
+      body.response_tokens,
+      body.baseline_tokens,
+      body.tokens_saved,
+      body.latency_micros,
+    )
+    .run();
+
+  return c.json({
+    status: "recorded",
+    day: body.day,
+    tier: apiKey.tier,
+  });
+});

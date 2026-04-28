@@ -66,6 +66,10 @@ pub enum ReconErrorCode {
     /// Subscription has expired or no valid license is cached. Agent should
     /// surface "run `recon login <key>` to renew" to the user.
     LicenseExpired = -32011,
+    /// Server-side budget exhausted (graph traversal visit cap, response
+    /// truncation cap). The query is well-formed but the answer would be
+    /// too large; agent should narrow the input.
+    ResourceExhausted = -32012,
     /// Anything else — internal invariant, bug, unexpected state.
     Internal = -32099,
 }
@@ -91,6 +95,7 @@ impl ReconErrorCode {
             ReconErrorCode::FileTooLarge => "file_too_large",
             ReconErrorCode::Io => "io",
             ReconErrorCode::LicenseExpired => "license_expired",
+            ReconErrorCode::ResourceExhausted => "resource_exhausted",
             ReconErrorCode::Internal => "internal",
         }
     }

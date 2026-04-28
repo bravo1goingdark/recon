@@ -98,6 +98,19 @@ impl<'a> Ctx<'a> {
         });
     }
 
+    /// Id of the most-recently-pushed symbol, if any. Used by the
+    /// Python decorator path to resolve "the symbol the decorator wraps."
+    fn last_symbol_id(&self) -> Option<u64> {
+        self.symbols.last().map(|s| s.id)
+    }
+
+    /// Name of the most-recently-pushed symbol, if any. Returns owned
+    /// `CompactString` so the caller can hold it across mutable
+    /// `extract_*` recursion.
+    fn last_symbol_name(&self) -> Option<CompactString> {
+        self.symbols.last().map(|s| s.name.clone())
+    }
+
     fn first_line(&self, node: tree_sitter::Node) -> String {
         let slice = &self.src[node.byte_range()];
         let end = slice.find('\n').unwrap_or(slice.len());
@@ -249,7 +262,7 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                     } else {
                         SymbolKind::Function
                     };
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         kind,
@@ -258,6 +271,15 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    // Walk into the body so identifiers (calls, type uses)
+                    // in the function body produce refs with this function
+                    // as the source. Without this, the reference graph is
+                    // structurally empty for code-call analysis — every
+                    // graph-traversal tool (`code_path`, `code_callers`,
+                    // `code_callees`, `code_impact`) needs these edges.
+                    if let Some(body) = child.child_by_field_name("body") {
+                        extract_rust(ctx, body, Some((id, name)));
+                    }
                 }
             }
             "struct_item" => {
@@ -272,6 +294,11 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         child,
                     );
                     extract_rust_fields(ctx, child, id, name);
+                    // Walk the struct body so field type identifiers produce
+                    // refs (e.g. `pub user: User` → ref Struct → User).
+                    // Field symbols are pushed by extract_rust_fields above;
+                    // this recursion only adds identifier refs, no symbols.
+                    extract_rust(ctx, child, Some((id, name)));
                 }
             }
             "enum_item" => {
@@ -286,6 +313,8 @@ fn extract_rust(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         child,
                     );
                     extract_rust_variants(ctx, child, id, name);
+                    // Walk the enum body so variant payload types produce refs.
+                    extract_rust(ctx, child, Some((id, name)));
                 }
             }
             "trait_item" => {
@@ -477,7 +506,7 @@ fn extract_python(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         SymbolKind::Function
                     };
                     let doc = python_docstring(ctx, child);
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         kind,
@@ -486,6 +515,35 @@ fn extract_python(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    // Walk body + parameters/return-type so call expressions
+                    // and type annotations produce identifier refs with this
+                    // function as the source. Without this, the call graph
+                    // is empty for Python files. Walking the whole node
+                    // (not just body) also captures parameter type
+                    // annotations and the return type (`-> Foo`).
+                    extract_python(ctx, child, Some((id, name)));
+                }
+            }
+            "decorated_definition" => {
+                // `@dec\ndef foo(): ...` — ensure decorator identifiers
+                // are captured as refs from the decorated symbol. Walk
+                // the inner definition first to install the symbol, then
+                // walk the entire decorated_definition with it as parent
+                // so the decorator's identifier becomes a ref from foo.
+                extract_python(ctx, child, parent);
+                // After the inner definition installs the symbol, run a
+                // second pass over decorator children with the most-
+                // recently-installed symbol as parent. Use the last
+                // pushed symbol's id as the parent — matches Python
+                // semantics where the decorator wraps the function.
+                if let Some(last_id) = ctx.last_symbol_id() {
+                    let last_name = ctx.last_symbol_name().unwrap_or_default();
+                    let mut dc = child.walk();
+                    for grand in child.children(&mut dc) {
+                        if grand.kind() == "decorator" {
+                            extract_python(ctx, grand, Some((last_id, last_name.as_str())));
+                        }
+                    }
                 }
             }
             "class_definition" => {
@@ -500,8 +558,17 @@ fn extract_python(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
-                    if let Some(body) = child.child_by_field_name("body") {
-                        extract_python(ctx, body, Some((id, name)));
+                    // Walk the entire class node (not just body) so the
+                    // base-class list (`class Foo(Base1, Base2):`)
+                    // produces refs from Foo to Base1/Base2.
+                    extract_python(ctx, child, Some((id, name)));
+                }
+            }
+            "identifier" | "type_identifier" => {
+                let ident = &ctx.src[child.byte_range()];
+                if ident.len() > 1 {
+                    if let Some((pid, _)) = parent {
+                        ctx.push_ref(pid, ident);
                     }
                 }
             }
@@ -542,7 +609,7 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                     } else {
                         SymbolKind::Function
                     };
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         kind,
@@ -551,6 +618,10 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    // Walk the entire node so parameter types, return
+                    // types, body call expressions, and JSX/TSX tag
+                    // identifiers all become refs from this function.
+                    extract_js_ts(ctx, child, Some((id, name)));
                 }
             }
             "class_declaration" => {
@@ -564,14 +635,14 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
-                    if let Some(body) = child.child_by_field_name("body") {
-                        extract_js_ts(ctx, body, Some((id, name)));
-                    }
+                    // Walk entire class so `extends Base implements Iface`
+                    // produces refs to Base and Iface; body is also walked.
+                    extract_js_ts(ctx, child, Some((id, name)));
                 }
             }
             "interface_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         SymbolKind::Interface,
@@ -580,11 +651,13 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    // Walk so `extends Other` and field types become refs.
+                    extract_js_ts(ctx, child, Some((id, name)));
                 }
             }
             "enum_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         SymbolKind::Enum,
@@ -593,11 +666,12 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    extract_js_ts(ctx, child, Some((id, name)));
                 }
             }
             "type_alias_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         SymbolKind::Type,
@@ -606,6 +680,8 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    // `type X = Y | Z` — walk so Y and Z become refs from X.
+                    extract_js_ts(ctx, child, Some((id, name)));
                 }
             }
             "lexical_declaration" | "variable_declaration" => {
@@ -621,7 +697,7 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                             } else {
                                 SymbolKind::Const
                             };
-                            ctx.push_symbol(
+                            let id = ctx.push_symbol(
                                 name,
                                 parent.map(|p| p.1),
                                 kind,
@@ -630,12 +706,30 @@ fn extract_js_ts(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                                 parent.map(|p| p.0),
                                 child,
                             );
+                            // For arrow-function and function-expression
+                            // values, walk the body so calls inside
+                            // produce refs from this binding. For const
+                            // values, walking a numeric literal is a noop.
+                            if let Some(value) = decl.child_by_field_name("value") {
+                                extract_js_ts(ctx, value, Some((id, name)));
+                            }
                         }
                     }
                 }
             }
             "export_statement" => {
                 extract_js_ts(ctx, child, parent);
+            }
+            "identifier"
+            | "property_identifier"
+            | "type_identifier"
+            | "shorthand_property_identifier" => {
+                let ident = &ctx.src[child.byte_range()];
+                if ident.len() > 1 {
+                    if let Some((pid, _)) = parent {
+                        ctx.push_ref(pid, ident);
+                    }
+                }
             }
             _ => {
                 if child.child_count() > 0 {
@@ -654,7 +748,7 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
         match child.kind() {
             "function_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         SymbolKind::Function,
@@ -663,11 +757,12 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    extract_go(ctx, child, Some((id, name)));
                 }
             }
             "method_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         SymbolKind::Method,
@@ -676,6 +771,9 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    // Whole node walk: receiver type, parameter types,
+                    // return types, body all produce refs.
+                    extract_go(ctx, child, Some((id, name)));
                 }
             }
             "type_declaration" => {
@@ -688,7 +786,7 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                                 Some("interface_type") => SymbolKind::Interface,
                                 _ => SymbolKind::Type,
                             };
-                            ctx.push_symbol(
+                            let id = ctx.push_symbol(
                                 name,
                                 parent.map(|p| p.1),
                                 kind,
@@ -697,6 +795,9 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                                 parent.map(|p| p.0),
                                 spec,
                             );
+                            // Walk struct/interface body so embedded
+                            // types and field types become refs.
+                            extract_go(ctx, spec, Some((id, name)));
                         }
                     }
                 }
@@ -726,6 +827,14 @@ fn extract_go(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                     }
                 }
             }
+            "identifier" | "type_identifier" | "field_identifier" => {
+                let ident = &ctx.src[child.byte_range()];
+                if ident.len() > 1 {
+                    if let Some((pid, _)) = parent {
+                        ctx.push_ref(pid, ident);
+                    }
+                }
+            }
             _ => {
                 if child.child_count() > 0 {
                     extract_go(ctx, child, parent);
@@ -743,7 +852,7 @@ fn extract_java(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
         match child.kind() {
             "method_declaration" | "constructor_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         SymbolKind::Method,
@@ -752,6 +861,10 @@ fn extract_java(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    // Whole node walk so generics, parameter types,
+                    // return types, throws clauses, and body call
+                    // expressions all become refs.
+                    extract_java(ctx, child, Some((id, name)));
                 }
             }
             "class_declaration" => {
@@ -765,9 +878,9 @@ fn extract_java(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
-                    if let Some(body) = child.child_by_field_name("body") {
-                        extract_java(ctx, body, Some((id, name)));
-                    }
+                    // Whole node walk so `extends Base implements Iface`
+                    // produces refs from the class to Base / Iface.
+                    extract_java(ctx, child, Some((id, name)));
                 }
             }
             "interface_declaration" => {
@@ -781,14 +894,12 @@ fn extract_java(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
-                    if let Some(body) = child.child_by_field_name("body") {
-                        extract_java(ctx, body, Some((id, name)));
-                    }
+                    extract_java(ctx, child, Some((id, name)));
                 }
             }
             "enum_declaration" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         SymbolKind::Enum,
@@ -797,6 +908,15 @@ fn extract_java(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    extract_java(ctx, child, Some((id, name)));
+                }
+            }
+            "identifier" | "type_identifier" | "field_identifier" => {
+                let ident = &ctx.src[child.byte_range()];
+                if ident.len() > 1 {
+                    if let Some((pid, _)) = parent {
+                        ctx.push_ref(pid, ident);
+                    }
                 }
             }
             _ => {
@@ -821,7 +941,7 @@ fn extract_c_cpp(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                 if let Some(name) = name {
                     let actual_name = name.split('(').next().unwrap_or(name).trim();
                     if !actual_name.is_empty() {
-                        ctx.push_symbol(
+                        let id = ctx.push_symbol(
                             actual_name,
                             parent.map(|p| p.1),
                             SymbolKind::Function,
@@ -830,6 +950,11 @@ fn extract_c_cpp(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                             parent.map(|p| p.0),
                             child,
                         );
+                        // Walk the entire function definition node so
+                        // template parameters, parameter types, return
+                        // types, and body call expressions all become
+                        // refs from this function.
+                        extract_c_cpp(ctx, child, Some((id, actual_name)));
                     }
                 }
             }
@@ -849,14 +974,14 @@ fn extract_c_cpp(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
-                    if let Some(body) = child.child_by_field_name("body") {
-                        extract_c_cpp(ctx, body, Some((id, name)));
-                    }
+                    // Whole node walk so base-class lists and field
+                    // type identifiers become refs from this type.
+                    extract_c_cpp(ctx, child, Some((id, name)));
                 }
             }
             "enum_specifier" => {
                 if let Some(name) = ctx.child_text(child, "name") {
-                    ctx.push_symbol(
+                    let id = ctx.push_symbol(
                         name,
                         parent.map(|p| p.1),
                         SymbolKind::Enum,
@@ -865,10 +990,19 @@ fn extract_c_cpp(ctx: &mut Ctx, node: tree_sitter::Node, parent: ParentCtx) {
                         parent.map(|p| p.0),
                         child,
                     );
+                    extract_c_cpp(ctx, child, Some((id, name)));
                 }
             }
             "declaration" => {
                 extract_c_cpp(ctx, child, parent);
+            }
+            "identifier" | "type_identifier" | "field_identifier" => {
+                let ident = &ctx.src[child.byte_range()];
+                if ident.len() > 1 {
+                    if let Some((pid, _)) = parent {
+                        ctx.push_ref(pid, ident);
+                    }
+                }
             }
             _ => {
                 if child.child_count() > 0 {
@@ -1411,5 +1545,162 @@ pub mod utils {
             !result.refs.is_empty(),
             "expected refs to be non-empty for Rust source with nested symbols"
         );
+    }
+
+    /// Helper: assert that `result.refs` contains a ref whose `ident` matches.
+    fn assert_ref_present(refs: &[Ref], ident: &str, ctx: &str) {
+        assert!(
+            refs.iter().any(|r| r.ident.as_str() == ident),
+            "{ctx}: expected a ref with ident `{ident}`. Got: {:?}",
+            refs.iter().map(|r| r.ident.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn python_refs_extracted_from_function_body() {
+        let src = br#"
+def process(data):
+    helper(data)
+    return validate(data)
+
+def helper(d):
+    pass
+
+def validate(d):
+    pass
+"#;
+        let result = extract_symbols(src, Language::Python, Path::new("a.py"));
+        assert!(!result.refs.is_empty(), "Python: expected non-empty refs");
+        assert_ref_present(&result.refs, "helper", "Python fn body call");
+        assert_ref_present(&result.refs, "validate", "Python fn body call");
+    }
+
+    #[test]
+    fn python_refs_extracted_from_class_bases() {
+        let src = br#"
+class Base:
+    pass
+
+class Derived(Base):
+    def method(self):
+        return self.compute()
+
+    def compute(self):
+        return 42
+"#;
+        let result = extract_symbols(src, Language::Python, Path::new("b.py"));
+        assert_ref_present(&result.refs, "Base", "Python class extends Base");
+        assert_ref_present(&result.refs, "compute", "Python method calls compute");
+    }
+
+    #[test]
+    fn typescript_refs_extracted_from_function_and_class() {
+        let src = br#"
+interface Logger {
+    log(msg: string): void;
+}
+
+class FileLogger implements Logger {
+    log(msg: string): void {
+        writeToDisk(msg);
+    }
+}
+
+function writeToDisk(msg: string) {
+    fs.writeFileSync('log', msg);
+}
+"#;
+        let result = extract_symbols(src, Language::TypeScript, Path::new("a.ts"));
+        assert!(!result.refs.is_empty(), "TS: expected non-empty refs");
+        assert_ref_present(&result.refs, "Logger", "TS class implements Logger");
+        assert_ref_present(&result.refs, "writeToDisk", "TS method calls writeToDisk");
+    }
+
+    #[test]
+    fn javascript_refs_extracted_from_function_body() {
+        let src = br#"
+function compute(x) {
+    return helper(x) + 1;
+}
+
+function helper(y) {
+    return validate(y);
+}
+
+function validate(z) {
+    return z;
+}
+"#;
+        let result = extract_symbols(src, Language::JavaScript, Path::new("a.js"));
+        assert!(!result.refs.is_empty(), "JS: expected non-empty refs");
+        assert_ref_present(&result.refs, "helper", "JS fn body calls helper");
+        assert_ref_present(&result.refs, "validate", "JS fn body calls validate");
+    }
+
+    #[test]
+    fn go_refs_extracted_from_function_body() {
+        let src = br#"
+package main
+
+func Process(data []byte) string {
+    result := Format(data)
+    Validate(result)
+    return result
+}
+
+func Format(data []byte) string {
+    return string(data)
+}
+
+func Validate(s string) bool {
+    return len(s) > 0
+}
+"#;
+        let result = extract_symbols(src, Language::Go, Path::new("a.go"));
+        assert!(!result.refs.is_empty(), "Go: expected non-empty refs");
+        assert_ref_present(&result.refs, "Format", "Go fn body calls Format");
+        assert_ref_present(&result.refs, "Validate", "Go fn body calls Validate");
+    }
+
+    #[test]
+    fn java_refs_extracted_from_method_body() {
+        let src = br#"
+public class Greeter {
+    public String greet(String name) {
+        String formatted = format(name);
+        return validate(formatted);
+    }
+
+    private String format(String s) {
+        return s.trim();
+    }
+
+    private String validate(String s) {
+        return s;
+    }
+}
+"#;
+        let result = extract_symbols(src, Language::Java, Path::new("Greeter.java"));
+        assert!(!result.refs.is_empty(), "Java: expected non-empty refs");
+        assert_ref_present(&result.refs, "format", "Java method body calls format");
+        assert_ref_present(&result.refs, "validate", "Java method body calls validate");
+    }
+
+    #[test]
+    fn cpp_refs_extracted_from_function_body() {
+        let src = br#"
+#include <string>
+
+class Greeter {
+public:
+    std::string greet(const std::string& name) {
+        return format(name);
+    }
+    std::string format(const std::string& s) const;
+};
+"#;
+        let result = extract_symbols(src, Language::Cpp, Path::new("greeter.cpp"));
+        assert!(!result.refs.is_empty(), "C++: expected non-empty refs");
+        assert_ref_present(&result.refs, "format", "C++ method body calls format");
     }
 }

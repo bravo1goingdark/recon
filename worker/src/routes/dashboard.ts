@@ -205,6 +205,136 @@ dashboardRoutes.delete("/keys/:id", async (c) => {
  * the user's `users.tier` config if no live key is found (rare —
  * happens only for users mid-rotation or just after delete-then-create).
  */
+// ── GET /v1/dashboard/savings ────────────────────────────────────────────────
+//
+// Returns the daily token-savings series and aggregate totals for the
+// dashboard "Savings" panel. Pro/Team/Enterprise only — Free tier gets a
+// 200 with an upsell payload (so the dashboard renders a clean
+// "upgrade to enable" card instead of an error).
+//
+// Range cap by tier (days, inclusive of today):
+//   Free        → 0   (upsell payload, no query)
+//   Pro         → 30
+//   Team        → 90
+//   Enterprise  → 365
+//
+// Hot path is a single equality+range scan on the (user_id, day) PK, so
+// no extra index lookup is needed. JS aggregates the small result set
+// in one pass — cheaper than a second round trip for a SUM() query.
+
+/** Range cap by tier, in days. */
+function savingsRangeDays(tier: string): number {
+  switch (tier) {
+    case "Pro":
+      return 30;
+    case "Team":
+      return 90;
+    case "Enterprise":
+      return 365;
+    default:
+      return 0;
+  }
+}
+
+/** UTC YYYY-MM-DD for `daysAgo` days before today. */
+function utcDayString(daysAgo: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - daysAgo);
+  return d.toISOString().slice(0, 10);
+}
+
+interface RollupRow {
+  day: string;
+  calls: number;
+  response_tokens: number;
+  baseline_tokens: number;
+  tokens_saved: number;
+  latency_micros: number;
+}
+
+dashboardRoutes.get("/savings", async (c) => {
+  const user = c.get("user");
+  const tier = user.tier;
+  const cap = savingsRangeDays(tier);
+
+  // Free tier: short-circuit with an upsell payload. Same JSON shape as
+  // a paid response so the dashboard renders without conditional code,
+  // but `daily` is empty and `upsell` is set.
+  if (cap === 0) {
+    return c.json({
+      tier,
+      range_days: 0,
+      daily: [],
+      totals: {
+        calls: 0,
+        response_tokens: 0,
+        baseline_tokens: 0,
+        tokens_saved: 0,
+        latency_micros: 0,
+      },
+      upsell: {
+        message:
+          "Token-savings rollups are a Pro/Team feature. Upgrade your plan to start seeing aggregate savings across your sessions.",
+        upgrade_url: "https://mcprecon.pages.dev/pricing",
+      },
+    });
+  }
+
+  // Honour an optional ?range=<days> down-shift (1..cap). Default to cap.
+  const url = new URL(c.req.url);
+  const requested = Number(url.searchParams.get("range"));
+  const range =
+    Number.isFinite(requested) && Number.isInteger(requested) && requested > 0
+      ? Math.min(requested, cap)
+      : cap;
+
+  const today = utcDayString(0);
+  const start = utcDayString(range - 1);
+  const db = c.env.RECON_DB;
+
+  // Single index-only scan. (user_id, day) is the PK so this is one
+  // contiguous slice of the B-tree — no separate index lookup, no row
+  // store visit beyond the columns selected.
+  const result = await db
+    .prepare(
+      `SELECT day, calls, response_tokens, baseline_tokens, tokens_saved, latency_micros
+       FROM usage_rollups
+       WHERE user_id = ? AND day >= ? AND day <= ?
+       ORDER BY day ASC`,
+    )
+    .bind(user.id, start, today)
+    .all<RollupRow>();
+
+  const daily = result.results ?? [];
+
+  // JS-side fold to compute totals. ~30..365 rows max, faster than a
+  // second SUM() round-trip for our range caps.
+  const totals = daily.reduce(
+    (acc, r) => {
+      acc.calls += r.calls;
+      acc.response_tokens += r.response_tokens;
+      acc.baseline_tokens += r.baseline_tokens;
+      acc.tokens_saved += r.tokens_saved;
+      acc.latency_micros += r.latency_micros;
+      return acc;
+    },
+    {
+      calls: 0,
+      response_tokens: 0,
+      baseline_tokens: 0,
+      tokens_saved: 0,
+      latency_micros: 0,
+    },
+  );
+
+  return c.json({
+    tier,
+    range_days: range,
+    daily,
+    totals,
+  });
+});
+
 dashboardRoutes.get("/repos", async (c) => {
   const user = c.get("user");
   const db = c.env.RECON_DB;

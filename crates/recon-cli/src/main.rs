@@ -3,6 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod doctor;
 mod pretty;
+mod savings;
 mod update;
 
 use anyhow::Result;
@@ -287,6 +288,17 @@ enum Command {
         #[command(subcommand)]
         action: ReposAction,
     },
+    /// Push token-savings rollups to the dashboard (Pro/Team feature)
+    ///
+    /// Reads the local telemetry counters in `.recon/recon.db` (populated
+    /// by every MCP tool call) and POSTs today's snapshot to the worker.
+    /// Free tier returns a clear upgrade message rather than an error.
+    /// Idempotent — re-running on the same day MAX-merges, never
+    /// double-counts.
+    Savings {
+        #[command(subcommand)]
+        action: SavingsAction,
+    },
     /// Delete recon's index and (optionally) its IDE wiring
     ///
     /// With no flag: removes only `.recon/` (index, merkle snapshot, caches).
@@ -350,6 +362,58 @@ enum ReposAction {
         /// Path or fingerprint to release
         target: String,
     },
+}
+
+/// Subcommands of `recon savings`.
+#[derive(Subcommand)]
+enum SavingsAction {
+    /// Push today's local telemetry rollup to the dashboard
+    ///
+    /// Aggregates the per-tool counters in `.recon/recon.db` into one
+    /// daily row and POSTs to the recon worker. Repeated runs on the
+    /// same day are idempotent (MAX-merged). Pro/Team only.
+    Push {
+        /// Repository whose `.recon/recon.db` to read.
+        /// Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<std::path::PathBuf>,
+    },
+    /// Print local savings counters as TSV (no network)
+    ///
+    /// Reads the same data the agent would see via `code_savings`,
+    /// without spinning up the MCP server.
+    Show {
+        /// Repository whose `.recon/recon.db` to read.
+        #[arg(long)]
+        repo: Option<std::path::PathBuf>,
+    },
+}
+
+// ── Auto-push helpers ──────────────────────────────────────────────────────────
+
+/// Opt-in: when `RECON_AUTO_PUSH_SAVINGS=1` is set, push the local
+/// telemetry rollup to the dashboard after `recon serve` exits.
+///
+/// Pure side-effect, never blocks shutdown. All failures are logged
+/// to stderr so an operator running `recon serve --log debug` sees
+/// them, but the process exit code remains whatever `serve` produced.
+/// Free-tier users see the upsell text once per session, then nothing
+/// until they upgrade — fine because the env var is opt-in.
+fn maybe_auto_push_savings(repo: &Path) {
+    if std::env::var("RECON_AUTO_PUSH_SAVINGS").ok().as_deref() != Some("1") {
+        return;
+    }
+    let repo_buf = repo.to_path_buf();
+    match savings::push(Some(repo_buf)) {
+        Ok(()) => {}
+        Err(e) => {
+            // Log via tracing so it shows up under --log debug, AND
+            // print to stderr in case the user is running with the
+            // default log level. Never block shutdown.
+            tracing::warn!("auto-push savings failed: {e}");
+            eprintln!("recon: auto-push savings failed: {e}");
+        }
+    }
 }
 
 // ── License helpers ────────────────────────────────────────────────────────────
@@ -844,6 +908,12 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
             format!("::1:{port}"),
         ]);
 
+    // Hold a clone of the server outside the StreamableHttpService factory
+    // so the listen-loop can `select!` on its shutdown notify in addition
+    // to signal + accept. Without this clone the only way to stop the
+    // bound port is SIGTERM — a worker-side license rejection would leave
+    // the listener exposed indefinitely.
+    let server_for_shutdown = server.clone();
     let session_manager = Arc::new(LocalSessionManager::default());
     let service = StreamableHttpService::new(move || Ok(server.clone()), session_manager, config);
 
@@ -880,7 +950,17 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
                 });
             }
             _ = wait_for_shutdown_signal() => {
-                info!("http server shutting down");
+                info!("http server shutting down (signal)");
+                cancel.cancel();
+                break;
+            }
+            _ = server_for_shutdown.await_shutdown_request() => {
+                // Periodic license-revalidation task fired the notify
+                // (account deletion / key revoke / sub hard-expiry) or
+                // local credentials disappeared. Drop the listener so
+                // the bound port is released and stop accepting new
+                // sessions immediately.
+                info!("http server shutting down (license revoked)");
                 cancel.cancel();
                 break;
             }
@@ -1333,6 +1413,16 @@ async fn main() -> Result<()> {
                     .unwrap_or(900) // 15 minutes
                     .clamp(60, 86_400);
                 tokio::spawn(async move {
+                    // Snapshot whether credentials existed when the task
+                    // started. If credentials transition Some → None
+                    // mid-run we treat that as an explicit `recon logout`
+                    // and shut the running server down — the alternative
+                    // (continuing on the cached signed license) keeps a
+                    // logged-out user's serve process alive on the
+                    // expectation that the user already moved on.
+                    let dir0 = recon_server::license::global_config_dir();
+                    let had_credentials_at_start =
+                        recon_server::license::read_credentials(&dir0).is_some();
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
                         let dir = recon_server::license::global_config_dir();
@@ -1363,7 +1453,7 @@ async fn main() -> Result<()> {
                                     Ok(Err(recon_server::license::RemoteError::Rejected(msg))) => {
                                         tracing::warn!(
                                             reason = %msg,
-                                            "license rejected by worker — marking revoked"
+                                            "license rejected by worker — marking revoked and shutting down"
                                         );
                                         // Wipe local auth state so a fresh
                                         // `recon serve` fails fast with
@@ -1375,6 +1465,13 @@ async fn main() -> Result<()> {
                                             lic.message = format!("License revoked: {msg}");
                                             server_rev.set_license(lic);
                                         }
+                                        // Trigger a clean shutdown of the
+                                        // running serve loop. Without this
+                                        // the IDE keeps a dead subprocess
+                                        // around (stdio) or a bound port
+                                        // stays exposed (HTTP) until SIGTERM.
+                                        server_rev.request_shutdown();
+                                        return; // exit the periodic task
                                     }
                                     Ok(Err(recon_server::license::RemoteError::Transient(msg))) => {
                                         tracing::warn!(
@@ -1390,8 +1487,23 @@ async fn main() -> Result<()> {
                                 }
                             }
                             None => {
-                                // No credentials on disk — fall back to the
-                                // cache-only path (dev licenses, tests).
+                                // Credentials disappeared mid-run after we
+                                // started with some → user ran
+                                // `recon logout` (or wiped ~/.config/recon).
+                                // Shut down the live server so a logged-out
+                                // user isn't left with a phantom subprocess
+                                // their IDE keeps trying to talk to.
+                                if had_credentials_at_start {
+                                    tracing::warn!(
+                                        "credentials removed (recon logout) — shutting down"
+                                    );
+                                    server_rev.request_shutdown();
+                                    return;
+                                }
+                                // No credentials on disk and none at start —
+                                // dev license / tests path. Fall back to
+                                // cache-only revalidation; never escalate
+                                // to shutdown for these callers.
                                 match recon_server::license::validate_license(None, &dir) {
                                     Ok(new) => server_rev.set_license(new),
                                     Err(e) => tracing::debug!(
@@ -1408,6 +1520,7 @@ async fn main() -> Result<()> {
                 // serve_http already drives its own shutdown via ctrl_c + cancel.
                 let result = serve_http(server.clone(), &host, port).await;
                 server.shutdown().await;
+                maybe_auto_push_savings(&repo);
                 result
             } else {
                 // Stdio MCP: the IDE (Claude Code, Cursor, Windsurf, OpenCode)
@@ -1420,17 +1533,28 @@ async fn main() -> Result<()> {
                 let mut waiter = Box::pin(service.waiting());
                 tokio::select! {
                     _ = wait_for_shutdown_signal() => {
-                        info!("shutdown requested");
+                        info!("shutdown requested by signal");
                     }
                     res = &mut waiter => match res {
                         Ok(reason) => info!(?reason, "MCP transport closed"),
                         Err(e) => tracing::warn!("MCP service join error: {e}"),
                     },
+                    _ = server.await_shutdown_request() => {
+                        // Periodic license-revalidation task detected a
+                        // worker-side rejection (account deletion / key
+                        // revoke / sub hard-expiry) or local credentials
+                        // disappeared from disk. Either way, the running
+                        // session is no longer authorised — exit cleanly
+                        // instead of holding the IDE's stdio open while
+                        // returning errors on every tool call.
+                        info!("shutdown requested by license revocation");
+                    }
                 }
                 // Drop the pinned waiter: its DropGuard cancels the service
                 // task and its owned transport, releasing stdin/stdout.
                 drop(waiter);
                 server.shutdown().await;
+                maybe_auto_push_savings(&repo);
                 Ok(())
             }
         }
@@ -1710,6 +1834,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Update { check, force } => update::run(check, force),
+        Command::Savings { action } => match action {
+            SavingsAction::Push { repo: r } => savings::push(r),
+            SavingsAction::Show { repo: r } => savings::show(r),
+        },
     }
 }
 

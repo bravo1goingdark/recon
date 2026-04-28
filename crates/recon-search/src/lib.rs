@@ -4,6 +4,7 @@
 pub mod fff_backend;
 pub mod filters;
 pub mod fuzzy;
+pub mod graph;
 pub mod pagerank;
 pub mod search_trait;
 pub mod tantivy_backend;
