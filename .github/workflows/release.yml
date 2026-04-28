@@ -246,12 +246,30 @@ jobs:
               --remote
           done
 
-      - name: Update latest.json
+      - name: Update latest.json (only if this is the highest tag)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           VERSION="${{ github.ref_name }}"
+          # Race guard: when multiple tags are pushed simultaneously
+          # (e.g. v0.3.0 + v0.3.1 + v0.3.2 in one `git push`), each
+          # workflow run is parallel and the last to call
+          # `wrangler r2 object put` wins — which is non-deterministic
+          # and has bitten us once already (v0.3.0 finished after
+          # v0.3.2, so latest.json got pinned to the lower version).
+          #
+          # Fix: each run fetches every tag from the repo, sorts by
+          # semver, and only the highest tag's run is allowed to
+          # write latest.json. Lower-versioned simultaneous releases
+          # become no-ops here, leaving the manifest pointing at the
+          # genuinely-latest version regardless of finish order.
+          git fetch --tags --quiet
+          HIGHEST=$(git tag -l 'v*' | sort -V | tail -1)
+          if [ "$VERSION" != "$HIGHEST" ]; then
+            echo "Skipping latest.json update: $VERSION is not the highest tag ($HIGHEST)."
+            exit 0
+          fi
           echo "{\"version\":\"$VERSION\"}" > latest.json
           wrangler r2 object put recon-releases/latest.json \
             --file latest.json \
