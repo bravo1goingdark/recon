@@ -1,7 +1,7 @@
 # recon installer — Windows (PowerShell)
 #
 # Usage:  irm https://mcprecon.pages.dev/install.ps1 | iex
-# Pinned: $env:VERSION = 'v0.1.0'; irm https://mcprecon.pages.dev/install.ps1 | iex
+# Pinned: $env:VERSION = 'v0.2.4'; irm https://mcprecon.pages.dev/install.ps1 | iex
 #
 # Same contract as the POSIX installer:
 #   1. Download the .zip + SHA256SUMS.txt

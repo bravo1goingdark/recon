@@ -161,15 +161,29 @@ async function subscribeToTier(tierName) {
 
     var data = await resp.json();
 
-    // Open Razorpay's Checkout SDK in an in-page modal. The SDK handles
-    // mandate authorisation (UPI / NetBanking / card) and on success does
-    // a full-page redirect to our `callback_url` (with redirect: true).
-    // The webhook is the authoritative tier-grant; this redirect is UX
-    // — the dashboard polls /v1/billing/portal until the webhook lands.
+    // Open Razorpay's Checkout SDK in an in-page modal.
     //
-    // Why not the create-subscription API's callback_url? Razorpay's
-    // /subscriptions endpoint rejects that field with 400 — the redirect
-    // is configured here on the SDK constructor, not server-side.
+    // Two complementary redirect paths are needed:
+    //
+    // 1. handler — fires for in-modal flows (UPI collect, cards without 3DS).
+    //    Runs in the same JS context as this page so the __Host-session cookie
+    //    (SameSite=Lax) is still present when the browser navigates to the
+    //    dashboard.
+    //
+    // 2. callback_url — required for redirect-based mandate authorization
+    //    (eNACH / Net Banking). These flows send the user's browser to an
+    //    external bank portal. After authorization, the bank redirects back
+    //    to Razorpay, which then does a TOP-LEVEL GET to callback_url.
+    //    SameSite=Lax cookies ARE sent on top-level GET navigations, so the
+    //    session survives. Without callback_url Razorpay has no return URL
+    //    and shows "page not present".
+    //
+    //    Critically, redirect: true must NOT be set. That flag makes Razorpay
+    //    use a POST form submission instead of a GET redirect — POST is
+    //    cross-site and SameSite=Lax blocks the cookie entirely.
+    //
+    // The webhook is still the authoritative tier-grant. The dashboard
+    // polls /v1/billing/portal until subscription.activated fires.
     //
     // Falls back to the hosted short_url page if the SDK isn't loaded
     // (CSP, ad-blocker, etc.) — user still completes auth, just without
@@ -183,14 +197,16 @@ async function subscribeToTier(tierName) {
       return;
     }
 
+    var dashboardUrl = window.location.origin + "/dashboard?just_paid=1";
     var rzp = new Razorpay({
       key: data.key_id,
       subscription_id: data.subscription_id,
       name: "recon",
       description: tierName + " plan",
-      callback_url:
-        window.location.origin + "/dashboard?just_paid=1",
-      redirect: true,
+      handler: function () {
+        window.location.href = dashboardUrl;
+      },
+      callback_url: dashboardUrl,
       prefill: currentUser
         ? {
             name: currentUser.github_username || "",

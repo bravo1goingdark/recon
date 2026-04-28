@@ -251,23 +251,20 @@
   .sechdr h2{font-family:var(--serif);font-size:clamp(40px,5vw,64px);line-height:1.02;letter-spacing:-0.025em;font-weight:400;max-width:780px}
   .sechdr h2 em{font-style:italic;color:var(--clay)}
 
-  /* ─────── TOOLS TABLE ─────── */
-  .tools{border-top:1px solid var(--rule)}
-  .tools .row{
-    display:grid;grid-template-columns:220px 120px 1fr 80px;gap:24px;align-items:baseline;
-    padding:22px 4px;border-bottom:1px solid var(--rule-soft);
-    transition:background .15s, padding .15s;
+  /* ─────── TOOLS CARDS ─────── */
+  .tools{border-top:1px solid var(--rule);padding-top:32px;display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+  .tools .card{
+    border:1px solid var(--rule-soft);border-radius:4px;padding:22px 20px;
+    display:flex;flex-direction:column;gap:10px;
+    transition:background .15s,border-color .15s,transform .12s;
   }
-  .tools .row:hover{background:var(--paper-2);padding-left:12px}
-  .tools .row .name{font-family:var(--mono);font-size:13.5px;color:var(--ink)}
-  .tools .row .name .paren{color:var(--ink-3)}
-  .tools .row .replaces{font-family:var(--mono);font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:var(--clay)}
-  .tools .row .desc{font-size:14px;color:var(--ink-2);line-height:1.5}
-  .tools .row .lat{font-family:var(--mono);font-size:12px;color:var(--ink-3);text-align:right}
-  @media (max-width:900px){
-    .tools .row{grid-template-columns:1fr;gap:4px;padding:18px 4px}
-    .tools .row .lat{text-align:left}
-  }
+  .tools .card:hover{background:var(--paper-2);border-color:var(--rule);transform:translateY(-1px)}
+  .tools .card .name{font-family:var(--mono);font-size:13.5px;color:var(--ink)}
+  .tools .card .name .paren{color:var(--ink-3)}
+  .tools .card .desc{font-size:13.5px;color:var(--ink-2);line-height:1.5;flex:1}
+  .tools .card .meta{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+  .tools .card .replaces{letter-spacing:0.08em;text-transform:uppercase;color:var(--clay)}
+  @media (max-width:720px){.tools{grid-template-columns:1fr}}
 
   /* ─────── COMPARISON ─────── */
   .compare{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft)}
@@ -465,16 +462,6 @@
           <a class="btn primary" href="#install">Install recon <span class="arr">→</span></a>
           <a class="btn ghost" href="#tools">Browse the 20 tools</a>
         </div>
-        <!-- Product Hunt featured badge — launch day. Move to footer
-             once the launch window closes if the hero feels crowded. -->
-        <a href="https://www.producthunt.com/products/recon-2?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-recon-3"
-           target="_blank" rel="noopener noreferrer"
-           style="display:inline-block;margin-top:18px"
-           aria-label="recon on Product Hunt">
-          <img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1132641&theme=light&t=1777192648542"
-               alt="recon — 35× fewer tokens for AI coding agents | Product Hunt"
-               width="250" height="54" />
-        </a>
       </div>
 
       <!-- Terminal -->
@@ -593,147 +580,112 @@
       <div class="no"><em>02</em> &nbsp;— &nbsp;Tools</div>
       <h2>Twenty tools that speak <em>symbols,</em> not strings.</h2>
       <p style="max-width:60ch;color:var(--ink-soft);margin-top:12px">
-        Twelve symbol-and-text primitives, seven graph-aware traversals
+        Twenty tools — symbol-and-text primitives, graph-aware traversal
         for "how does X reach Y?" and "what breaks if I change this?", and
-        one telemetry surface so you can prove the savings.
+        telemetry so you can prove the savings.
       </p>
     </div>
 
     <div class="tools">
-      <div class="row">
+      <div class="card">
         <div class="name">code_outline<span class="paren">(path)</span></div>
-        <div class="replaces">↳ Read</div>
         <div class="desc">One line per symbol — kind, name, line. Skim a 2000-line file in a single screen.</div>
-        <div class="lat">13 ms</div>
+        <div class="meta"><span class="replaces">↳ Read</span><span>~13 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_skeleton<span class="paren">(path)</span></div>
-        <div class="replaces">↳ Read</div>
         <div class="desc">Signatures and docs only; bodies collapse to <code>…</code>. About 10× compression vs. full read.</div>
-        <div class="lat">11 ms</div>
+        <div class="meta"><span class="replaces">↳ Read</span><span>~11 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_read_symbol<span class="paren">(…)</span></div>
-        <div class="replaces">↳ Read</div>
         <div class="desc">Pull a single function, its signature, doc, body — and every caller — without loading the file.</div>
-        <div class="lat">&lt;10 ms</div>
+        <div class="meta"><span class="replaces">↳ Read</span><span>&lt;10 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_find_symbol<span class="paren">(name)</span></div>
-        <div class="replaces">↳ Grep</div>
         <div class="desc">Three-tier resolver: exact SQLite → Tantivy BM25 → FTS5 trigram with nucleo fuzzy rescore.</div>
-        <div class="lat">8 ms</div>
+        <div class="meta"><span class="replaces">↳ Grep</span><span>~8 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_find_refs<span class="paren">(…)</span></div>
-        <div class="replaces">↳ Grep</div>
         <div class="desc">Reference count and the top-k call sites for any symbol in the repo.</div>
-        <div class="lat">12 ms</div>
+        <div class="meta"><span class="replaces">↳ Grep</span><span>~12 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_search<span class="paren">(query, mode)</span></div>
-        <div class="replaces">↳ Grep</div>
         <div class="desc">Exact · regex · hybrid. Tantivy-first, grep fallback. Filter DSL: <code>type:rust !test</code>.</div>
-        <div class="lat">33 ms</div>
+        <div class="meta"><span class="replaces">↳ Grep</span><span>~33 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_list<span class="paren">(glob?)</span></div>
-        <div class="replaces">↳ Glob</div>
         <div class="desc">Structured file listing with symbol counts — single GROUP BY query, not per-file.</div>
-        <div class="lat">57 ms</div>
+        <div class="meta"><span class="replaces">↳ Glob</span><span>~57 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_repo_map<span class="paren">(budget)</span></div>
-        <div class="replaces">—</div>
         <div class="desc">PageRank-ranked repo overview, cached in SQLite, invalidated on reindex.</div>
-        <div class="lat">19 ms</div>
+        <div class="meta"><span class="replaces">—</span><span>~19 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_find_strings<span class="paren">(…)</span></div>
-        <div class="replaces">—</div>
         <div class="desc">Search string literals and comments separately from identifiers. Grep, but narrower.</div>
-        <div class="lat">&lt;30 ms</div>
+        <div class="meta"><span class="replaces">—</span><span>&lt;30 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_multi_find<span class="paren">(patterns[])</span></div>
-        <div class="replaces">—</div>
         <div class="desc">Fan out several patterns through the TextSearcher trait in a single call.</div>
-        <div class="lat">&lt;30 ms</div>
+        <div class="meta"><span class="replaces">—</span><span>&lt;30 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_reindex<span class="paren">()</span></div>
-        <div class="replaces">—</div>
         <div class="desc">Agent-triggered re-index. Clears map cache, rebuilds incrementally.</div>
-        <div class="lat">varies</div>
+        <div class="meta"><span class="replaces">—</span><span>varies</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_stats<span class="paren">()</span></div>
-        <div class="replaces">—</div>
         <div class="desc">Index health, top-N centrality (in/out degree), and the live token-savings block.</div>
-        <div class="lat">10 ms</div>
+        <div class="meta"><span class="replaces">—</span><span>~10 ms</span></div>
       </div>
-
-      <!-- v0.3.x graph-traversal additions: replaces chained code_find_refs walks
-           with one call. Section header below tags them as a sub-group. -->
-      <div class="row" style="border-top:2px solid var(--rule-soft);margin-top:8px;padding-top:18px">
-        <div class="name" style="grid-column:1 / -1;font-size:13px;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-soft)">
-          ── Graph traversal &nbsp;·&nbsp; v0.3.0+
-        </div>
-      </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_path<span class="paren">(src, dst)</span></div>
-        <div class="replaces">↳ chained refs</div>
-        <div class="desc">Shortest call-graph path from <code>src</code> to <code>dst</code>. Bidirectional BFS, capped at 8 hops. Reports the exact chain.</div>
-        <div class="lat">&lt;5 ms</div>
+        <div class="desc">Shortest call-graph path from <code>src</code> to <code>dst</code>. Bidirectional BFS, capped at 8 hops.</div>
+        <div class="meta"><span class="replaces">↳ chained refs</span><span>&lt;5 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_callers<span class="paren">(sym, depth)</span></div>
-        <div class="replaces">↳ chained refs</div>
         <div class="desc">Transitive callers up to N rings (default 1, max 6). Cycle-safe; per-tier fan-out cap 50; total-visit cap 50 000.</div>
-        <div class="lat">&lt;10 ms</div>
+        <div class="meta"><span class="replaces">↳ chained refs</span><span>&lt;10 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_callees<span class="paren">(sym, depth)</span></div>
-        <div class="replaces">↳ chained refs</div>
         <div class="desc">Mirror of callers — what does <code>sym</code> call (directly and transitively)? Same caps, same shape.</div>
-        <div class="lat">&lt;10 ms</div>
+        <div class="meta"><span class="replaces">↳ chained refs</span><span>&lt;10 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_context<span class="paren">(sym, budget)</span></div>
-        <div class="replaces">↳ 4-call loop</div>
         <div class="desc">One-shot bundle: signature, body, callers, callees, types, tests. Replaces the canonical understand-X loop.</div>
-        <div class="lat">12 ms</div>
+        <div class="meta"><span class="replaces">↳ 4-call loop</span><span>~12 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_impact<span class="paren">(sym, depth)</span></div>
-        <div class="replaces">—</div>
         <div class="desc">Blast radius: transitive callers + reachable tests. Use before refactors to answer "what might break?"</div>
-        <div class="lat">&lt;15 ms</div>
+        <div class="meta"><span class="replaces">—</span><span>&lt;15 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_subsystems<span class="paren">(limit?)</span></div>
-        <div class="replaces">—</div>
         <div class="desc">Weakly-connected components of the reference graph, ranked by hub. Architectural orientation, no directory lore.</div>
-        <div class="lat">&lt;15 ms</div>
+        <div class="meta"><span class="replaces">—</span><span>&lt;15 ms</span></div>
       </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_subsystem<span class="paren">(id, budget)</span></div>
-        <div class="replaces">—</div>
         <div class="desc">Drill into one subsystem from <code>code_subsystems</code>. Skeleton-style summary within a token budget.</div>
-        <div class="lat">&lt;10 ms</div>
+        <div class="meta"><span class="replaces">—</span><span>&lt;10 ms</span></div>
       </div>
-
-      <!-- v0.3.1 telemetry tool. -->
-      <div class="row" style="border-top:2px solid var(--rule-soft);margin-top:8px;padding-top:18px">
-        <div class="name" style="grid-column:1 / -1;font-size:13px;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-soft)">
-          ── Token-savings telemetry &nbsp;·&nbsp; v0.3.1
-        </div>
-      </div>
-      <div class="row">
+      <div class="card">
         <div class="name">code_savings<span class="paren">()</span></div>
-        <div class="replaces">—</div>
         <div class="desc">Per-tool counter: calls, response tokens, baseline tokens avoided, tokens saved, avg latency. Model-agnostic — convert against your provider's rates. Persists across restarts.</div>
-        <div class="lat">&lt;5 ms</div>
+        <div class="meta"><span class="replaces">—</span><span>&lt;5 ms</span></div>
       </div>
     </div>
   </div>
@@ -763,18 +715,24 @@
 <span class="k">Grep</span>("render_map", "crates/**")  <span class="c">+ context</span>
 <span class="c">→ 34 matches × 3-line window  ·  ~28,000 tokens</span>
 
-<span class="k">Read</span> 4 callers  <span class="c">(map_test.rs, server.rs, …)</span>
+<span class="k">Read</span>("crates/recon-search/tests/map_test.rs")
+<span class="c">→ 142 lines  ·  ~2,300 tokens</span>
+
+<span class="k">Read</span> 4 callers  <span class="c">(server.rs, handler.rs, …)</span>
 <span class="c">→ 1,847 lines  ·  ~31,000 tokens</span>
 
 <span class="k">Read</span>("crates/recon-search/src/page_rank.rs")
 <span class="c">→ 218 lines  ·  ~3,600 tokens</span>
 
+<span class="k">Read</span>("crates/recon-search/src/lib.rs")
+<span class="c">→ 312 lines  ·  ~5,100 tokens</span>
+
 <span class="k">Read</span> 6 more files for orientation
 <span class="c">→ 2,170 lines  ·  ~27,600 tokens</span>
 
-<span class="c">subtotal</span> <span class="k">≈ 109,000 tokens</span></pre>
+<span class="c">subtotal</span> <span class="k">≈ 116,400 tokens</span></pre>
         <div class="meter">
-          <div class="lab"><span>tokens burned</span><span>109,000</span></div>
+          <div class="lab"><span>tokens burned</span><span>116,400</span></div>
           <div class="bar"><div class="fill" style="width:100%"></div></div>
         </div>
       </div>
@@ -785,24 +743,34 @@
           <span class="pill">code_* · graph-aware</span>
         </div>
 <pre><span class="c">// same question, symbol-first + graph-aware</span>
-<span class="h">code_context</span>("render_map", budget=<span class="h">2000</span>)
-<span class="c">→ signature, body, 5 callers, 5 callees,</span>
-<span class="c">  3 referenced types, 3 reaching tests  ·  ~1,840 tokens</span>
+<span class="h">code_find_symbol</span>("render_map")
+<span class="c">→ exact match  ·  ~90 tokens</span>
 
-<span class="h">code_path</span>("server::handle", "render_map")
-<span class="c">→ Handler → Router → render_map  ·  ~120 tokens</span>
+<span class="h">code_outline</span>("crates/recon-search/src/map.rs")
+<span class="c">→ 14 symbols, one line each  ·  ~210 tokens</span>
+
+<span class="h">code_read_symbol</span>("render_map")
+<span class="c">→ signature, body, every caller  ·  ~860 tokens</span>
+
+<span class="h">code_context</span>("render_map", budget=<span class="h">2000</span>)
+<span class="c">→ callers, callees, types, tests  ·  ~1,520 tokens</span>
 
 <span class="h">code_impact</span>("render_map", depth=<span class="h">3</span>)
-<span class="c">→ 12 production callers, 4 reaching tests  ·  ~520 tokens</span>
+<span class="c">→ blast radius: 12 callers, 4 tests  ·  ~450 tokens</span>
 
 <span class="h">code_repo_map</span>(focus=<span class="h">"…/map.rs"</span>, budget=<span class="h">1500</span>)
-<span class="c">→ pageranked overview  ·  ~1,280 tokens</span>
+<span class="c">→ pageranked overview  ·  ~1,100 tokens</span>
 
-<span class="c">subtotal</span> <span class="h">≈ 3,760 tokens</span>
-<span class="c">(replaces a 6-call canonical loop with 4 calls)</span></pre>
+<span class="h">code_list</span>("crates/**/*.rs")
+<span class="c">→ 312 files, symbol counts per file  ·  ~680 tokens</span>
+
+<span class="h">code_stats</span>()
+<span class="c">→ index health, centrality, telemetry  ·  ~150 tokens</span>
+
+<span class="c">subtotal</span> <span class="h">≈ 5,060 tokens</span></pre>
         <div class="meter">
-          <div class="lab"><span>tokens burned</span><span>3,760 &nbsp;·&nbsp; ~29× less, 4 calls vs. 12+</span></div>
-          <div class="bar"><div class="fill" style="width:4%"></div></div>
+          <div class="lab"><span>tokens burned</span><span>5,060  ·  ~23× less</span></div>
+          <div class="bar"><div class="fill" style="width:4.35%"></div></div>
         </div>
       </div>
     </div>
@@ -1086,14 +1054,6 @@ recon init --mcp windsurf  <span class="c"># Windsurf</span></pre>
           <span>recon<em>.</em></span>
         </div>
         <p class="blurb">Token-lean code intelligence for AI coding agents.</p>
-        <a href="https://www.producthunt.com/products/recon-2?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-recon-3"
-           target="_blank" rel="noopener noreferrer"
-           style="display:inline-block;margin-top:14px"
-           aria-label="recon on Product Hunt">
-          <img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1132641&theme=light&t=1777192648542"
-               alt="recon — 35× fewer tokens for AI coding agents | Product Hunt"
-               width="220" height="48" />
-        </a>
       </div>
       <div>
         <h4>Product</h4>

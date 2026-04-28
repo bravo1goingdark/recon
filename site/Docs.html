@@ -164,6 +164,14 @@
   table td code{background:transparent;border:none;padding:0;color:var(--ink)}
   table tr:hover td{background:var(--paper-2)}
 
+  /* tools cards */
+  main .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin:20px 0 36px;max-width:900px}
+  main .cards .card{border:1px solid var(--rule-soft);border-radius:4px;padding:18px 20px;transition:background .15s,border-color .15s,transform .12s}
+  main .cards .card:hover{background:var(--paper-2);border-color:var(--rule);transform:translateY(-1px)}
+  main .cards .card .t{font-family:var(--mono);font-size:13px;color:var(--ink);margin-bottom:8px}
+  main .cards .card .d{font-size:13px;color:var(--ink-2);line-height:1.5}
+  @media (max-width:600px){main .cards{grid-template-columns:1fr}}
+
   /* callout */
   .callout{
     border:1px solid var(--rule);border-left:3px solid var(--clay);
@@ -676,54 +684,30 @@ $ recon query code_repo_map '{"token_budget":500}'</pre>
     <!-- MCP TOOLS -->
     <h2 id="tools"><span class="no">08</span>MCP tools</h2>
 
-    <p>The 20 tools your AI agent calls when recon is wired up. Twelve symbol-and-text primitives, seven graph-aware traversals (added in v0.3.0), and one telemetry surface (added in v0.3.1). Each is documented in the agent's tool listing — these are summarised here so you can audit what the agent has access to.</p>
+    <p>The 20 tools your AI agent calls when recon is wired up — symbol-and-text primitives, graph-aware traversals, and telemetry. Each is documented in the agent's tool listing — these are summarised here so you can audit what the agent has access to.</p>
 
-    <h3>Symbol &amp; text primitives</h3>
-    <table>
-      <thead><tr><th>Tool</th><th>Replaces</th><th>What it does</th></tr></thead>
-      <tbody>
-        <tr><td><code>code_outline</code></td><td>Read</td><td>One line per symbol in a file.</td></tr>
-        <tr><td><code>code_skeleton</code></td><td>Read</td><td>Signatures + docs; bodies as <code>…</code>.</td></tr>
-        <tr><td><code>code_read_symbol</code></td><td>Read</td><td>Single symbol + its callers.</td></tr>
-        <tr><td><code>code_find_symbol</code></td><td>Grep</td><td>Three-tier exact → BM25 → fuzzy.</td></tr>
-        <tr><td><code>code_find_refs</code></td><td>Grep</td><td>Ref count + top-k call sites.</td></tr>
-        <tr><td><code>code_search</code></td><td>Grep</td><td>Exact, regex, hybrid.</td></tr>
-        <tr><td><code>code_list</code></td><td>Glob</td><td>Files with their top symbols.</td></tr>
-        <tr><td><code>code_repo_map</code></td><td>—</td><td>PageRank overview under a budget.</td></tr>
-        <tr><td><code>code_find_strings</code></td><td>—</td><td>Literals and comments only.</td></tr>
-        <tr><td><code>code_multi_find</code></td><td>—</td><td>Multi-pattern fan-out.</td></tr>
-        <tr><td><code>code_reindex</code></td><td>—</td><td>Agent-triggered reindex.</td></tr>
-        <tr><td><code>code_stats</code></td><td>—</td><td>Index health, top-N centrality, live token-savings block.</td></tr>
-      </tbody>
-    </table>
-
-    <h3>Graph-aware traversal <span style="color:var(--ink-3);font-weight:normal">— v0.3.0+</span></h3>
-
-    <p>These tools traverse the symbol reference graph that recon builds on every index. The graph is forward + reverse CSR — each tool runs a single bounded BFS and emits structured results without loading source files. Total-visit cap 50 000 nodes; per-tier fan-out cap 50 nodes; god-node queries terminate with a <code>truncated: true</code> marker rather than blowing up the response.</p>
-
-    <table>
-      <thead><tr><th>Tool</th><th>Replaces</th><th>What it does</th></tr></thead>
-      <tbody>
-        <tr><td><code>code_path</code></td><td>chained <code>code_find_refs</code></td><td>Shortest call-graph path between two symbols (bidirectional BFS, max 8 hops).</td></tr>
-        <tr><td><code>code_callers</code></td><td>chained refs</td><td>Transitive callers up to <code>depth</code> rings (default 1, max 6). Cycle-safe; tiered.</td></tr>
-        <tr><td><code>code_callees</code></td><td>chained refs</td><td>Transitive callees up to <code>depth</code> rings. What does X call?</td></tr>
-        <tr><td><code>code_context</code></td><td>4-call understand-X loop</td><td>One-shot bundle: signature, body, callers, callees, types, tests. Honors a token budget.</td></tr>
-        <tr><td><code>code_impact</code></td><td>—</td><td>Blast radius — transitive callers + reachable tests. "What might break if I change X?"</td></tr>
-        <tr><td><code>code_subsystems</code></td><td>—</td><td>Repo orientation by weakly-connected components. Each subsystem reports hub + dominant directory.</td></tr>
-        <tr><td><code>code_subsystem</code></td><td>—</td><td>Drill into one subsystem id from <code>code_subsystems</code> with a token-budgeted skeleton.</td></tr>
-      </tbody>
-    </table>
-
-    <h3>Token-savings telemetry <span style="color:var(--ink-3);font-weight:normal">— v0.3.1</span></h3>
-
-    <p>recon tracks per-tool calls, response-token estimates, and a baseline "what Read+Grep would have cost" figure. The difference is the tokens-saved number. Counters are lock-free atomics on the hot path; the SQLite <code>meta</code> table persists lifetime totals across restarts. recon is <b>model-agnostic</b> — agents using it may run on Claude, GPT, Gemini, or a self-hosted model, each with its own price sheet. We report tokens saved and let you convert against whatever you actually pay.</p>
-
-    <table>
-      <thead><tr><th>Tool</th><th>Replaces</th><th>What it does</th></tr></thead>
-      <tbody>
-        <tr><td><code>code_savings</code></td><td>—</td><td>Per-tool TSV: calls, response tokens, baseline avoided, tokens saved, avg latency. Plus aggregate trailer.</td></tr>
-      </tbody>
-    </table>
+    <div class="cards">
+      <div class="card"><div class="t">code_outline</div><div class="d">One line per symbol in a file. Replaces Read.</div></div>
+      <div class="card"><div class="t">code_skeleton</div><div class="d">Signatures + docs; bodies as <code>…</code>. Replaces Read.</div></div>
+      <div class="card"><div class="t">code_read_symbol</div><div class="d">Single symbol + its callers. Replaces Read.</div></div>
+      <div class="card"><div class="t">code_find_symbol</div><div class="d">Three-tier exact → BM25 → fuzzy. Replaces Grep.</div></div>
+      <div class="card"><div class="t">code_find_refs</div><div class="d">Ref count + top-k call sites. Replaces Grep.</div></div>
+      <div class="card"><div class="t">code_search</div><div class="d">Exact, regex, hybrid search. Replaces Grep.</div></div>
+      <div class="card"><div class="t">code_list</div><div class="d">Files with their top symbols. Replaces Glob.</div></div>
+      <div class="card"><div class="t">code_repo_map</div><div class="d">PageRank overview under a token budget.</div></div>
+      <div class="card"><div class="t">code_find_strings</div><div class="d">Literals and comments only.</div></div>
+      <div class="card"><div class="t">code_multi_find</div><div class="d">Multi-pattern fan-out search.</div></div>
+      <div class="card"><div class="t">code_reindex</div><div class="d">Agent-triggered reindex.</div></div>
+      <div class="card"><div class="t">code_stats</div><div class="d">Index health, top-N centrality, live token-savings block.</div></div>
+      <div class="card"><div class="t">code_path</div><div class="d">Shortest call-graph path between two symbols (bidirectional BFS, max 8 hops). Replaces chained refs.</div></div>
+      <div class="card"><div class="t">code_callers</div><div class="d">Transitive callers up to N rings (default 1, max 6). Cycle-safe; tiered.</div></div>
+      <div class="card"><div class="t">code_callees</div><div class="d">Transitive callees up to N rings. What does X call?</div></div>
+      <div class="card"><div class="t">code_context</div><div class="d">One-shot bundle: signature, body, callers, callees, types, tests.</div></div>
+      <div class="card"><div class="t">code_impact</div><div class="d">Blast radius — transitive callers + reachable tests. What might break if I change X?</div></div>
+      <div class="card"><div class="t">code_subsystems</div><div class="d">Repo orientation by weakly-connected components. Hub + dominant directory per subsystem.</div></div>
+      <div class="card"><div class="t">code_subsystem</div><div class="d">Drill into one subsystem from code_subsystems with a token-budgeted skeleton.</div></div>
+      <div class="card"><div class="t">code_savings</div><div class="d">Per-tool telemetry: calls, response tokens, baseline avoided, tokens saved, avg latency.</div></div>
+    </div>
 
     <p>Same numbers also surface as a <code>telemetry</code> block on every <code>code_stats</code> call — so dashboards can poll a single endpoint.</p>
 

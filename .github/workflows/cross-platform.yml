@@ -41,6 +41,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        # Skip post-run cache save on Windows; see release.yml for context.
+        if: runner.os != 'Windows'
 
       # Windows Defender real-time scanning of every SQLite / Tantivy /
       # tempfile the e2e tests produce is the single biggest reason Windows
