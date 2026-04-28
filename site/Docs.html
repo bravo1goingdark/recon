@@ -172,6 +172,13 @@
   .callout .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--clay);margin-bottom:6px}
   .callout p{margin:0;color:var(--ink-2)}
 
+  /* Inline version-tag pill — used for "v0.3.x+" markers next to headings,
+     CLI command names, and env-var rows. Keep it small and visually quiet
+     so it doesn't compete with the actual heading. */
+  .badge{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:0.06em;
+         color:var(--clay);background:var(--paper-2);border:1px solid var(--rule-soft);
+         padding:1px 7px;border-radius:3px;vertical-align:middle;margin-left:6px;font-weight:400}
+
   /* tiers grid */
   .tiers{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft);margin:20px 0 28px;max-width:820px}
   .tiers .t{background:var(--paper);padding:20px 22px}
@@ -210,7 +217,7 @@
       justify-content:center;color:var(--ink-3);transition:border-color .15s,color .15s;
       font-size:14px;
     "><span id="theme-icon">◑</span></button>
-    <div class="ship">v0.3.1 · <span>shipping</span></div>
+    <div class="ship">v0.3.2 · <span>shipping</span></div>
     <button class="nav-burger" id="nav-burger" aria-label="Open menu" aria-controls="nav-sheet" aria-expanded="false">
       <span class="bars"><span></span></span>
     </button>
@@ -321,7 +328,7 @@ curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 iwr https://mcprecon.pages.dev/install.ps1 | iex
 
 <span class="c"># pin a specific version</span>
-VERSION=v0.3.1 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+VERSION=v0.3.2 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
 <span class="c"># upgrade in place (lands the latest published release)</span>
 recon update</pre>
@@ -405,6 +412,28 @@ $ recon repos remove a3f1c8b2e6d4710f9c2e6d4710fc8b2e6d4710fc8b2e6d4710fc8b2e6d4
       <p>Moving or renaming a repo directory burns a slot — the fingerprint is path-based, so the new location produces a new fingerprint. Run <code>recon repos remove &lt;old-path&gt;</code> first, then <code>recon init</code> at the new location.</p>
     </div>
 
+    <h3 id="cmd-savings-push"><code>recon savings push</code> <span class="badge">v0.3.2+ · Pro/Team</span></h3>
+    <p>Push today's local token-savings rollup to the dashboard at <a href="https://mcprecon.pages.dev/dashboard">mcprecon.pages.dev/dashboard</a>. Aggregates the per-tool counters in <code>.recon/recon.db</code> (populated by every MCP tool call) into one row keyed on <code>(user_id, today_UTC)</code> and POSTs to <code>/v1/account/savings</code>. Repeat runs on the same day are idempotent — the worker MAX-merges, so a stale snapshot cannot regress an already-stored counter and double-counting is impossible.</p>
+    <p>Free tier returns a clean upgrade message (HTTP 402) rather than an error. The CLI surfaces it as plain text — no stack trace.</p>
+<pre>$ recon savings push
+Pushed savings for 2026-04-29 (Pro tier · recorded status)
+  calls=312 · response_tokens=47000 · baseline=2850000 · saved=2803000
+
+# Free tier
+$ recon savings push
+Error: Savings dashboard is a Pro/Team feature. Upgrade at
+       https://mcprecon.pages.dev/pricing</pre>
+
+    <h3 id="cmd-savings-show"><code>recon savings show</code> <span class="badge">v0.3.2+</span></h3>
+    <p>Print local counters as TSV, no network. Same data the agent sees via the <code>code_savings</code> tool, available without the MCP server running.</p>
+<pre>$ recon savings show
+# tool             calls  response_tokens  baseline  tokens_saved  avg_latency_ms
+code_outline       317    63400            951000    887600        4.20
+code_repo_map      42     84000            840000    756000        21.30
+code_path          18     2200             90000     87800         3.80
+...
+# total            923    251600           4730000   4478400        -</pre>
+
     <!-- PROJECT -->
     <h2 id="cli-project"><span class="no">05</span>CLI · Project</h2>
 
@@ -439,10 +468,10 @@ Released server-side repo slot</pre>
     <h3 id="cmd-doctor"><code>recon doctor [--json]</code></h3>
     <p>Run a battery of probes covering every surface a stuck install can fail on. Exit code is 1 if anything's broken — wire it into CI to catch regressions.</p>
 <pre>$ recon doctor
-recon doctor — 0.3.1 (x86_64-unknown-linux-gnu)
+recon doctor — 0.3.2 (x86_64-unknown-linux-gnu)
 repo: /home/me/proj
 
-[OK]    binary                        recon 0.3.1 (x86_64-unknown-linux-gnu)
+[OK]    binary                        recon 0.3.2 (x86_64-unknown-linux-gnu)
 [OK]    repo dir                      /home/me/proj writable
 [OK]    global config                 /home/me/.config/recon writable
 [OK]    license                       Pro (expires unix=1798761600)
@@ -462,13 +491,13 @@ Summary: 9 ok, 3 warn, 0 fail</pre>
     <h3 id="cmd-update"><code>recon update [--check] [--force]</code></h3>
     <p>Self-upgrade to the latest published release. Verifies the SHA-256 manifest and (with cosign present) the sigstore signature before swapping the binary.</p>
 <pre>$ recon update --check
-Latest: v0.3.1  (you're on v0.3.0)
+Latest: v0.3.2  (you're on v0.3.1)
 
 $ recon update
 Downloading recon-x86_64-unknown-linux-gnu.tar.gz...
 Verifying signature... OK
 Replacing /usr/local/bin/recon... OK
-Now on v0.3.1.</pre>
+Now on v0.3.2.</pre>
 
     <h3 id="cmd-version"><code>recon version</code></h3>
     <p>Print the binary's semver tag. Identical to <code>recon --version</code>; provided for shell scripts that want a stable subcommand.</p>
@@ -748,6 +777,8 @@ allow_sensitive = <span class="h">false</span></pre>
         <tr><td><code>RECON_API_URL</code></td><td>Worker base URL (defaults to the production endpoint).</td></tr>
         <tr><td><code>RECON_CONFIG_DIR</code></td><td>Override the global config dir (defaults to <code>~/.config/recon/</code>).</td></tr>
         <tr><td><code>RECON_REQUEST_TIMEOUT_SECS</code></td><td>Per-request deadline for tool calls (default 30, range 1–600).</td></tr>
+        <tr><td><code>RECON_LICENSE_REVALIDATE_SECS</code></td><td>How often <code>recon serve</code> re-validates its license against the worker (default 900, range 60–86400). On a worker rejection (revoked key, deleted account, sub expiry) the running server shuts down within one tick. <span class="badge">v0.3.2+</span></td></tr>
+        <tr><td><code>RECON_AUTO_PUSH_SAVINGS</code></td><td>Set to <code>1</code> to auto-push the local token-savings rollup to the dashboard when each <code>recon serve</code> session ends. Pro/Team only. <span class="badge">v0.3.2+</span></td></tr>
         <tr><td><code>RECON_WINDSURF_CONFIG_PATH</code></td><td>Override Windsurf's global MCP config path (test-only).</td></tr>
       </tbody>
     </table>
@@ -885,6 +916,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <!-- CHANGELOG -->
     <h2 id="changelog"><span class="no">15</span>Changelog</h2>
 
+    <p><b>v0.3.2</b> — Pro/Team savings dashboard: <code>recon savings push/show</code> CLI subcommand, <code>RECON_AUTO_PUSH_SAVINGS</code> env var for auto-push on shutdown, dashboard "Savings" tab with per-day sparkline, <code>POST /v1/account/savings</code> + <code>GET /v1/dashboard/savings</code> worker routes, D1 migration <code>0009_usage_rollups</code>. Plus lifecycle hardening: <code>recon serve</code> now exits cleanly on license revocation / account deletion / <code>recon logout</code> against a running session, not just signals + transport close. <a href="/changelog#v0-3-2">Full notes →</a></p>
     <p><b>v0.3.1</b> — Multi-language parser parity (Python, JS/TS, Go, Java, C/C++ extractors now walk function/class/struct bodies for identifier refs, so the call graph is meaningfully populated for every supported language). Token-savings counter: new <code>code_savings</code> tool, lock-free atomic counters with SQLite-backed lifetime persistence, telemetry block on <code>code_stats</code>. Model-agnostic — reports tokens saved, leaves dollar conversion to your provider's rate sheet. <a href="/changelog#v0-3-1">Full notes →</a></p>
     <p><b>v0.3.0</b> — Seven graph-traversal tools: <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_context</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>. Built on a forward+reverse CSR call graph cached alongside <code>code_repo_map</code>'s symbol set. Replaces the canonical chained-<code>code_find_refs</code> agent loop with a single bounded BFS. Also fixes the parser/storage parser-local-id remap that silently mis-attributed refs across files. <a href="/changelog#v0-3-0">Full notes →</a></p>
     <p><b>v0.2.4</b> — CI-only test skip on macOS so the <code>watcher_delete</code> integration tests don't keep the test binary alive past the workflow timeout. The watcher fix from v0.2.3 is unchanged. <a href="/changelog#v0-2-4">Full notes →</a></p>

@@ -6,16 +6,17 @@
 
 <p align="center">
   Token-lean code intelligence MCP server.<br/>
-  Replaces <code>Read</code>, <code>Grep</code>, and <code>Glob</code> with symbol-aware tools that deliver <strong>15-30x token reduction</strong> on code exploration.
+  Replaces <code>Read</code>, <code>Grep</code>, and <code>Glob</code> with <strong>20 symbol-aware tools</strong> -- including <strong>graph-aware navigation</strong> (call paths, callers, callees, blast-radius) across <strong>seven languages</strong> -- and a built-in <strong>token-savings counter</strong> so you can prove the win to finance.<br/>
+  <strong>15-30x token reduction</strong> on code exploration.
 </p>
 
 <p align="center">
-  <a href="https://mcprecon.pages.dev">Website</a> · <a href="https://mcprecon.pages.dev/Docs.html">Docs</a> · <a href="#connect-your-agent-hosted">Get Started</a>
+  <a href="https://mcprecon.pages.dev">Website</a> · <a href="https://mcprecon.pages.dev/Docs.html">Docs</a> · <a href="https://mcprecon.pages.dev/changelog">Changelog</a> · <a href="#connect-your-agent-hosted">Get Started</a>
 </p>
 
 ---
 
-Offered as a **hosted MCP server** -- no binary to install, no local indexing. Point your agent at the endpoint, hand it an API key, and it gets 12 symbol-aware tools instantly.
+Offered as a **hosted MCP server** -- no binary to install, no local indexing. Point your agent at the endpoint, hand it an API key, and it gets 20 symbol-aware tools instantly. **Pro/Team** plans add a savings dashboard at [mcprecon.pages.dev/dashboard](https://mcprecon.pages.dev/dashboard) showing the per-tool token savings your team has booked.
 
 ## Benchmarks
 
@@ -85,7 +86,7 @@ They return structured, token-efficient results.
 
 ### Step 4: Restart your agent
 
-Restart Claude Code (or your MCP client). The 12 `code_*` tools are now available. Indexing, watching, and ranking all run server-side.
+Restart Claude Code (or your MCP client). The 20 `code_*` tools are now available. Indexing, watching, and ranking all run server-side.
 
 ## Setup
 
@@ -107,10 +108,29 @@ Other license commands:
 
 ```bash
 recon license    # show cached tier, limits, expiry
-recon logout     # remove cached license
+recon logout     # remove cached license + signal any running serve to exit
 ```
 
-## Tools (12)
+### Token-savings (Pro/Team)
+
+```bash
+# Push today's local rollup to the dashboard (Pro/Team)
+recon savings push
+
+# Print local counters as TSV without touching the network
+recon savings show
+
+# Auto-push when each `recon serve` session ends
+RECON_AUTO_PUSH_SAVINGS=1 recon serve
+```
+
+`recon savings push` aggregates the per-tool counters in `.recon/recon.db` (populated by every MCP tool call) and POSTs to the recon worker. Repeated runs on the same day are idempotent (MAX-merged server-side). Free tier returns a clear upgrade message rather than an error.
+
+## Tools (20)
+
+Twelve symbol-and-text primitives, seven graph-aware traversals (added in v0.3.0), and one token-savings counter (added in v0.3.1).
+
+### Symbol & text primitives (12)
 
 | Tool | Replaces | What it does | Latency |
 |---|---|---|---|
@@ -125,7 +145,29 @@ recon logout     # remove cached license
 | `code_find_strings(pattern)` | -- | Search string literals and comments | <30 ms |
 | `code_multi_find(patterns[])` | -- | Multi-pattern search in one call | <30 ms |
 | `code_reindex()` | -- | Agent-triggered re-indexing, clears map cache | varies |
-| `code_stats()` | -- | Index health: files, symbols, freshness | 10 ms |
+| `code_stats()` | -- | Index health, top-N centrality, live token-savings block | 10 ms |
+
+### Graph-aware traversal (7) -- v0.3.0+
+
+A single bounded BFS over the cached forward+reverse CSR call graph replaces the canonical chained-`code_find_refs` agent loop. Total-visit cap 50 000 nodes, per-tier fan-out cap 50; god-node queries terminate with `truncated: true` rather than blowing up the response.
+
+| Tool | Replaces | What it does | Latency |
+|---|---|---|---|
+| `code_path(src, dst, max_hops?)` | chained refs | Shortest call-graph path between two symbols (bidirectional BFS, max 8 hops). | <5 ms |
+| `code_callers(symbol, depth?)` | chained refs | Transitive callers up to N rings (default 1, max 6). Cycle-safe; tiered. | <10 ms |
+| `code_callees(symbol, depth?)` | chained refs | Transitive callees up to N rings -- what does X call (directly + transitively)? | <10 ms |
+| `code_context(symbol, budget?)` | 4-call understand-X loop | One-shot bundle: signature + body + callers + callees + types + tests. Token-budgeted. | 12 ms |
+| `code_impact(symbol, depth?)` | -- | Blast radius -- transitive callers + reachable test functions. | <15 ms |
+| `code_subsystems(limit?)` | -- | Weakly-connected components of the reference graph, ranked by hub. | <15 ms |
+| `code_subsystem(id, budget?)` | -- | Drill into one subsystem with a token-budgeted skeleton. | <10 ms |
+
+### Token-savings counter (1) -- v0.3.1+
+
+| Tool | Replaces | What it does | Latency |
+|---|---|---|---|
+| `code_savings()` | -- | Per-tool TSV: calls, response tokens, baseline avoided, tokens saved, avg latency. Lifetime totals persist across restarts. Model-agnostic -- reports tokens, leaves dollar conversion to your provider's rate sheet. | <5 ms |
+
+The same numbers also surface as a `telemetry` block on every `code_stats` call -- so dashboards can poll a single endpoint.
 
 ### Filter DSL
 
@@ -149,8 +191,10 @@ crates/
   recon-search/     # Tantivy BM25, fff-grep, nucleo fuzzy, PageRank, token counting
   recon-embed/      # fastembed + LanceDB vector search (feature-gated)
   recon-indexer/    # Merkle tree, gix ColdStart, file watcher, rayon parallel parse
-  recon-server/     # rmcp MCP handler, 12 tools, parking_lot Mutex, redaction
-  recon-cli/        # CLI: login, init, serve, index, purge, query tools
+  recon-server/     # rmcp MCP handler, 20 tools, parking_lot Mutex, redaction,
+                    # call graph (forward+reverse CSR), telemetry counters,
+                    # shutdown-on-revocation notify
+  recon-cli/        # CLI: login, init, serve, index, purge, query, savings
 ```
 
 ### Search tiers
@@ -174,6 +218,28 @@ crates/
 
 `code_repo_map` builds a directed graph from symbol references, applies Aider-style edge weights (10x long identifiers, 0.1x private names, 50x focus files), runs power iteration with early convergence, and renders the top-ranked symbols within a token budget. Result is cached in SQLite, keyed on `max(indexed_at)` -- invalidates automatically on any reindex.
 
+### Call graph (v0.3.0+)
+
+Same `Symbol` + `Ref` substrate, different shape: a forward + reverse CSR adjacency built lazily on first graph-tool call after each reindex. Edge resolution mirrors PageRank's name-based lookup so the two views agree. Indices are `u32` for cache locality (graphs ≤ 4 B nodes); no weights stored (BFS doesn't need them); reverse CSR is just the transposed forward edges, ~16 MB for 1 M edges. Backs all seven graph-traversal tools. Path queries use bidirectional BFS for `O(b^(d/2))` scaling; layered BFS for callers/callees with cycle-safe visited sets and per-tier fan-out caps.
+
+### Multi-language parser parity (v0.3.1+)
+
+All seven supported languages -- Rust, Python, JavaScript/TypeScript/TSX, Go, Java, C/C++ -- now walk function/method/class/struct bodies and emit identifier refs from a proper identifier arm. Before v0.3.1 the call graph was structurally empty for non-Rust files; today the graph-traversal tools work cross-language with parity. Per-language regression tests in `recon-parser::extract::tests` lock the behavior in.
+
+### Token-savings counter (v0.3.1+)
+
+`crates/recon-server/src/telemetry.rs` tracks per-tool atomic counters (calls, response tokens, baseline tokens avoided, latency micros). The hot path is 4 `Relaxed` atomic adds plus one `tiktoken-rs` pass over the response (~250 µs for a 2 KB response). Lifetime totals persist to the SQLite `meta` table under `tel:tool:<name>` keys; flushes are async via `tokio::spawn_blocking`, never blocking tool latency. Per-tool baselines are static, audit-friendly constants documented in `BASELINES`; recon reports tokens, leaves dollar conversion to your provider's rate sheet (Claude / GPT / Gemini / self-hosted -- your rates, your math).
+
+### Pro/Team savings dashboard (v0.3.2+)
+
+The same telemetry plus a Pro/Team-only dashboard at [mcprecon.pages.dev/dashboard](https://mcprecon.pages.dev/dashboard). The CLI pushes one daily rollup per (user, day) via `POST /v1/account/savings`; the dashboard pulls a tier-capped range (Pro 30 d / Team 90 d / Enterprise 365 d) via `GET /v1/dashboard/savings`. Worker-side upsert is `MAX`-merged on `(user_id, day)` PK -- monotone (a stale push never regresses a stored counter) and idempotent. Pull endpoint is one D1 round-trip: equality+range scan on the PK, JS-side fold over ≤365 rows for totals (cheaper than a second SUM round-trip).
+
+What travels: six integers per day per user. **No code, no symbol names, no file paths, no query strings.** Free tier never pushes. Set `RECON_AUTO_PUSH_SAVINGS=1` to push automatically when each `recon serve` session ends.
+
+### Shutdown lifecycle (v0.3.2+)
+
+`recon serve` exits cleanly on five user-initiated triggers: IDE close (transport EOF), SIGINT/SIGTERM, **license revocation**, **account deletion**, and **`recon logout` against a running session**. The last three are detected within ≤ `RECON_LICENSE_REVALIDATE_SECS` (default 900) by the periodic re-validation task, which fires `ReconServer::request_shutdown()` -- a `tokio::sync::Notify` the serve loops select on alongside their existing signal and transport-close waiters. Without this, a deleted account would leave `recon serve` running forever, holding watchers and ports while refusing tool calls.
+
 ## Performance engineering
 
 - **mimalloc** global allocator
@@ -194,8 +260,15 @@ crates/
 ## Testing
 
 ```bash
-cargo test --workspace           # 107 tests across 19 suites
-cargo clippy --workspace -- -D warnings
+cargo test --workspace           # 490 Rust tests across the workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Plus a TypeScript/Vitest suite in `worker/`:
+
+```bash
+cd worker
+npm test                          # 105 worker tests across 8 files
 ```
 
 - Zero `unwrap()` in production library code
