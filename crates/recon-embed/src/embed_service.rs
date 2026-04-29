@@ -81,3 +81,23 @@ impl EmbedService {
             .ok_or_else(|| EmbedError::Model("empty embed result".into()))
     }
 }
+
+/// Adapt the local [`EmbedService`] (fastembed/ONNX) to the
+/// backend-agnostic [`recon_core::embed::EmbedService`] trait so
+/// `recon-server` can hold an `Arc<dyn EmbedService>` and stay
+/// agnostic to local-vs-hosted.
+impl recon_core::embed::EmbedService for EmbedService {
+    fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, recon_core::error::Error> {
+        EmbedService::embed_batch(self, texts).map_err(|e| match e {
+            EmbedError::Io(io) => recon_core::error::Error::Io(io),
+            other => recon_core::error::Error::Embed(other.to_string()),
+        })
+    }
+
+    fn embed_one(&self, text: &str) -> Result<Vec<f32>, recon_core::error::Error> {
+        EmbedService::embed_one(self, text).map_err(|e| match e {
+            EmbedError::Io(io) => recon_core::error::Error::Io(io),
+            other => recon_core::error::Error::Embed(other.to_string()),
+        })
+    }
+}

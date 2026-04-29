@@ -4,7 +4,6 @@
 //! embeddings. Runs entirely on CPU — no GPU or cloud API required.
 
 use crate::error::EmbedError;
-use recon_core::symbol::Symbol;
 
 /// Local ONNX embedding engine.
 pub struct Embedder {
@@ -84,63 +83,14 @@ impl Embedder {
             .ok_or_else(|| EmbedError::Model("empty result".into()))
     }
 
-    /// Format a symbol for embedding input.
-    ///
-    /// Format: `"{language} {kind} {qualified_name}({signature}) {doc}\n{body}"`
-    pub fn format_symbol(sym: &Symbol, body: &str) -> String {
-        let mut out = String::with_capacity(body.len() + 128);
-        out.push_str(sym.lang.name());
-        out.push(' ');
-        out.push_str(sym.kind.label());
-        out.push(' ');
-        out.push_str(&sym.qualified_name);
-        if let Some(sig) = &sym.signature {
-            out.push('(');
-            out.push_str(sig);
-            out.push(')');
-        }
-        if let Some(doc) = &sym.doc {
-            out.push(' ');
-            out.push_str(doc);
-        }
-        out.push('\n');
-        out.push_str(body);
-        out
-    }
+    // format_symbol moved to crate::format::format_symbol (always
+    // available, doesn't pull fastembed). The hosted backend reuses
+    // the same helper so both code paths embed identical input text.
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use compact_str::CompactString;
-    use recon_core::lang::Language;
-    use recon_core::symbol::SymbolKind;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    #[test]
-    fn format_symbol_works() {
-        let sym = Symbol {
-            id: 1,
-            path: Arc::new(PathBuf::from("src/lib.rs")),
-            name: CompactString::new("validate"),
-            qualified_name: CompactString::new("crate::validate"),
-            kind: SymbolKind::Function,
-            signature: Some("fn validate(email: &str) -> bool".into()),
-            doc: Some("Validate an email address.".into()),
-            parent_id: None,
-            byte_range: 0..100,
-            line_range: 1..=5,
-            body_hash: [0u8; 32],
-            lang: Language::Rust,
-        };
-        let formatted = Embedder::format_symbol(&sym, "{ email.contains('@') }");
-        assert!(formatted.contains("Rust"));
-        assert!(formatted.contains("fn"));
-        assert!(formatted.contains("crate::validate"));
-        assert!(formatted.contains("Validate an email"));
-        assert!(formatted.contains("email.contains"));
-    }
 
     #[test]
     #[ignore] // Requires model download (~300 MB)
