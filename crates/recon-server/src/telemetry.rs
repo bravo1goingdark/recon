@@ -87,11 +87,19 @@ pub const BASELINES: &[Baseline] = &[
         rationale: "measured per-call (full-file Read equivalent)",
     },
     // ── Static estimates (composite tools, no clean alternative) ───
+    // Static-only: 3-tier exact/BM25/fuzzy search has no clean grep
+    // alternative — fuzzy and BM25 ranking can't be reproduced by
+    // a single grep pass, so a measured baseline would understate
+    // the real Read+grep+read-top-N cost.
     Baseline {
         tool: "code_find_symbol",
         baseline_tokens: 5000,
         rationale: "Grep across repo + read top 2 hits",
     },
+    // Static-only: handler is index-driven (refs table, no grep on
+    // the hot path). Computing a measured baseline would require an
+    // extra grep pass per call just to size the alternative —
+    // doubles the work without changing the answer. Keep static.
     Baseline {
         tool: "code_find_refs",
         baseline_tokens: 3000,
@@ -99,23 +107,23 @@ pub const BASELINES: &[Baseline] = &[
     },
     Baseline {
         tool: "code_find_strings",
-        baseline_tokens: 3000,
-        rationale: "Grep for string in source files",
+        baseline_tokens: 0,
+        rationale: "measured per-call (sum of grep match-line tokens)",
     },
     Baseline {
         tool: "code_search",
-        baseline_tokens: 4000,
-        rationale: "Grep + read 2 hit files",
+        baseline_tokens: 0,
+        rationale: "measured per-call when grep path is taken; 0 for tantivy/semantic",
     },
     Baseline {
         tool: "code_multi_find",
-        baseline_tokens: 5000,
-        rationale: "N×Grep (avg 3 patterns)",
+        baseline_tokens: 0,
+        rationale: "measured per-call (sum across all patterns + matches)",
     },
     Baseline {
         tool: "code_list",
-        baseline_tokens: 2000,
-        rationale: "Glob + ls equivalents",
+        baseline_tokens: 0,
+        rationale: "measured per-call (sum of path + lang label bytes)",
     },
     Baseline {
         tool: "code_repo_map",
@@ -139,28 +147,45 @@ pub const BASELINES: &[Baseline] = &[
     },
     Baseline {
         tool: "code_context",
-        baseline_tokens: 8000,
-        rationale: "4-call understand-X loop (find_symbol+read_symbol+find_refs+search-tests)",
+        baseline_tokens: 0,
+        rationale: "measured per-call (target file read; floor on the 4-call alternative)",
     },
+    // Static-only: pure graph traversal (transitive callers + test
+    // detector). No file I/O on the hot path, so the only honest
+    // measured baseline would require running the alternative
+    // grep-of-callers passes per call — that doubles work without
+    // changing the answer. Static stays.
     Baseline {
         tool: "code_impact",
         baseline_tokens: 9000,
         rationale: "transitive callers + test grep + analysis",
     },
+    // Static-only: pure connected-components computation over the
+    // cached graph. No file I/O, no grep — the alternative cost
+    // (orientation = repo_map + 5 file reads) is real but unmeasurable
+    // from this handler without doing exactly that extra work.
     Baseline {
         tool: "code_subsystems",
         baseline_tokens: 12000,
         rationale: "repo_map + 5 file reads",
     },
+    // Static-only: index-only lookup over a cluster's symbol metadata.
+    // Same reasoning as `code_subsystems` — measuring the alternative
+    // (`ls + cat top-N files`) requires the extra reads.
     Baseline {
         tool: "code_subsystem",
         baseline_tokens: 5000,
         rationale: "directory listing + reads",
     },
+    // Operator/system tools — not exposed via MCP as of v0.4. They
+    // still get [`ToolCounter`] entries so CLI invocations
+    // (`recon stats`, `recon savings show`) can record latency / call
+    // counts, but their baseline credit is zero since users — not
+    // agents — invoke them.
     Baseline {
         tool: "code_stats",
-        baseline_tokens: 500,
-        rationale: "git log + ls equivalent",
+        baseline_tokens: 0,
+        rationale: "CLI/operator tool, not agent-facing",
     },
     Baseline {
         tool: "code_reindex",
@@ -170,7 +195,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_savings",
         baseline_tokens: 0,
-        rationale: "self-reference, no alternative",
+        rationale: "CLI/operator tool, not agent-facing",
     },
 ];
 
@@ -615,4 +640,3 @@ mod tests {
         assert_eq!(snap_after.measured_baseline_tokens, 5200);
     }
 }
-

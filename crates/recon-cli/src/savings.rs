@@ -114,8 +114,7 @@ fn aggregate(per_tool: &[(String, ToolSnapshot)], repo_fingerprint: String) -> P
     for (_, s) in per_tool {
         calls = calls.saturating_add(s.calls);
         response_tokens = response_tokens.saturating_add(s.response_tokens);
-        static_baseline_tokens =
-            static_baseline_tokens.saturating_add(s.static_baseline_tokens);
+        static_baseline_tokens = static_baseline_tokens.saturating_add(s.static_baseline_tokens);
         measured_baseline_tokens =
             measured_baseline_tokens.saturating_add(s.measured_baseline_tokens);
         latency_micros = latency_micros.saturating_add(s.latency_micros_total);

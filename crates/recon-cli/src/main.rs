@@ -380,7 +380,7 @@ enum SavingsAction {
     },
     /// Print local savings counters as TSV (no network)
     ///
-    /// Reads the same data the agent would see via `code_savings`,
+    /// Reads telemetry counters straight from `.recon/index.db`,
     /// without spinning up the MCP server.
     Show {
         /// Repository whose `.recon/index.db` to read.
@@ -607,7 +607,7 @@ provided by the recon MCP server:
 - Reading code: `code_outline`, `code_skeleton`, `code_read_symbol` (instead of `Read`)
 - Searching: `code_find_symbol`, `code_find_refs`, `code_search`, `code_find_strings`, `code_multi_find` (instead of `Grep`)
 - Listing / orientation: `code_list`, `code_repo_map` (instead of `Glob`)
-- Index health: `code_stats`, `code_reindex`
+- Index health: `code_reindex`
 
 Do **not** use `Read`, `Grep`, or `Glob` on source files by default.
 
@@ -637,7 +637,7 @@ provided by the recon MCP server:
 - Reading code: `code_outline`, `code_skeleton`, `code_read_symbol` (instead of `Read`)
 - Searching: `code_find_symbol`, `code_find_refs`, `code_search`, `code_find_strings`, `code_multi_find` (instead of `Grep`)
 - Listing / orientation: `code_list`, `code_repo_map` (instead of `Glob`)
-- Index health: `code_stats`, `code_reindex`
+- Index health: `code_reindex`
 
 Do **not** use `Read`, `Grep`, or `Glob` on source files by default.
 
@@ -668,7 +668,7 @@ provided by the recon MCP server:
 - Reading code: `code_outline`, `code_skeleton`, `code_read_symbol` (instead of `Read`)
 - Searching: `code_find_symbol`, `code_find_refs`, `code_search`, `code_find_strings`, `code_multi_find` (instead of `Grep`)
 - Listing / orientation: `code_list`, `code_repo_map` (instead of `Glob`)
-- Index health: `code_stats`, `code_reindex`
+- Index health: `code_reindex`
 
 Do **not** use `Read`, `Grep`, or `Glob` on source files by default.
 
