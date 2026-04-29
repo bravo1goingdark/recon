@@ -76,31 +76,62 @@ fn secret_scanner() -> Option<&'static aho_corasick::AhoCorasick> {
     .as_ref()
 }
 
-/// Check if a path should be blocked from being served.
-pub fn is_blocked_path(path: &Path) -> bool {
-    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+/// Returns true when a single path component (file or directory name) matches
+/// a blocked filename, a `<blocked>.<anything>` pattern, or carries a blocked
+/// extension.
+///
+/// Centralised so `is_blocked_path` can apply the same rules to every
+/// component of a path, not only the leaf — otherwise paths like
+/// `vault/.pem/leaf.txt` slip through (the leaf has no blocked extension,
+/// but an intermediate directory is itself a sensitive bucket).
+fn is_blocked_component(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
 
-    // Check blocked filenames — no format!() allocation
+    // Exact-match or `<blocked>.<anything>` against the BLOCKED_PATHS list.
     for blocked in BLOCKED_PATHS {
-        if filename == *blocked {
+        if name == *blocked {
             return true;
         }
-        // Check for "blocked.xxx" pattern without allocating
-        if filename.len() > blocked.len()
-            && filename.starts_with(blocked)
-            && filename.as_bytes()[blocked.len()] == b'.'
+        if name.len() > blocked.len()
+            && name.starts_with(blocked)
+            && name.as_bytes()[blocked.len()] == b'.'
         {
             return true;
         }
     }
 
-    // Check blocked extensions
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if BLOCKED_EXTENSIONS.contains(&ext) {
-            return true;
+    // Extension check. `Path::extension` is leaf-only, so for intermediate
+    // components we extract the suffix manually to keep behaviour uniform.
+    if let Some(dot) = name.rfind('.') {
+        // Skip dotfiles like ".env" — they're handled by BLOCKED_PATHS above.
+        if dot > 0 {
+            let ext = &name[dot + 1..];
+            if BLOCKED_EXTENSIONS.contains(&ext) {
+                return true;
+            }
         }
     }
 
+    false
+}
+
+/// Check if a path should be blocked from being served.
+///
+/// Matches against every path component, not only the file name, so that
+/// paths like `secrets/.env/dump.json` or `vault/key.pem/notes.md` are
+/// caught even when the leaf itself looks innocuous.
+pub fn is_blocked_path(path: &Path) -> bool {
+    for component in path.components() {
+        if let std::path::Component::Normal(os) = component {
+            if let Some(name) = os.to_str() {
+                if is_blocked_component(name) {
+                    return true;
+                }
+            }
+        }
+    }
     false
 }
 
@@ -213,6 +244,23 @@ mod tests {
         assert!(!is_blocked_path(Path::new("src/main.rs")));
         assert!(!is_blocked_path(Path::new("README.md")));
         assert!(!is_blocked_path(Path::new("config.toml")));
+    }
+
+    /// A leaf with a benign extension (`.json`) must still be blocked when
+    /// any intermediate path component is itself sensitive — otherwise paths
+    /// like `vault/secret.pem/leaf.json` smuggle key material out under the
+    /// guise of an unrelated file extension.
+    #[test]
+    fn blocks_intermediate_sensitive_components() {
+        assert!(is_blocked_path(Path::new("vault/secret.pem/leaf.json")));
+        assert!(is_blocked_path(Path::new("a/b/server.key/c.txt")));
+        assert!(is_blocked_path(Path::new("project/.env/dump.json")));
+        assert!(is_blocked_path(Path::new("project/.env.local/extra.txt")));
+        assert!(is_blocked_path(Path::new("a/id_rsa/note.md")));
+
+        // Negative controls: similarly-shaped paths with no sensitive component.
+        assert!(!is_blocked_path(Path::new("vault/notes/leaf.json")));
+        assert!(!is_blocked_path(Path::new("docs/key-rotation/runbook.md")));
     }
 
     #[test]

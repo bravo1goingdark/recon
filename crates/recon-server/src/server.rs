@@ -1956,7 +1956,18 @@ impl ReconServer {
                 };
                 measured_from_fallback =
                     Some(recon_search::tokens::estimate_tokens(&content) as u64);
-                skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
+                // Build the truncated preview in one pass to avoid the
+                // intermediate `Vec<&str>` + `join` allocation. `content` is
+                // already bounded by `MAX_READ_FILE_SIZE`, so capping the
+                // capacity at 8 KB covers the 50-line preview comfortably.
+                let mut buf = String::with_capacity(content.len().min(8 * 1024));
+                for (i, line) in content.lines().take(50).enumerate() {
+                    if i > 0 {
+                        buf.push('\n');
+                    }
+                    buf.push_str(line);
+                }
+                skeleton = buf;
             }
 
             let token_est = recon_search::tokens::estimate_tokens(&skeleton);
