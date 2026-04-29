@@ -580,10 +580,12 @@ describe("GET /v1/dashboard/savings", () => {
       latency_micros: 1234,
     });
     expect(r.status).toBe(200);
-    const row = await env.RECON_DB.prepare(
-      `SELECT static_baseline_tokens, measured_baseline_tokens
-       FROM usage_rollups WHERE user_id = ? AND day = ?`,
-    )
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const row = await db
+      .prepare(
+        `SELECT static_baseline_tokens, measured_baseline_tokens
+         FROM usage_rollups WHERE user_id = ? AND day = ?`,
+      )
       .bind("u_pro", TODAY)
       .first<{
         static_baseline_tokens: number;
@@ -615,10 +617,12 @@ describe("GET /v1/dashboard/savings", () => {
       tokens_saved: 10_850,
       latency_micros: 1000,
     });
-    const row = await env.RECON_DB.prepare(
-      `SELECT measured_baseline_tokens, calls
-       FROM usage_rollups WHERE user_id = ? AND day = ?`,
-    )
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const row = await db
+      .prepare(
+        `SELECT measured_baseline_tokens, calls
+         FROM usage_rollups WHERE user_id = ? AND day = ?`,
+      )
       .bind("u_pro", TODAY)
       .first<{ measured_baseline_tokens: number; calls: number }>();
     expect(row!.measured_baseline_tokens).toBe(12_500); // higher of the two
