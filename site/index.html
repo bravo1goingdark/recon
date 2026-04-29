@@ -691,6 +691,16 @@
         <div class="desc">Drill into one subsystem from <code>code_subsystems</code>. Skeleton-style summary within a token budget.</div>
         <div class="meta"><span class="replaces">—</span><span>&lt;10 ms</span></div>
       </div>
+      <div class="card">
+        <div class="name">code_activate_repo<span class="paren">(path)</span></div>
+        <div class="desc">Switch the active repository for subsequent stateful tools. Tier-limit aware via <code>RepoRouter</code>; persists the loaded set across <code>recon serve</code> restarts.</div>
+        <div class="meta"><span class="replaces">↳ multi-repo</span><span>&lt;5 ms</span></div>
+      </div>
+      <div class="card">
+        <div class="name">code_list_repos<span class="paren">()</span></div>
+        <div class="desc">Loaded repos with <code>files</code>, <code>symbols</code>, and an <code>active</code> flag. Pairs with <code>code_activate_repo</code> for discovery before switching.</div>
+        <div class="meta"><span class="replaces">↳ multi-repo</span><span>&lt;1 ms</span></div>
+      </div>
     </div>
     <p style="margin-top:18px;font-size:13px;color:var(--ink-3);max-width:72ch">
       Token-savings telemetry runs alongside every call — per-call <b>measured</b> against
