@@ -125,6 +125,36 @@ fn text_hit_json(
 /// Prevents OOM on accidentally large files (e.g. minified bundles, lock files).
 const MAX_READ_FILE_SIZE: u64 = 2 * 1024 * 1024;
 
+/// Cross-platform "is this the same file?" oracle.
+///
+/// Returns a stable identifier for the file at `path` — Unix inode on
+/// Linux/macOS, NTFS file-index on Windows. The returned value is only
+/// meaningful for equality comparison ("did the file at this path get
+/// replaced under me?") — the absolute number is opaque.
+///
+/// Returns `None` when the file is missing, inaccessible, or the
+/// platform doesn't expose a file id (wasi, redox, …). Callers should
+/// treat `None` from a previously-`Some` reading as "the file is gone"
+/// and handle it equivalently to "the inode changed."
+fn file_id(path: &std::path::Path) -> Option<u64> {
+    let m = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(m.ino())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        m.file_index()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = m;
+        None
+    }
+}
+
 /// Coalesces concurrent refresh requests into a single worker thread.
 /// `dirty` is the edge: kick sets it; the worker drains it.
 struct RefreshGate {
@@ -950,23 +980,22 @@ impl ReconServer {
         let cached_call_graph = self.cached_call_graph.clone();
         let shutdown_flag = self.shutdown_flag.clone();
         let shutdown_notify = self.shutdown_notify.clone();
-        // Capture the initial inode of `.recon/index.db` so we can detect
-        // it being unlinked from underneath us (rare in normal use, but
-        // happens when a misbehaving test or `rm -rf .recon/` clobbers
-        // the dir while we're running). Without this guard, the kernel
-        // keeps our open fds alive against a phantom inode while new
-        // tools/CLI invocations write to a fresh inode at the same path
-        // — silent split-brain. Unix only: Windows rejects unlink on a
-        // file with open handles, so the failure mode doesn't apply.
-        #[cfg(unix)]
-        let initial_db_inode: Option<u64> = {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(repo_root.join(".recon/index.db"))
-                .ok()
-                .map(|m| m.ino())
-        };
-        #[cfg(not(unix))]
-        let initial_db_inode: Option<u64> = None;
+        // Capture the initial file-id of `.recon/index.db` so we can detect
+        // it being unlinked / replaced from underneath us. This happens
+        // when a misbehaving test or `rm -rf .recon/` clobbers the dir
+        // while we're running. Without this guard, the OS keeps our open
+        // file handles alive against a now-orphaned file while new tools/
+        // CLI invocations write to a fresh file at the same path — silent
+        // split-brain.
+        //
+        // Linux/macOS: `metadata().ino()` from `std::os::unix::fs::MetadataExt`.
+        // Windows: `metadata().file_index()` from `std::os::windows::fs::MetadataExt`.
+        //   Modern SQLite opens with FILE_SHARE_DELETE on Windows, so the
+        //   deleted-while-open case is reachable there too — the file is
+        //   marked for deletion and lingers until our last handle closes.
+        // Other platforms (wasi, redox, ...): None — the check no-ops and
+        // we keep v0.3.3 behavior.
+        let initial_db_inode: Option<u64> = file_id(&repo_root.join(".recon/index.db"));
         // Snapshot the Arc handles once; the hot path inside the loop needs no locks.
         #[cfg(feature = "embed")]
         let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.load_full();
@@ -1118,24 +1147,25 @@ impl ReconServer {
                 }
 
                 // Self-heal guard: if `.recon/index.db` was unlinked
-                // since we started (rare; only happens when a
-                // sibling process `rm -rf .recon/`s us), our open fds
-                // now point at a deleted inode. Continuing the loop
-                // means writing into a phantom DB nothing else can
-                // see. Better to exit cleanly so the IDE supervisor
-                // respawns us against the live inode.
-                #[cfg(unix)]
+                // or replaced since we started (rare; happens when a
+                // sibling process `rm -rf .recon/`s us, a misbehaving
+                // test wipes the dir, or a container restart races
+                // with our shutdown), our open file handles now point
+                // at an orphaned file. Continuing the loop means
+                // writing into a phantom DB nothing else can see —
+                // silent split-brain. Better to exit cleanly so the
+                // IDE supervisor respawns us against the live file.
+                //
+                // Cross-platform via `file_id`: Unix inode, Windows
+                // NTFS file-index, None elsewhere (no-op fallback).
                 if let Some(initial) = initial_db_inode {
-                    use std::os::unix::fs::MetadataExt;
-                    let current = std::fs::metadata(repo_root.join(".recon/index.db"))
-                        .ok()
-                        .map(|m| m.ino());
+                    let current = file_id(&repo_root.join(".recon/index.db"));
                     if current != Some(initial) {
                         warn!(
-                            initial_inode = initial,
-                            current_inode = ?current,
-                            "watcher: .recon/index.db inode changed under us; \
-                             requesting shutdown so the supervisor respawns against the live inode",
+                            initial_id = initial,
+                            current_id = ?current,
+                            "watcher: .recon/index.db file-id changed under us; \
+                             requesting shutdown so the supervisor respawns against the live file",
                         );
                         shutdown_flag.store(true, Ordering::Relaxed);
                         shutdown_notify.notify_waiters();

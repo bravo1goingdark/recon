@@ -37,17 +37,27 @@ behavior in.
 Even with the test fixed, the same failure mode can be triggered by
 any `rm -rf .recon/`, container restart racing with a still-running
 server, or a botched manual recovery. `start_watcher` now captures
-the inode of `.recon/index.db` at startup (Unix only — Windows
-rejects unlink on a file with open handles, so the failure mode
-doesn't apply) and stat()s the path on each 500 ms recv-timeout
-cycle of the watcher loop. If the inode diverges (file unlinked,
-or replaced by a new inode at the same path), the server logs a
-warning, sets the shutdown flag, wakes the `tokio::sync::Notify`
-that v0.3.2 added for license-revocation shutdowns, and exits cleanly.
-The IDE supervisor (Claude Code / Cursor / Windsurf / opencode) sees
-the child exit and respawns it; the new child opens the live inode
-on startup and operates correctly. Cost on the hot path is one
-`stat()` per 500 ms — ~3 µs on Linux ext4.
+the file id of `.recon/index.db` at startup and re-checks it on
+each 500 ms recv-timeout cycle of the watcher loop. If it diverges
+(file unlinked, or replaced by a new file at the same path), the
+server logs a warning, sets the shutdown flag, wakes the
+`tokio::sync::Notify` that v0.3.2 added for license-revocation
+shutdowns, and exits cleanly. The IDE supervisor (Claude Code /
+Cursor / Windsurf / opencode) sees the child exit and respawns it;
+the new child opens the live file on startup and operates correctly.
+Cost on the hot path is one `stat()` per 500 ms — ~3 µs on Linux
+ext4.
+
+Cross-platform: a small `file_id` helper resolves to Unix inode
+(`std::os::unix::fs::MetadataExt::ino`) on Linux/macOS and NTFS
+file-index (`std::os::windows::fs::MetadataExt::file_index`) on
+Windows. Modern SQLite opens with `FILE_SHARE_DELETE` on Windows so
+the unlink-while-open scenario is reachable there too — file is
+marked for deletion, lingers until our last handle closes, the
+on-disk path can be recreated by another process at a fresh
+file-index. Same shape, same fix. Other platforms (wasi, redox,
+fuchsia, …) get `None` and the check no-ops; no behavior change
+from v0.3.3 there.
 
 ### Fixed — `server.shutdown()` no longer wedges on a phantom DB
 
