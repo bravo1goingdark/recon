@@ -48,8 +48,19 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 /// Flush counters to SQLite every N tool calls. Trades a small SQLite
-/// write rate for bounded data loss on hard kill.
-pub const FLUSH_THRESHOLD: u64 = 50;
+/// write rate for bounded data loss on hard kill. Lowered from 50 to
+/// 10 in v0.5.0 — the count-only trigger left bursty agentic flows
+/// (3 calls/hr in an idle IDE window) with persisted state perpetually
+/// stale; pair the lower count with the timer below so the tail of
+/// any session also flushes.
+pub const FLUSH_THRESHOLD: u64 = 10;
+
+/// Periodic flush interval in seconds. Even idle sessions persist
+/// counters at least once per [`FLUSH_INTERVAL_SECS`] so
+/// `recon savings show` never reports "no telemetry" after an
+/// active session. Override via `RECON_TELEMETRY_FLUSH_SECS` (0
+/// disables the timer entirely; the count trigger still fires).
+pub const FLUSH_INTERVAL_SECS: u64 = 60;
 
 /// Per-tool baseline cost: what an agent would otherwise have paid using
 /// only Read/Grep/Glob.
@@ -541,9 +552,12 @@ mod tests {
     #[test]
     fn record_static_path_for_non_migrated_tool() {
         let t = Arc::new(Telemetry::new());
-        for _ in 0..10 {
+        // First 9 calls accumulate without firing the flush trigger.
+        for _ in 0..(FLUSH_THRESHOLD - 1) {
             assert!(!t.record("code_find_symbol", Duration::from_millis(2), 400, None));
         }
+        // 10th call hits the threshold and returns true.
+        assert!(t.record("code_find_symbol", Duration::from_millis(2), 400, None));
         let agg = t.aggregate();
         assert_eq!(agg.calls, 10);
         assert_eq!(agg.response_tokens, 4000);

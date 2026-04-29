@@ -1442,6 +1442,12 @@ async fn main() -> Result<()> {
 
             server.start_watcher();
 
+            // Hybrid telemetry flush: the count trigger fires every
+            // FLUSH_THRESHOLD tool calls; this timer covers the idle
+            // tail so even sessions with sub-threshold call rates
+            // persist their counters within FLUSH_INTERVAL_SECS.
+            server.start_telemetry_flush_timer();
+
             // Periodic license re-validation.
             //
             // Polls every 15 min (override via RECON_LICENSE_REVALIDATE_SECS).

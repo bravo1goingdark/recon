@@ -242,7 +242,10 @@ pub fn push(repo: Option<PathBuf>) -> Result<()> {
     let snapshots = load_local_snapshots(&db_path)?;
     if snapshots.is_empty() {
         eprintln!(
-            "no telemetry counters in {} — make at least one MCP tool call before pushing.",
+            "no flushed telemetry yet in {}.\n\
+             A running `recon serve` accumulates counts in memory; they persist\n\
+             every 60 s or every 10 tool calls, whichever fires first. Use\n\
+             `recon query code_savings '{{}}'` to see the live in-memory totals.",
             db_path.display()
         );
         return Ok(());
@@ -328,7 +331,10 @@ pub fn show(repo: Option<PathBuf>) -> Result<()> {
     let snapshots = load_local_snapshots(&db_path)?;
     if snapshots.is_empty() {
         eprintln!(
-            "no telemetry counters in {} — make at least one MCP tool call first.",
+            "no flushed telemetry yet in {}.\n\
+             A running `recon serve` accumulates counts in memory; they persist\n\
+             every 60 s or every 10 tool calls, whichever fires first. Use\n\
+             `recon query code_savings '{{}}'` to see the live in-memory totals.",
             db_path.display()
         );
         return Ok(());

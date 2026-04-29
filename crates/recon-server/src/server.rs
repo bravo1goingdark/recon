@@ -675,6 +675,52 @@ impl ReconServer {
         });
     }
 
+    /// Spawn a periodic telemetry-flush task so even idle sessions
+    /// persist counters at least once per
+    /// [`crate::telemetry::FLUSH_INTERVAL_SECS`]. The count-based
+    /// threshold ([`crate::telemetry::FLUSH_THRESHOLD`]) still fires on
+    /// hot bursts; the timer covers the long tail (3 calls/hr in an
+    /// otherwise-idle IDE window).
+    ///
+    /// Override the interval via `RECON_TELEMETRY_FLUSH_SECS`. Setting
+    /// it to `0` disables the timer entirely (the count trigger keeps
+    /// working). Clamped to [10, 3600] otherwise.
+    ///
+    /// The task holds a clone of the server (cheap — all state is
+    /// behind `Arc`) and exits when `shutdown_flag` is set, so it
+    /// terminates cleanly with the rest of `recon serve`.
+    pub fn start_telemetry_flush_timer(&self) {
+        let interval_secs = match std::env::var("RECON_TELEMETRY_FLUSH_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            Some(0) => {
+                info!("telemetry: periodic flush disabled (RECON_TELEMETRY_FLUSH_SECS=0)");
+                return;
+            }
+            Some(n) => n.clamp(10, 3600),
+            None => crate::telemetry::FLUSH_INTERVAL_SECS,
+        };
+        let server = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the immediate-fire so we wait one full interval before
+            // the first flush — fresh counters have nothing to persist.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if server
+                    .shutdown_flag
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    break;
+                }
+                server.flush_telemetry_async();
+            }
+        });
+    }
+
     /// Synchronous flush — used by `shutdown()` to capture the trailing
     /// window before exit.
     fn flush_telemetry_sync(&self) {
