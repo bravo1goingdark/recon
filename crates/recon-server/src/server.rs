@@ -3064,8 +3064,12 @@ impl ReconServer {
             }
 
             // Exact mode: try Tantivy first (sub-ms), fall back to grep only if empty.
-            // Tantivy-served calls have no measured baseline (it's an index lookup,
-            // not a Read+grep equivalent) — they pass `None`.
+            // Tantivy-served calls don't run a grep pass, so the measured
+            // baseline is the agent's *alternative* path: grep for the query
+            // across the repo, then read the top-2 hit files. We approximate
+            // that with the file content of the top-2 tantivy hits — same
+            // rationale as the v0.3.x static estimate ("Grep + read 2 hit
+            // files"), but per-call against real bytes.
             let tantivy_hits = self.tantivy_search(params.0.query.clone(), 30).await;
             if !tantivy_hits.is_empty() {
                 // Tantivy hits carry symbol_id but no line number; resolve symbol
@@ -3077,6 +3081,26 @@ impl ReconServer {
                     .symbol_locations_by_ids(&ids)
                     .map(|rows| rows.into_iter().map(|(id, _, line)| (id, line)).collect())
                     .unwrap_or_default();
+
+                // Measured baseline: sum content tokens of up to 2 unique top
+                // hit files. Reuses `measure_read_baseline` so the read uses
+                // the same MAX_READ_FILE_SIZE cap real Read-shaped tools see.
+                let mut measured: u64 = 0;
+                let mut seen: ahash::AHashSet<&str> = ahash::AHashSet::new();
+                for hit in tantivy_hits.iter() {
+                    if seen.len() >= 2 {
+                        break;
+                    }
+                    if !seen.insert(hit.path.as_str()) {
+                        continue;
+                    }
+                    if let Ok(abs) = self.resolve_path(hit.path.as_str()) {
+                        if let Some(t) = self.measure_read_baseline(&abs).await {
+                            measured = measured.saturating_add(t);
+                        }
+                    }
+                }
+
                 let entries: Vec<serde_json::Value> = tantivy_hits
                     .iter()
                     .map(|hit| {
@@ -3093,7 +3117,7 @@ impl ReconServer {
                     redact_response(
                         serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
                     ),
-                    None,
+                    Some(measured),
                 );
             }
 
@@ -3160,11 +3184,14 @@ impl ReconServer {
             });
 
             let mut entries: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
-            // Measured baseline = total bytes of `ls -R`-style output the agent
-            // would have grovelled through to get the same orientation. Sum
-            // `path` and language label per kept row; the chars/4 estimator
-            // matches what `record_call` uses on the response side.
+            // Measured baseline: the agent's real `code_list` alternative is
+            // `Glob + cat top-N files` to orient — not just enumerating
+            // paths. v0.4.0 only summed (path + lang) bytes, which
+            // under-counted by ~50× vs the static estimate (advisor flag).
+            // v0.4.1 also tracks the top-3 kept paths so we can read their
+            // content as the dominant component of the alternative cost.
             let mut measured_bytes: usize = 0;
+            let mut top_paths: SmallVec<[PathBuf; 3]> = SmallVec::new();
             for (path, sym_count, top_syms) in &summaries {
                 if let Some(ref pf) = filter_parsed {
                     if filters::apply_filter(std::slice::from_ref(path), pf, git_paths.as_deref())
@@ -3189,13 +3216,27 @@ impl ReconServer {
 
                 let path_str = path.to_string_lossy();
                 measured_bytes += path_str.len() + lang.name().len() + 2;
+                if top_paths.len() < 3 {
+                    top_paths.push(path.clone());
+                }
                 entries.push(serde_json::json!({
                     "path": path_str, "lang": lang.name(),
                     "symbol_count": sym_count, "top_symbols": top_syms,
                 }));
             }
 
-            let measured = Some(measured_bytes.div_ceil(4) as u64);
+            // Path-listing tokens (cheap), plus content of up to 3 top files
+            // (the dominant cost — what an agent without recon would have
+            // actually read after globbing).
+            let mut measured_total: u64 = measured_bytes.div_ceil(4) as u64;
+            for rel in &top_paths {
+                if let Ok(abs) = self.resolve_path(rel.to_string_lossy().as_ref()) {
+                    if let Some(t) = self.measure_read_baseline(&abs).await {
+                        measured_total = measured_total.saturating_add(t);
+                    }
+                }
+            }
+            let measured = Some(measured_total);
             let response = redact_response(
                 serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
             );
@@ -5123,6 +5164,31 @@ mod tests {
         let s = snapshot_for(&server.telemetry, "code_read_symbol");
         assert_eq!(s.calls, 1);
         assert!(s.measured_baseline_tokens > 0);
+        assert_eq!(s.static_baseline_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn measured_search_exact_via_tantivy_credits_measured_baseline() {
+        // Regression: in v0.4.0, the exact-mode Tantivy path passed
+        // `None` to the telemetry recorder, so the most common
+        // `code_search` call accrued zero savings. v0.4.1 sums
+        // top-2 hit-file content tokens as the agent's grep+read
+        // alternative.
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+        let _ = server
+            .code_search(Parameters(crate::tools::SearchParams {
+                query: "add".into(),
+                mode: "exact".into(),
+                filter: None,
+            }))
+            .await;
+        let s = snapshot_for(&server.telemetry, "code_search");
+        assert_eq!(s.calls, 1);
+        assert!(
+            s.measured_baseline_tokens > 0,
+            "exact-mode Tantivy hit must accrue measured baseline (got {s:?})"
+        );
         assert_eq!(s.static_baseline_tokens, 0);
     }
 

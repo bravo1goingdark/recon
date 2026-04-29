@@ -462,7 +462,11 @@ describe("POST /v1/billing/subscribe — cancel-at-period-end unblocks new subsc
     });
   });
 
-  it("passes the 409 guard when the existing sub has cancel_at_period_end=1", async () => {
+  // Flake at the default 5 s vitest timeout under CI load — the test
+  // makes a real Razorpay createPlan/createSubscription call (no mock
+  // in this env) and the network round-trip occasionally exceeds 5 s.
+  // Bump to 15 s for this case only; passes in <500 ms locally.
+  it("passes the 409 guard when the existing sub has cancel_at_period_end=1", { timeout: 15_000 }, async () => {
     // This is the bug the user hit: they cancelled Pro, then clicked
     // Subscribe Team and got "cancel from dashboard" anyway. After the
     // fix the 409 no longer matches cancelled-at-period-end rows, so the

@@ -78,6 +78,21 @@
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
   </div>
 
+  <article class="release" id="v0-4-1">
+    <header>
+      <h2>v0.4.1</h2>
+      <span class="when">2026-04-29</span>
+    </header>
+    <span class="tag fix">Patch — measured baselines for the common search paths</span>
+    <p>Two correctness bugs in the v0.4.0 measured pipeline plus one CI annoyance.</p>
+    <ul>
+      <li><b><code>code_search</code> exact mode credited zero savings.</b> The Tantivy-served path passed <code>None</code> as the measured baseline, so the most common <code>code_search</code> call (default <code>mode: "exact"</code>) reported zero tokens saved on the dashboard. v0.4.1 sums the content tokens of the top-2 unique hit files — same rationale as the v0.3.x static estimate ("Grep + read 2 hit files"), measured per call against real bytes.</li>
+      <li><b><code>code_list</code> under-counted by ~50×.</b> The agent's real alternative is <code>Glob + cat top-N files</code>, not just enumerating paths. v0.4.0 only summed the path-listing bytes; v0.4.1 also reads up to 3 top files and sums their content tokens. Capped by the same <code>MAX_READ_FILE_SIZE</code> the rest of the read-shaped tools use.</li>
+      <li><b>Subscription-lifecycle test flake.</b> The Razorpay-race test hit the default 5 s vitest timeout under CI load (it makes a real network call, no mock). Bumped to 15 s for that one case; passes in &lt;500 ms locally.</li>
+    </ul>
+    <p>No schema changes. CLI ↔ worker wire compatibility unchanged. Dashboard numbers will go up for users running <code>code_search</code> in default mode and <code>code_list</code>; the underlying static estimates documented in <code>BASELINES</code> are now closer to what those tools actually save.</p>
+  </article>
+
   <article class="release" id="v0-4-0">
     <header>
       <h2>v0.4.0</h2>
