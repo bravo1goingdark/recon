@@ -25,19 +25,45 @@ config with `--measurement-time 4 --warm-up-time 1`.
   is BEGIN/COMMIT + WAL fsync overhead — Phase 1 batching to a single
   transaction should compress this by ~10–50× depending on disk.
 
-## Watcher save→query / 50-file burst
+## Watcher save→query / 50-file burst (post-change)
 
-`bench-watcher` bin compiled at this point (release build pending tantivy
-crate compilation). Will run a single baseline pass once it lands. Numbers
-will be appended below before the post-change re-run.
+Captured against `target/release/bench-watcher 50` after the Phase 1+2+3
+changes landed. There's no paired pre-change number for this bin
+because it was added alongside the fixes; the storage-bench cold-cache
+cost above (`all_symbols + all_refs ≈ 348 ms`) is the proxy "before"
+that the watcher → query loop would have paid synchronously on every
+save.
 
 ```
-TODO baseline (single iteration):
-  code_outline    p50 ___ ms   p95 ___ ms   p99 ___ ms
-  watcher → queryable (50f):  ___ ms
+── Single-file save → code_outline latency ─────────────
+  code_outline    p50     0.24 ms   p95     0.38 ms   p99     0.46 ms   max     0.46 ms
+
+── 50-file burst → indexed-confirm wall time ───────────
+  filesystem writes:               0.83 ms
+  watcher → queryable (50f):     311.61 ms
 ```
 
-## Post-change results
+**Reading it:**
 
-Filled in after the implementation phases land. Same bench commands, same
-flags, same repo state.
+- `code_outline` p99 of **0.46 ms** is two orders of magnitude inside
+  the < 100 ms SLO. The async refresh keeps reads off the cold-cache
+  path entirely — they serve from the briefly-stale-but-warm snapshot
+  while the background worker re-snapshots.
+- The 50-file burst settling in **311 ms** end-to-end includes the
+  250 ms watcher debounce window — that leaves ~60 ms for parallel
+  parse + batched SQLite write + Tantivy commit on 50 files
+  (~1.2 ms/file). Phase 2's `par_iter` swap is doing its job.
+- Pre-change, the same workload would have been **debounce + parse +
+  store + ~350 ms cold cache reload on the next read tool** — the new
+  code amortizes the snapshot cost into a coalesced background thread.
+
+## Reproduction
+
+```sh
+RECON_LICENSE_HMAC_KEY=bench-dev-only cargo build --release \
+    -p recon-cli --bin bench-watcher
+./target/release/bench-watcher 50          # or 100 for tighter percentiles
+```
+
+Lower `iterations` if you just want a smoke check (`bench-watcher 20`
+runs in ~20 s); raise it for tighter percentiles.

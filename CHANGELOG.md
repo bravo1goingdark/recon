@@ -78,15 +78,27 @@ distinct path).
 
 ### Performance — watcher → query loop
 
-End-to-end fix for the cold-cache stall on every save. Storage benches
-on this branch:
+End-to-end fix for the cold-cache stall on every save. Measured on
+linux x86_64 (kernel 6.17.0-22) — storage benches via
+`cargo bench -p recon-storage`, watcher loop via the new `bench-watcher`
+bin (50 iterations + 50-file burst).
 
-| Path | Before | After | Why |
-|---|---|---|---|
-| `delete_cascade_loop/100_files` | **76.0 ms** | one BEGIN/COMMIT | N transactions → 1 |
-| `all_symbols/80k_across_1780_files` | 161.9 ms | unchanged sync cost | now off the read path |
-| `all_refs/300k_across_1780_files` | 185.9 ms | unchanged sync cost | now off the read path |
-| Watcher save → next read tool | **~350 ms** cold-load | µs delta + async refresh | reads serve previous snapshot |
+| Path | Before | After |
+|---|---|---|
+| `delete_cascade_loop/100_files` | **76.0 ms** (100 BEGIN/COMMIT) | one transaction |
+| Watcher save → `code_outline` (p99) | **~350 ms** cold cache reload* | **0.46 ms** |
+| Watcher save → `code_outline` (p50) | dominated by reload | **0.24 ms** |
+| 50-file burst → first `code_find_symbol` lands | n/a | **312 ms** end-to-end (250 ms debounce + 60 ms parse/store) |
+| `all_symbols/80k_across_1780_files` | 161.9 ms | now off the read path (background) |
+| `all_refs/300k_across_1780_files` | 185.9 ms | now off the read path (background) |
+
+\* The "before" figure is the storage-bench cold-cache cost
+   (`all_symbols + all_refs ≈ 348 ms`) — the synchronous load that the
+   read path used to pay on every save. There is no paired pre-change
+   `bench-watcher` number because the harness was added in this same
+   commit; the storage-bench numbers are the proxy.
+
+Full numbers in `docs/PERF_BASELINE.md`.
 
 Three changes, each defensible on its own:
 
