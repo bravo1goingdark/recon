@@ -251,6 +251,13 @@ function validOptionalFingerprint(v: unknown): boolean {
 }
 
 accountRoutes.post("/savings", async (c) => {
+  // The wire shape evolved with measured baselines (v0.4): old CLIs
+  // omit `measured_*`, new CLIs always include them. Both directions
+  // are back-compat — old clients land with zeroed measured columns,
+  // and an old worker (without this route change) silently drops
+  // unknown fields. Once this route ships, dashboards keyed on
+  // `measured_calls / calls` correctly classify rows as estimated
+  // until the user opts into RECON_MEASURED_BASELINES on the server.
   let body: {
     day?: unknown;
     repo_fingerprint?: unknown;
@@ -259,6 +266,9 @@ accountRoutes.post("/savings", async (c) => {
     baseline_tokens?: unknown;
     tokens_saved?: unknown;
     latency_micros?: unknown;
+    measured_baseline_tokens?: unknown;
+    measured_response_tokens?: unknown;
+    measured_calls?: unknown;
   };
   try {
     body = await c.req.json();
@@ -296,12 +306,46 @@ accountRoutes.post("/savings", async (c) => {
       400,
     );
   }
+  // Measured-baseline trio: optional. `undefined` (old client) defaults
+  // to 0; if present, must be a non-negative integer. Validators stay
+  // strict so a malformed value rejects the push instead of silently
+  // poisoning the dashboard.
+  if (
+    body.measured_baseline_tokens !== undefined &&
+    !validCount(body.measured_baseline_tokens)
+  ) {
+    return c.json(
+      { error: "measured_baseline_tokens, when supplied, must be a non-negative integer" },
+      400,
+    );
+  }
+  if (
+    body.measured_response_tokens !== undefined &&
+    !validCount(body.measured_response_tokens)
+  ) {
+    return c.json(
+      { error: "measured_response_tokens, when supplied, must be a non-negative integer" },
+      400,
+    );
+  }
+  if (body.measured_calls !== undefined && !validCount(body.measured_calls)) {
+    return c.json(
+      { error: "measured_calls, when supplied, must be a non-negative integer" },
+      400,
+    );
+  }
   // Default missing/null to '' (legacy bucket). The route already widened
   // the type to accept undefined; the column has the same default at the
   // SQL level, but binding explicit values keeps the prepared-statement
   // shape stable across old and new clients.
   const repoFingerprint =
     typeof body.repo_fingerprint === "string" ? body.repo_fingerprint : "";
+  const measuredBaselineTokens =
+    typeof body.measured_baseline_tokens === "number" ? body.measured_baseline_tokens : 0;
+  const measuredResponseTokens =
+    typeof body.measured_response_tokens === "number" ? body.measured_response_tokens : 0;
+  const measuredCalls =
+    typeof body.measured_calls === "number" ? body.measured_calls : 0;
 
   const user = c.get("user");
   const apiKey = c.get("apiKey");
@@ -324,19 +368,25 @@ accountRoutes.post("/savings", async (c) => {
   // conflict. SQLite's `excluded.col` references the proposed-but-conflicting
   // values; `MAX(existing, proposed)` makes pushes monotone. updated_at is
   // refreshed unconditionally so we have a "last seen" timestamp even when
-  // the counters didn't move.
+  // the counters didn't move. Measured-baseline columns follow the same
+  // MAX-merge pattern so a same-day re-push from a CLI that re-flushed
+  // its counters never goes backwards.
   await db
     .prepare(
       `INSERT INTO usage_rollups
-         (user_id, repo_fingerprint, day, calls, response_tokens, baseline_tokens, tokens_saved, latency_micros)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         (user_id, repo_fingerprint, day, calls, response_tokens, baseline_tokens, tokens_saved, latency_micros,
+          measured_baseline_tokens, measured_response_tokens, measured_calls)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, repo_fingerprint, day) DO UPDATE SET
-         calls           = MAX(usage_rollups.calls,           excluded.calls),
-         response_tokens = MAX(usage_rollups.response_tokens, excluded.response_tokens),
-         baseline_tokens = MAX(usage_rollups.baseline_tokens, excluded.baseline_tokens),
-         tokens_saved    = MAX(usage_rollups.tokens_saved,    excluded.tokens_saved),
-         latency_micros  = MAX(usage_rollups.latency_micros,  excluded.latency_micros),
-         updated_at      = datetime('now')`,
+         calls                    = MAX(usage_rollups.calls,                    excluded.calls),
+         response_tokens          = MAX(usage_rollups.response_tokens,          excluded.response_tokens),
+         baseline_tokens          = MAX(usage_rollups.baseline_tokens,          excluded.baseline_tokens),
+         tokens_saved             = MAX(usage_rollups.tokens_saved,             excluded.tokens_saved),
+         latency_micros           = MAX(usage_rollups.latency_micros,           excluded.latency_micros),
+         measured_baseline_tokens = MAX(usage_rollups.measured_baseline_tokens, excluded.measured_baseline_tokens),
+         measured_response_tokens = MAX(usage_rollups.measured_response_tokens, excluded.measured_response_tokens),
+         measured_calls           = MAX(usage_rollups.measured_calls,           excluded.measured_calls),
+         updated_at               = datetime('now')`,
     )
     .bind(
       user.id,
@@ -347,6 +397,9 @@ accountRoutes.post("/savings", async (c) => {
       body.baseline_tokens,
       body.tokens_saved,
       body.latency_micros,
+      measuredBaselineTokens,
+      measuredResponseTokens,
+      measuredCalls,
     )
     .run();
 

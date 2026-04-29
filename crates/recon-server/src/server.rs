@@ -24,7 +24,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use smallvec::SmallVec;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,6 +62,16 @@ pub struct ReconServer {
     /// `meta` table every `FLUSH_THRESHOLD` calls + on shutdown so
     /// lifetime totals survive restarts.
     telemetry: Arc<crate::telemetry::Telemetry>,
+    /// Per-call measured-baseline opt-in. When `true`, the 9 bucket-1
+    /// handlers (outline / skeleton / read_symbol / search /
+    /// find_symbol / find_refs / find_strings / multi_find / list)
+    /// compute the actual Read/grep alternative cost and pass it to
+    /// `Telemetry::record`. Read once at server construction from
+    /// `RECON_MEASURED_BASELINES=1`; defaults to false so existing
+    /// users see no behavior or latency change. See the migration plan
+    /// at `docs/HOSTED_EMBED_PLAN.md`-adjacent design notes (or the
+    /// PR that introduces measured baselines) for the rollout phases.
+    measure_baselines: bool,
     /// Lock-free embedding service — set once in `init_embed`, read on every
     /// embed-backed tool call. `ArcSwapOption` gives true lock-free reads.
     #[cfg(feature = "embed")]
@@ -344,6 +354,17 @@ impl ReconServer {
         let telemetry = Arc::new(crate::telemetry::Telemetry::new());
         telemetry.hydrate_from_store(&store);
 
+        // Read the measured-baselines flag once at startup. Mirrors the
+        // pattern used by `request_timeout` for `RECON_REQUEST_TIMEOUT_SECS`
+        // — checked once per process, not per request, so flipping the
+        // env var requires a server restart (acceptable since flipping
+        // mid-run would mix measured + estimated counters in confusing
+        // ways anyway). Any value besides "1" is treated as off.
+        let measure_baselines = std::env::var("RECON_MEASURED_BASELINES")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
         Ok(Self {
             tool_router: Self::tool_router(),
             write_store: Arc::new(Mutex::new(store)),
@@ -358,6 +379,7 @@ impl ReconServer {
             cached_refs: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             cached_call_graph: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             telemetry,
+            measure_baselines,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             watcher_handle: Arc::new(Mutex::new(None)),
@@ -543,11 +565,22 @@ impl ReconServer {
 
     /// Record one tool call into telemetry. Lock-free hot path; if a
     /// flush threshold is reached, schedule an async write.
-    fn record_call(&self, tool: &'static str, started_at: std::time::Instant, response: &str) {
+    ///
+    /// `measured_baseline` is `Some(n)` when the handler ran with
+    /// `RECON_MEASURED_BASELINES=1` and computed a real Read/grep
+    /// alternative number for this call. The static [`BASELINES`]
+    /// credit is added regardless via `Telemetry::record`.
+    fn record_call(
+        &self,
+        tool: &'static str,
+        started_at: std::time::Instant,
+        response: &str,
+        measured_baseline: Option<u64>,
+    ) {
         let response_tokens = recon_search::tokens::estimate_tokens(response) as u64;
-        let should_flush = self
-            .telemetry
-            .record(tool, started_at.elapsed(), response_tokens);
+        let should_flush =
+            self.telemetry
+                .record(tool, started_at.elapsed(), response_tokens, measured_baseline);
         if should_flush {
             self.flush_telemetry_async();
         }
@@ -555,14 +588,56 @@ impl ReconServer {
 
     /// Higher-order wrapper that times a tool's execution and records it.
     /// Each `code_*` handler wraps its body in `self.instrumented(...)`.
+    /// Used by tools that don't (or can't) supply a measured baseline —
+    /// the static [`BASELINES`] entry is the only signal.
     async fn instrumented<Fut>(&self, tool: &'static str, fut: Fut) -> String
     where
         Fut: std::future::Future<Output = String>,
     {
         let started_at = std::time::Instant::now();
         let result = fut.await;
-        self.record_call(tool, started_at, &result);
+        self.record_call(tool, started_at, &result, None);
         result
+    }
+
+    /// Variant of [`Self::instrumented`] for handlers that can supply a
+    /// per-call measured baseline (the 9 bucket-1 tools). The future
+    /// resolves to `(response, measured_baseline)`; when
+    /// `measure_baselines` is off the handler should pass `None` and
+    /// behave identically to the non-measured wrapper. Centralising
+    /// the convention here keeps the call site shape uniform across
+    /// handlers and makes the flag-off code path trivially auditable.
+    async fn instrumented_measured<Fut>(&self, tool: &'static str, fut: Fut) -> String
+    where
+        Fut: std::future::Future<Output = (String, Option<u64>)>,
+    {
+        let started_at = std::time::Instant::now();
+        let (result, measured) = fut.await;
+        self.record_call(tool, started_at, &result, measured);
+        result
+    }
+
+    /// Compute the "what would Read of this file have cost" baseline,
+    /// in tokens, when the `measure_baselines` flag is on. Reuses the
+    /// same `MAX_READ_FILE_SIZE` cap that real Read-shaped handlers
+    /// apply (see `code_skeleton` at line ~1828) so the baseline
+    /// reflects what the agent would actually have been able to read.
+    ///
+    /// Returns `None` when measurement is disabled, the file is too
+    /// large to read, or the read fails — those are all cases where
+    /// reporting a number would be misleading. The caller passes this
+    /// straight through to [`Self::instrumented_measured`].
+    async fn measure_read_baseline(&self, abs_path: &Path) -> Option<u64> {
+        if !self.measure_baselines {
+            return None;
+        }
+        match tokio::fs::metadata(abs_path).await {
+            Ok(m) if m.len() > MAX_READ_FILE_SIZE => return None,
+            Err(_) => return None,
+            _ => {}
+        }
+        let content = tokio::fs::read_to_string(abs_path).await.ok()?;
+        Some(recon_search::tokens::estimate_tokens(&content) as u64)
     }
 
     /// Spawn an async task to persist lifetime telemetry. Hot-path
@@ -1626,20 +1701,26 @@ impl ReconServer {
         description = "Show one-line-per-symbol outline of a file. Returns symbol kinds, names, and line numbers in a tree structure. Use instead of Read when you need to understand a file's structure without reading its full content. Typical output: 300-500 tokens for a 500-line file."
     )]
     async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
-        self.instrumented("code_outline", async move {
-            // Validate path doesn't escape repo root
-            if let Err((code, msg)) = self.resolve_path(&params.0.path) {
-                return tool_error(
-                    code,
-                    msg,
-                    Some(serde_json::json!({ "path": params.0.path })),
-                );
-            }
+        self.instrumented_measured("code_outline", async move {
+            // Validate path doesn't escape repo root. Capture the canonical
+            // path so the measured-baseline read at the end can reuse it
+            // (no second `resolve_path` round-trip on the success path).
+            let canonical = match self.resolve_path(&params.0.path) {
+                Ok(p) => p,
+                Err((code, msg)) => return (
+                    tool_error(
+                        code,
+                        msg,
+                        Some(serde_json::json!({ "path": params.0.path })),
+                    ),
+                    None,
+                ),
+            };
             let symbols = {
                 let rel_path = PathBuf::from(&params.0.path);
                 match self.read_pool.symbols_for_path(&rel_path) {
                     Ok(s) => s,
-                    Err(e) => return tool_error_from(&e),
+                    Err(e) => return (tool_error_from(&e), None),
                 }
             };
 
@@ -1722,7 +1803,13 @@ impl ReconServer {
                 path: rel_path,
                 entries,
             });
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            let response =
+                redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")));
+            // Measured baseline: token-cost of reading the file outright.
+            // Only computed when `RECON_MEASURED_BASELINES=1` is set;
+            // returns None silently when the file is absent or too big.
+            let measured = self.measure_read_baseline(&canonical).await;
+            (response, measured)
         })
         .await
     }
@@ -1732,7 +1819,7 @@ impl ReconServer {
         description = "Show signatures and docstrings with bodies elided as '...'. 10x compression vs full file read. Use instead of Read when you need to understand APIs and structure. Output: ~300 tokens per 3000-token file."
     )]
     async fn code_skeleton(&self, params: Parameters<SkeletonParams>) -> String {
-        self.instrumented("code_skeleton", async move {
+        self.instrumented_measured("code_skeleton", async move {
             let rel_path = PathBuf::from(&params.0.path);
             let symbols = self
                 .read_pool
@@ -1760,21 +1847,129 @@ impl ReconServer {
                 skeleton.push_str(" { ... }\n\n");
             }
 
+            // When the indexer didn't produce a skeleton (typically a file
+            // we can't parse), `code_skeleton` falls back to reading the
+            // first 50 lines of the file. The full file content is also
+            // the canonical "what would Read have cost" measurement, so
+            // we capture the whole content here and reuse it both for
+            // the truncated skeleton output and for the measured baseline.
+            let mut measured_from_fallback: Option<u64> = None;
             if skeleton.is_empty() {
                 let abs_path = match self.resolve_path(&params.0.path) {
                     Ok(p) => p,
                     Err((code, msg)) => {
-                        return tool_error(
-                            code,
-                            msg,
-                            Some(serde_json::json!({ "path": params.0.path })),
+                        return (
+                            tool_error(
+                                code,
+                                msg,
+                                Some(serde_json::json!({ "path": params.0.path })),
+                            ),
+                            None,
                         );
                     }
                 };
                 // Size cap to prevent OOM on large files (minified bundles, lock files, etc.)
                 match tokio::fs::metadata(&abs_path).await {
                     Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
-                        return tool_error(
+                        return (
+                            tool_error(
+                                ReconErrorCode::FileTooLarge,
+                                format!(
+                                    "file too large ({} MB, max {} MB)",
+                                    m.len() / (1024 * 1024),
+                                    MAX_READ_FILE_SIZE / (1024 * 1024)
+                                ),
+                                Some(serde_json::json!({
+                                    "path": params.0.path,
+                                    "size_bytes": m.len(),
+                                    "max_bytes": MAX_READ_FILE_SIZE,
+                                })),
+                            ),
+                            None,
+                        );
+                    }
+                    Err(e) => {
+                        return (
+                            tool_error(
+                                ReconErrorCode::Io,
+                                format!("reading file metadata: {e}"),
+                                Some(serde_json::json!({ "path": params.0.path })),
+                            ),
+                            None,
+                        );
+                    }
+                    _ => {}
+                }
+                let content = match tokio::fs::read_to_string(&abs_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            tool_error(
+                                ReconErrorCode::Io,
+                                format!("reading file: {e}"),
+                                Some(serde_json::json!({ "path": params.0.path })),
+                            ),
+                            None,
+                        );
+                    }
+                };
+                if self.measure_baselines {
+                    measured_from_fallback =
+                        Some(recon_search::tokens::estimate_tokens(&content) as u64);
+                }
+                skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
+            }
+
+            let token_est = recon_search::tokens::estimate_tokens(&skeleton);
+            let view = ToolOutput::Skeleton(SkeletonView {
+                path: Some(rel_path.clone()),
+                content: skeleton,
+                token_estimate: token_est,
+            });
+            let response =
+                redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")));
+            // Measured baseline: full Read of the file. If the fallback
+            // path above already read it, reuse that token count; on the
+            // happy path (skeleton came from the index) we re-read here
+            // — only when the flag is on, gated inside the helper.
+            let measured = match measured_from_fallback {
+                Some(m) => Some(m),
+                None => {
+                    match self.resolve_path(&params.0.path) {
+                        Ok(abs) => self.measure_read_baseline(&abs).await,
+                        Err(_) => None,
+                    }
+                }
+            };
+            (response, measured)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "code_read_symbol",
+        description = "Read the full source of one symbol plus its parent chain and caller/callee references. Use instead of Read when you need one specific function or type. Output: ~200-800 tokens."
+    )]
+    async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
+        self.instrumented_measured("code_read_symbol", async move {
+            let abs_path = match self.resolve_path(&params.0.path) {
+                Ok(p) => p,
+                Err((code, msg)) => {
+                    return (
+                        tool_error(
+                            code,
+                            msg,
+                            Some(serde_json::json!({ "path": params.0.path })),
+                        ),
+                        None,
+                    );
+                }
+            };
+            // Size cap to prevent OOM on large files.
+            match tokio::fs::metadata(&abs_path).await {
+                Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
+                    return (
+                        tool_error(
                             ReconErrorCode::FileTooLarge,
                             format!(
                                 "file too large ({} MB, max {} MB)",
@@ -1786,79 +1981,18 @@ impl ReconServer {
                                 "size_bytes": m.len(),
                                 "max_bytes": MAX_READ_FILE_SIZE,
                             })),
-                        );
-                    }
-                    Err(e) => {
-                        return tool_error(
-                            ReconErrorCode::Io,
-                            format!("reading file metadata: {e}"),
-                            Some(serde_json::json!({ "path": params.0.path })),
-                        );
-                    }
-                    _ => {}
-                }
-                let content = match tokio::fs::read_to_string(&abs_path).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return tool_error(
-                            ReconErrorCode::Io,
-                            format!("reading file: {e}"),
-                            Some(serde_json::json!({ "path": params.0.path })),
-                        );
-                    }
-                };
-                skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
-            }
-
-            let token_est = recon_search::tokens::estimate_tokens(&skeleton);
-            let view = ToolOutput::Skeleton(SkeletonView {
-                path: Some(rel_path),
-                content: skeleton,
-                token_estimate: token_est,
-            });
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
-        })
-        .await
-    }
-
-    #[tool(
-        name = "code_read_symbol",
-        description = "Read the full source of one symbol plus its parent chain and caller/callee references. Use instead of Read when you need one specific function or type. Output: ~200-800 tokens."
-    )]
-    async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
-        self.instrumented("code_read_symbol", async move {
-            let abs_path = match self.resolve_path(&params.0.path) {
-                Ok(p) => p,
-                Err((code, msg)) => {
-                    return tool_error(
-                        code,
-                        msg,
-                        Some(serde_json::json!({ "path": params.0.path })),
-                    );
-                }
-            };
-            // Size cap to prevent OOM on large files.
-            match tokio::fs::metadata(&abs_path).await {
-                Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
-                    return tool_error(
-                        ReconErrorCode::FileTooLarge,
-                        format!(
-                            "file too large ({} MB, max {} MB)",
-                            m.len() / (1024 * 1024),
-                            MAX_READ_FILE_SIZE / (1024 * 1024)
                         ),
-                        Some(serde_json::json!({
-                            "path": params.0.path,
-                            "size_bytes": m.len(),
-                            "max_bytes": MAX_READ_FILE_SIZE,
-                        })),
+                        None,
                     );
                 }
                 Err(e) => {
-                    return tool_error(
-                        ReconErrorCode::Io,
-                        format!("reading file metadata: {e}"),
-                        Some(serde_json::json!({ "path": params.0.path })),
+                    return (
+                        tool_error(
+                            ReconErrorCode::Io,
+                            format!("reading file metadata: {e}"),
+                            Some(serde_json::json!({ "path": params.0.path })),
+                        ),
+                        None,
                     );
                 }
                 _ => {}
@@ -1866,12 +2000,24 @@ impl ReconServer {
             let content = match tokio::fs::read_to_string(&abs_path).await {
                 Ok(c) => c,
                 Err(e) => {
-                    return tool_error(
-                        ReconErrorCode::Io,
-                        format!("reading file: {e}"),
-                        Some(serde_json::json!({ "path": params.0.path })),
+                    return (
+                        tool_error(
+                            ReconErrorCode::Io,
+                            format!("reading file: {e}"),
+                            Some(serde_json::json!({ "path": params.0.path })),
+                        ),
+                        None,
                     );
                 }
+            };
+
+            // Measured baseline: token-cost of the full file we just
+            // read. Captured here so it's available on every successful
+            // path below — we already paid the read I/O.
+            let measured = if self.measure_baselines {
+                Some(recon_search::tokens::estimate_tokens(&content) as u64)
+            } else {
+                None
             };
 
             let rel_path = PathBuf::from(&params.0.path);
@@ -1891,13 +2037,19 @@ impl ReconServer {
             let sym = match target {
                 Some(s) => s,
                 None => {
-                    return tool_error(
-                        ReconErrorCode::NotFound,
-                        format!("symbol not found: {}", params.0.symbol_or_line),
-                        Some(serde_json::json!({
-                            "path": params.0.path,
-                            "symbol_or_line": params.0.symbol_or_line,
-                        })),
+                    return (
+                        tool_error(
+                            ReconErrorCode::NotFound,
+                            format!("symbol not found: {}", params.0.symbol_or_line),
+                            Some(serde_json::json!({
+                                "path": params.0.path,
+                                "symbol_or_line": params.0.symbol_or_line,
+                            })),
+                        ),
+                        // Even though the symbol wasn't found, the agent
+                        // would still have paid the file Read to look —
+                        // attribute the measured baseline to this call.
+                        measured,
                     );
                 }
             };
@@ -1970,7 +2122,9 @@ impl ReconServer {
                 callees,
                 context: None,
             });
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            let response =
+                redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")));
+            (response, measured)
         })
         .await
     }

@@ -46,6 +46,9 @@ import migration0009 from "../migrations/0009_usage_rollups.sql?raw";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error vite `?raw` import — string, no type declaration
 import migration0010 from "../migrations/0010_usage_rollups_per_repo.sql?raw";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error vite `?raw` import — string, no type declaration
+import migration0011 from "../migrations/0011_usage_rollups_measured.sql?raw";
 
 /**
  * Split a SQL file into individual statements.
@@ -97,6 +100,10 @@ const MIGRATIONS = [
   {
     name: "0010_usage_rollups_per_repo",
     queries: splitSql(migration0010 as string),
+  },
+  {
+    name: "0011_usage_rollups_measured",
+    queries: splitSql(migration0011 as string),
   },
 ];
 

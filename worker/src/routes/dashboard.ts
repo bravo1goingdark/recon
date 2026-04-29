@@ -250,6 +250,12 @@ interface RollupRow {
   baseline_tokens: number;
   tokens_saved: number;
   latency_micros: number;
+  measured_baseline_tokens: number;
+  measured_response_tokens: number;
+  measured_calls: number;
+  /// Derived in SQL via MAX(0, measured_baseline_tokens - measured_response_tokens).
+  /// Same clamp rule as the legacy `tokens_saved`.
+  measured_tokens_saved: number;
 }
 
 dashboardRoutes.get("/savings", async (c) => {
@@ -302,11 +308,16 @@ dashboardRoutes.get("/savings", async (c) => {
   const result = await db
     .prepare(
       `SELECT day,
-              SUM(calls)           AS calls,
-              SUM(response_tokens) AS response_tokens,
-              SUM(baseline_tokens) AS baseline_tokens,
-              SUM(tokens_saved)    AS tokens_saved,
-              SUM(latency_micros)  AS latency_micros
+              SUM(calls)                    AS calls,
+              SUM(response_tokens)          AS response_tokens,
+              SUM(baseline_tokens)          AS baseline_tokens,
+              SUM(tokens_saved)             AS tokens_saved,
+              SUM(latency_micros)           AS latency_micros,
+              SUM(measured_baseline_tokens) AS measured_baseline_tokens,
+              SUM(measured_response_tokens) AS measured_response_tokens,
+              SUM(measured_calls)           AS measured_calls,
+              MAX(0, SUM(measured_baseline_tokens) - SUM(measured_response_tokens))
+                                            AS measured_tokens_saved
        FROM usage_rollups
        WHERE user_id = ? AND day >= ? AND day <= ?
        GROUP BY day
@@ -326,6 +337,10 @@ dashboardRoutes.get("/savings", async (c) => {
       acc.baseline_tokens += r.baseline_tokens;
       acc.tokens_saved += r.tokens_saved;
       acc.latency_micros += r.latency_micros;
+      acc.measured_baseline_tokens += r.measured_baseline_tokens;
+      acc.measured_response_tokens += r.measured_response_tokens;
+      acc.measured_calls += r.measured_calls;
+      acc.measured_tokens_saved += r.measured_tokens_saved;
       return acc;
     },
     {
@@ -334,6 +349,10 @@ dashboardRoutes.get("/savings", async (c) => {
       baseline_tokens: 0,
       tokens_saved: 0,
       latency_micros: 0,
+      measured_baseline_tokens: 0,
+      measured_response_tokens: 0,
+      measured_calls: 0,
+      measured_tokens_saved: 0,
     },
   );
 

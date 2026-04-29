@@ -561,4 +561,152 @@ describe("GET /v1/dashboard/savings", () => {
     });
     expect(r.status).toBe(400);
   });
+
+  // ── Measured baselines (v0.4) ─────────────────────────────────────
+  // These verify the additive wire-shape change: old CLIs without the
+  // new fields keep working (defaults to zero), and new CLIs sending
+  // the trio land them in the new columns. Dashboard correctly
+  // computes `measured_tokens_saved` from the persisted slice.
+
+  it("Measured fields: missing on push → row stored with zeros", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    const r = await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 5,
+      response_tokens: 200,
+      baseline_tokens: 15_000,
+      tokens_saved: 14_800,
+      latency_micros: 1234,
+    });
+    expect(r.status).toBe(200);
+    const row = await env.RECON_DB.prepare(
+      `SELECT measured_baseline_tokens, measured_response_tokens, measured_calls
+       FROM usage_rollups WHERE user_id = ? AND day = ?`,
+    )
+      .bind("u_pro", TODAY)
+      .first<{
+        measured_baseline_tokens: number;
+        measured_response_tokens: number;
+        measured_calls: number;
+      }>();
+    expect(row).not.toBeNull();
+    expect(row!.measured_baseline_tokens).toBe(0);
+    expect(row!.measured_response_tokens).toBe(0);
+    expect(row!.measured_calls).toBe(0);
+  });
+
+  it("Measured fields: present on push → row stored with values", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    const r = await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 5,
+      response_tokens: 200,
+      baseline_tokens: 15_000,
+      tokens_saved: 14_800,
+      latency_micros: 1234,
+      measured_baseline_tokens: 12_500,
+      measured_response_tokens: 200,
+      measured_calls: 5,
+    });
+    expect(r.status).toBe(200);
+    const row = await env.RECON_DB.prepare(
+      `SELECT measured_baseline_tokens, measured_response_tokens, measured_calls
+       FROM usage_rollups WHERE user_id = ? AND day = ?`,
+    )
+      .bind("u_pro", TODAY)
+      .first<{
+        measured_baseline_tokens: number;
+        measured_response_tokens: number;
+        measured_calls: number;
+      }>();
+    expect(row!.measured_baseline_tokens).toBe(12_500);
+    expect(row!.measured_response_tokens).toBe(200);
+    expect(row!.measured_calls).toBe(5);
+  });
+
+  it("Measured fields: MAX-merge on conflict (same key, lower second push)", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 5,
+      response_tokens: 200,
+      baseline_tokens: 15_000,
+      tokens_saved: 14_800,
+      latency_micros: 1234,
+      measured_baseline_tokens: 12_500,
+      measured_response_tokens: 200,
+      measured_calls: 5,
+    });
+    // Second push has lower measured numbers — MAX-merge must not
+    // regress them.
+    await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 6,
+      response_tokens: 250,
+      baseline_tokens: 18_000,
+      tokens_saved: 17_750,
+      latency_micros: 2000,
+      measured_baseline_tokens: 11_000,
+      measured_response_tokens: 250,
+      measured_calls: 6,
+    });
+    const row = await env.RECON_DB.prepare(
+      `SELECT measured_baseline_tokens, measured_calls
+       FROM usage_rollups WHERE user_id = ? AND day = ?`,
+    )
+      .bind("u_pro", TODAY)
+      .first<{ measured_baseline_tokens: number; measured_calls: number }>();
+    expect(row!.measured_baseline_tokens).toBe(12_500); // higher of the two
+    expect(row!.measured_calls).toBe(6); // also takes the max
+  });
+
+  it("Measured fields: rejects negative measured_baseline_tokens", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    const r = await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 1,
+      response_tokens: 1,
+      baseline_tokens: 1,
+      tokens_saved: 0,
+      latency_micros: 1,
+      measured_baseline_tokens: -1,
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("Dashboard: returns measured_tokens_saved clamped at zero", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    await seedSession({ userId: "u_pro", token: "sess-measured" });
+    // Push with measured response > measured baseline (pathological).
+    // Dashboard should clamp to 0, not surface a negative number.
+    await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 1,
+      response_tokens: 100,
+      baseline_tokens: 3000,
+      tokens_saved: 2900,
+      latency_micros: 100,
+      measured_baseline_tokens: 50,
+      measured_response_tokens: 200,
+      measured_calls: 1,
+    });
+    const view = await fetchSavings("sess-measured");
+    expect(view.status).toBe(200);
+    const body = view.body as {
+      daily: Array<{
+        measured_tokens_saved: number;
+        measured_baseline_tokens: number;
+        measured_calls: number;
+      }>;
+      totals: {
+        measured_tokens_saved: number;
+        measured_baseline_tokens: number;
+        measured_calls: number;
+      };
+    };
+    expect(body.daily[0].measured_tokens_saved).toBe(0);
+    expect(body.daily[0].measured_baseline_tokens).toBe(50);
+    expect(body.daily[0].measured_calls).toBe(1);
+    expect(body.totals.measured_tokens_saved).toBe(0);
+  });
 });

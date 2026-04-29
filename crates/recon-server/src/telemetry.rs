@@ -184,6 +184,19 @@ pub struct ToolCounter {
     pub baseline_tokens: AtomicU64,
     /// Sum of measured tool-handler latency in microseconds.
     pub latency_micros_total: AtomicU64,
+    /// Sum of *measured* baseline tokens — populated only on calls that
+    /// ran with `RECON_MEASURED_BASELINES=1` and produced a real Read /
+    /// grep alternative number. Zero on calls that fell back to the
+    /// static [`BASELINES`] table. Tracked separately so the dashboard
+    /// can split "estimated" vs "measured" savings honestly.
+    pub measured_baseline_tokens: AtomicU64,
+    /// Sum of response_tokens for the subset of calls that contributed
+    /// to `measured_baseline_tokens`. Lets downstream compute
+    /// `measured_tokens_saved` against only the measured slice.
+    pub measured_response_tokens: AtomicU64,
+    /// Number of calls included in the measured slice (i.e. invocations
+    /// where a measured baseline was supplied).
+    pub measured_calls: AtomicU64,
 }
 
 impl Default for ToolCounter {
@@ -193,6 +206,9 @@ impl Default for ToolCounter {
             response_tokens: AtomicU64::new(0),
             baseline_tokens: AtomicU64::new(0),
             latency_micros_total: AtomicU64::new(0),
+            measured_baseline_tokens: AtomicU64::new(0),
+            measured_response_tokens: AtomicU64::new(0),
+            measured_calls: AtomicU64::new(0),
         }
     }
 }
@@ -205,6 +221,9 @@ impl ToolCounter {
             response_tokens: self.response_tokens.load(Ordering::Acquire),
             baseline_tokens: self.baseline_tokens.load(Ordering::Acquire),
             latency_micros_total: self.latency_micros_total.load(Ordering::Acquire),
+            measured_baseline_tokens: self.measured_baseline_tokens.load(Ordering::Acquire),
+            measured_response_tokens: self.measured_response_tokens.load(Ordering::Acquire),
+            measured_calls: self.measured_calls.load(Ordering::Acquire),
         }
     }
 
@@ -218,10 +237,20 @@ impl ToolCounter {
             .store(s.baseline_tokens, Ordering::Release);
         self.latency_micros_total
             .store(s.latency_micros_total, Ordering::Release);
+        self.measured_baseline_tokens
+            .store(s.measured_baseline_tokens, Ordering::Release);
+        self.measured_response_tokens
+            .store(s.measured_response_tokens, Ordering::Release);
+        self.measured_calls
+            .store(s.measured_calls, Ordering::Release);
     }
 }
 
 /// Plain-old-data snapshot of a [`ToolCounter`] for serialization.
+///
+/// All fields use `#[serde(default)]` so older `tel:tool:*` rows in
+/// users' SQLite — written before the measured fields existed — parse
+/// cleanly with the new fields zeroed. No schema migration is required.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CounterSnapshot {
     /// Number of calls.
@@ -236,6 +265,15 @@ pub struct CounterSnapshot {
     /// Total handler latency in microseconds.
     #[serde(default)]
     pub latency_micros_total: u64,
+    /// Total *measured* baseline tokens (subset of calls only).
+    #[serde(default)]
+    pub measured_baseline_tokens: u64,
+    /// Total response tokens for the measured-call subset.
+    #[serde(default)]
+    pub measured_response_tokens: u64,
+    /// Number of calls in the measured subset.
+    #[serde(default)]
+    pub measured_calls: u64,
 }
 
 impl CounterSnapshot {
@@ -245,6 +283,15 @@ impl CounterSnapshot {
     #[inline]
     pub fn tokens_saved(&self) -> u64 {
         self.baseline_tokens.saturating_sub(self.response_tokens)
+    }
+
+    /// Tokens saved on the *measured* slice only — same clamping rule as
+    /// [`Self::tokens_saved`] but using the per-call measured baselines
+    /// captured when `RECON_MEASURED_BASELINES=1` was set on the server.
+    #[inline]
+    pub fn measured_tokens_saved(&self) -> u64 {
+        self.measured_baseline_tokens
+            .saturating_sub(self.measured_response_tokens)
     }
 
     /// Average latency in milliseconds, or 0.0 when no calls recorded yet.
@@ -298,10 +345,17 @@ impl Telemetry {
         }
     }
 
-    /// Record one tool call. Lock-free hot path: 4 atomic adds + a
+    /// Record one tool call. Lock-free hot path: up to 7 atomic adds + a
     /// best-effort counter reset on threshold. Returns `true` if a
     /// flush should be scheduled (caller is responsible for spawning
     /// the SQLite write task).
+    ///
+    /// `measured_baseline` is `Some(n)` when the handler ran with
+    /// `RECON_MEASURED_BASELINES=1` and computed a real Read/grep
+    /// alternative; otherwise `None`. The static [`BASELINES`] credit
+    /// is added on every call regardless — keeps the legacy column
+    /// populated through the v0/v1/v2 rollout so old workers and
+    /// dashboards continue to work.
     ///
     /// Concurrency note: the threshold reset uses a plain `store` and
     /// is best-effort. Under heavy parallelism two threads may both
@@ -310,7 +364,13 @@ impl Telemetry {
     /// snapshot under the `flush_guard`), so the worst case is one
     /// extra SQLite write.
     #[inline]
-    pub fn record(&self, tool: &str, latency: Duration, response_tokens: u64) -> bool {
+    pub fn record(
+        &self,
+        tool: &str,
+        latency: Duration,
+        response_tokens: u64,
+        measured_baseline: Option<u64>,
+    ) -> bool {
         let baseline = baseline_for(tool);
         if let Some((_, c)) = self.tools.iter().find(|(name, _)| *name == tool) {
             c.calls.fetch_add(1, Ordering::Relaxed);
@@ -319,6 +379,13 @@ impl Telemetry {
             c.baseline_tokens.fetch_add(baseline, Ordering::Relaxed);
             c.latency_micros_total
                 .fetch_add(latency.as_micros() as u64, Ordering::Relaxed);
+            if let Some(m) = measured_baseline {
+                c.measured_baseline_tokens
+                    .fetch_add(m, Ordering::Relaxed);
+                c.measured_response_tokens
+                    .fetch_add(response_tokens, Ordering::Relaxed);
+                c.measured_calls.fetch_add(1, Ordering::Relaxed);
+            }
         }
         let n = self.calls_since_flush.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= FLUSH_THRESHOLD {
@@ -339,6 +406,9 @@ impl Telemetry {
             agg.response_tokens += s.response_tokens;
             agg.baseline_tokens += s.baseline_tokens;
             agg.latency_micros_total += s.latency_micros_total;
+            agg.measured_baseline_tokens += s.measured_baseline_tokens;
+            agg.measured_response_tokens += s.measured_response_tokens;
+            agg.measured_calls += s.measured_calls;
         }
         agg
     }
@@ -443,13 +513,36 @@ mod tests {
         let t = Arc::new(Telemetry::new());
         // Run several calls; threshold check is the boolean return.
         for _ in 0..10 {
-            assert!(!t.record("code_outline", Duration::from_millis(2), 400));
+            assert!(!t.record("code_outline", Duration::from_millis(2), 400, None));
         }
         let agg = t.aggregate();
         assert_eq!(agg.calls, 10);
         assert_eq!(agg.response_tokens, 4000);
         assert_eq!(agg.baseline_tokens, 30_000);
         assert_eq!(agg.tokens_saved(), 26_000);
+        // No measured baseline supplied → measured fields stay at zero.
+        assert_eq!(agg.measured_calls, 0);
+        assert_eq!(agg.measured_baseline_tokens, 0);
+        assert_eq!(agg.measured_response_tokens, 0);
+        assert_eq!(agg.measured_tokens_saved(), 0);
+    }
+
+    #[test]
+    fn record_with_measured_baseline_populates_measured_fields() {
+        let t = Arc::new(Telemetry::new());
+        // Mix measured + unmeasured calls. Static baseline_tokens
+        // accrues on every call; measured_* only on the measured slice.
+        t.record("code_outline", Duration::from_millis(1), 200, Some(2500));
+        t.record("code_outline", Duration::from_millis(1), 300, None);
+        t.record("code_outline", Duration::from_millis(1), 250, Some(2700));
+        let agg = t.aggregate();
+        assert_eq!(agg.calls, 3);
+        assert_eq!(agg.response_tokens, 750);
+        assert_eq!(agg.baseline_tokens, 9000); // 3 × 3000 (code_outline static)
+        assert_eq!(agg.measured_calls, 2);
+        assert_eq!(agg.measured_baseline_tokens, 5200);
+        assert_eq!(agg.measured_response_tokens, 450); // 200 + 250
+        assert_eq!(agg.measured_tokens_saved(), 4750);
     }
 
     #[test]
@@ -457,7 +550,7 @@ mod tests {
         let t = Arc::new(Telemetry::new());
         let mut triggers = 0;
         for _ in 0..(FLUSH_THRESHOLD + 1) {
-            if t.record("code_outline", Duration::from_micros(50), 100) {
+            if t.record("code_outline", Duration::from_micros(50), 100, None) {
                 triggers += 1;
             }
         }
@@ -468,12 +561,15 @@ mod tests {
     fn unknown_tool_records_call_to_threshold_only() {
         // Unknown tool name still increments the global flush counter so
         // an experimental tool doesn't break flush cadence — but no
-        // per-tool counter is mutated.
+        // per-tool counter is mutated. Same applies when a measured
+        // baseline is supplied for the unknown tool: nothing accrues.
         let t = Arc::new(Telemetry::new());
-        let _ = t.record("not_a_tool", Duration::from_millis(1), 100);
+        let _ = t.record("not_a_tool", Duration::from_millis(1), 100, Some(500));
         let agg = t.aggregate();
         assert_eq!(agg.calls, 0);
         assert_eq!(agg.response_tokens, 0);
+        assert_eq!(agg.measured_calls, 0);
+        assert_eq!(agg.measured_baseline_tokens, 0);
         assert_eq!(t.calls_since_flush.load(Ordering::Acquire), 1);
     }
 
@@ -484,15 +580,19 @@ mod tests {
             response_tokens: 5000,
             baseline_tokens: 3000,
             latency_micros_total: 0,
+            measured_baseline_tokens: 2000,
+            measured_response_tokens: 5000,
+            measured_calls: 1,
         };
         assert_eq!(s.tokens_saved(), 0, "negative savings clamp to 0");
+        assert_eq!(s.measured_tokens_saved(), 0, "measured slice clamps too");
     }
 
     #[test]
     fn hydrate_round_trip() {
         let t = Arc::new(Telemetry::new());
-        t.record("code_outline", Duration::from_millis(1), 100);
-        t.record("code_outline", Duration::from_millis(2), 200);
+        t.record("code_outline", Duration::from_millis(1), 100, Some(2400));
+        t.record("code_outline", Duration::from_millis(2), 200, Some(2800));
         let snap_before = t
             .tools
             .iter()
@@ -518,5 +618,29 @@ mod tests {
         assert_eq!(snap_after.calls, 2);
         assert_eq!(snap_after.response_tokens, 300);
         assert_eq!(snap_after.baseline_tokens, 6000);
+        assert_eq!(snap_after.measured_calls, 2);
+        assert_eq!(snap_after.measured_baseline_tokens, 5200);
+        assert_eq!(snap_after.measured_response_tokens, 300);
+    }
+
+    #[test]
+    fn old_snapshot_without_measured_fields_hydrates_via_serde_default() {
+        // A `tel:tool:*` row written by a pre-measured-baselines build
+        // (no measured_* fields in the JSON) must still parse cleanly,
+        // with measured fields zeroed. This is the back-compat
+        // contract that lets us ship without a schema migration.
+        let legacy_json = r#"{
+            "calls": 7,
+            "response_tokens": 900,
+            "baseline_tokens": 21000,
+            "latency_micros_total": 1234
+        }"#;
+        let snap: CounterSnapshot =
+            serde_json::from_str(legacy_json).expect("legacy snapshot must parse");
+        assert_eq!(snap.calls, 7);
+        assert_eq!(snap.baseline_tokens, 21000);
+        assert_eq!(snap.measured_baseline_tokens, 0);
+        assert_eq!(snap.measured_response_tokens, 0);
+        assert_eq!(snap.measured_calls, 0);
     }
 }
