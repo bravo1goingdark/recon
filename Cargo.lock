@@ -4159,9 +4159,10 @@ dependencies = [
 
 [[package]]
 name = "recon-embed-client"
-version = "0.3.4"
+version = "0.4.1"
 dependencies = [
- "recon-server",
+ "dirs",
+ "recon-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -4264,6 +4265,7 @@ dependencies = [
  "rayon",
  "recon-core",
  "recon-embed",
+ "recon-embed-client",
  "recon-indexer",
  "recon-parser",
  "recon-search",
