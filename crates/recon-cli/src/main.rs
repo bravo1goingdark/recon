@@ -412,6 +412,90 @@ async fn shutdown_with_timeout(server: &recon_server::server::ReconServer) {
     }
 }
 
+/// Print a one-block savings summary to stderr at the end of every
+/// `recon serve` session. The IDE's MCP debug log captures stderr, so
+/// users see it in Claude Code / Cursor / Windsurf without having to
+/// remember `recon savings show` or visit the dashboard.
+///
+/// Output shape:
+///
+/// ```text
+/// recon · session ended
+///   N tool calls · saved K tokens vs Read+Grep equivalent
+///   top: code_outline (12,400)  code_search (9,800)  code_read_symbol (8,100)
+///   dashboard: https://mcprecon.pages.dev/dashboard
+/// ```
+///
+/// Suppressed when:
+/// - the session had zero tool calls (no "0 tokens saved" noise on a
+///   fresh `recon serve` that nobody connected to),
+/// - `RECON_QUIET=1`/`true`/`yes`/`on` is set (CI / scripted runs).
+///
+/// Telemetry is best-effort and the receipt is *more* best-effort:
+/// any panic or empty snapshot is a silent skip, never a blocker on
+/// shutdown.
+fn print_session_receipt(server: &recon_server::server::ReconServer) {
+    let raw = std::env::var("RECON_QUIET").unwrap_or_default();
+    let quiet = matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    if quiet {
+        return;
+    }
+
+    let snapshots = server.telemetry_arc().per_tool_snapshots();
+    let mut total_calls = 0u64;
+    let mut total_saved = 0u64;
+    let mut per_tool: Vec<(&'static str, u64)> = Vec::with_capacity(snapshots.len());
+    for (name, s) in &snapshots {
+        if s.calls == 0 {
+            continue;
+        }
+        total_calls += s.calls;
+        let saved = s.tokens_saved();
+        total_saved += saved;
+        per_tool.push((*name, saved));
+    }
+    if total_calls == 0 {
+        return;
+    }
+    per_tool.sort_by_key(|(_, saved)| std::cmp::Reverse(*saved));
+
+    let top: Vec<String> = per_tool
+        .iter()
+        .take(3)
+        .filter(|(_, s)| *s > 0)
+        .map(|(name, saved)| format!("{name} ({})", thousands(*saved)))
+        .collect();
+
+    eprintln!("recon · session ended");
+    eprintln!(
+        "  {} tool calls · saved {} tokens vs Read+Grep equivalent",
+        thousands(total_calls),
+        thousands(total_saved),
+    );
+    if !top.is_empty() {
+        eprintln!("  top: {}", top.join("  "));
+    }
+    eprintln!("  dashboard: https://mcprecon.pages.dev/dashboard");
+}
+
+/// Format `n` with comma thousand-separators. Pure local helper for the
+/// session receipt; no `i18n` aspirations.
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
 /// Opt-in: when `RECON_AUTO_PUSH_SAVINGS=1` is set, push the local
 /// telemetry rollup to the dashboard after `recon serve` exits.
 ///
@@ -1617,6 +1701,7 @@ async fn main() -> Result<()> {
                 // serve_http already drives its own shutdown via ctrl_c + cancel.
                 let result = serve_http(mcp_service.clone(), &host, port).await;
                 shutdown_with_timeout(&server).await;
+                print_session_receipt(&server);
                 maybe_auto_push_savings(&repo);
                 result
             } else {
@@ -1651,6 +1736,7 @@ async fn main() -> Result<()> {
                 // task and its owned transport, releasing stdin/stdout.
                 drop(waiter);
                 shutdown_with_timeout(&server).await;
+                print_session_receipt(&server);
                 maybe_auto_push_savings(&repo);
                 Ok(())
             }
