@@ -921,6 +921,23 @@ impl ReconServer {
         self.license.load().as_ref().clone()
     }
 
+    /// The repository root this server indexes. Borrowed (no clone).
+    pub fn repo_root(&self) -> &std::path::Path {
+        &self.repo_root
+    }
+
+    /// Cached file count (updated on every index/reindex). Lock-free read.
+    pub fn file_count(&self) -> u64 {
+        self.cached_file_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Cached symbol count (updated on every index/reindex). Lock-free read —
+    /// reads the length of the cached symbols vector via `ArcSwap`.
+    pub fn symbol_count(&self) -> u64 {
+        self.cached_symbols.load_full().len() as u64
+    }
+
     /// Dispatch a tool call by name with JSON arguments. For CLI `query` subcommand.
     ///
     /// Returns the tool's JSON response string, or an error message.
@@ -1755,13 +1772,20 @@ impl ReconServer {
     }
 }
 
+// Tool methods need to be `pub` so the multi-repo wrapper in
+// `multi_repo.rs` can shim them (each shim is `self.active.code_outline(p)`
+// etc). Their full prose lives in the `#[tool(description = "...")]`
+// attribute, which is what agents and tool-search consume; the Rust
+// doc-comment requirement is suppressed for the impl block to avoid
+// duplicating that prose into a `///` line for every method.
+#[allow(missing_docs)]
 #[tool_router(router = tool_router)]
 impl ReconServer {
     #[tool(
         name = "code_outline",
         description = "Show one-line-per-symbol outline of a file. Returns symbol kinds, names, and line numbers in a tree structure. Use instead of Read when you need to understand a file's structure without reading its full content. Typical output: 300-500 tokens for a 500-line file."
     )]
-    async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
+    pub async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
         self.instrumented_measured("code_outline", async move {
             // Validate path doesn't escape repo root. Capture the canonical
             // path so the measured-baseline read at the end can reuse it
@@ -1882,7 +1906,7 @@ impl ReconServer {
         name = "code_skeleton",
         description = "Show signatures and docstrings with bodies elided as '...'. 10x compression vs full file read. Use instead of Read when you need to understand APIs and structure. Output: ~300 tokens per 3000-token file."
     )]
-    async fn code_skeleton(&self, params: Parameters<SkeletonParams>) -> String {
+    pub async fn code_skeleton(&self, params: Parameters<SkeletonParams>) -> String {
         self.instrumented_measured("code_skeleton", async move {
             let rel_path = PathBuf::from(&params.0.path);
             let symbols = self
@@ -2022,7 +2046,7 @@ impl ReconServer {
         name = "code_read_symbol",
         description = "Read the full source of one symbol plus its parent chain and caller/callee references. Use instead of Read when you need one specific function or type. Output: ~200-800 tokens."
     )]
-    async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
+    pub async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
         self.instrumented_measured("code_read_symbol", async move {
             let abs_path = match self.resolve_path(&params.0.path) {
                 Ok(p) => p,
@@ -2203,7 +2227,7 @@ impl ReconServer {
         name = "code_find_symbol",
         description = "Find symbols by name across the codebase. Tiered: exact SQLite match -> Tantivy BM25 -> FTS5 trigram + nucleo fuzzy. Use instead of Grep when searching for functions, types, or classes."
     )]
-    async fn code_find_symbol(&self, params: Parameters<FindSymbolParams>) -> String {
+    pub async fn code_find_symbol(&self, params: Parameters<FindSymbolParams>) -> String {
         self.instrumented("code_find_symbol", async move {
             // All reads go through lock-free ReadPool
             // Tier 0: exact match via SQLite index
@@ -2319,7 +2343,7 @@ impl ReconServer {
         name = "code_find_refs",
         description = "Find all references to a symbol. Returns a count and top-k call sites as path:line triples. Use instead of Grep for finding usages of a function or type."
     )]
-    async fn code_find_refs(&self, params: Parameters<FindRefsParams>) -> String {
+    pub async fn code_find_refs(&self, params: Parameters<FindRefsParams>) -> String {
         self.instrumented("code_find_refs", async move {
             let refs = self
                 .read_pool
@@ -2391,7 +2415,7 @@ impl ReconServer {
         name = "code_path",
         description = "Shortest call-graph path from `src` to `dst`. Use to answer 'how does X reach Y?' \u{2014} replaces a chain of code_find_refs calls. Both arguments accept a bare name or a fully qualified name (preferred \u{2014} disambiguates). Returns an ordered hop sequence with file:line per hop. When unreachable within `max_hops` (default 8, max 16) returns an Error with kind 'not_found'/'unreachable' plus an `unresolved_hint` when the BFS hit a likely dyn-dispatch / FFI boundary. When src or dst is ambiguous (multiple symbols share the name) the BFS spans the cross-product and returns the shortest match. Bidirectional BFS over the cached reference graph; total-visit cap 50 000 nodes. Output uses ReferenceDigest with the `path` field populated."
     )]
-    async fn code_path(&self, params: Parameters<PathParams>) -> String {
+    pub async fn code_path(&self, params: Parameters<PathParams>) -> String {
         self.instrumented("code_path", async move {
             let max_hops = params.0.max_hops.min(recon_search::graph::MAX_ALLOWED_HOPS);
             if max_hops == 0 {
@@ -2472,7 +2496,7 @@ impl ReconServer {
         name = "code_callers",
         description = "Transitive callers of `symbol` up to `depth` rings (default 1, max 6). Replaces depth-many chained code_find_refs calls. Returns one tier per ring with the symbols at that depth. Cycle-safe (each symbol emitted at its minimum depth only). Per-tier fan-out is capped at 50 to bound god-node responses; total-visit cap 50 000 nodes. When either cap fires `truncated: true` is set. Returns symbol identities (qname + path + line of definition), not call-site lines \u{2014} use code_find_refs for the lexical call-site digest. `symbol` accepts bare or fully qualified names; ambiguous bare names traverse from all matches. Output uses ReferenceDigest with the `tiers` field populated."
     )]
-    async fn code_callers(&self, params: Parameters<CallersParams>) -> String {
+    pub async fn code_callers(&self, params: Parameters<CallersParams>) -> String {
         self.instrumented("code_callers", async move {
             self.callers_or_callees_inner(params, true).await
         })
@@ -2483,7 +2507,7 @@ impl ReconServer {
         name = "code_callees",
         description = "Transitive callees of `symbol` up to `depth` rings (default 1, max 6). Mirror of code_callers \u{2014} what does this symbol call (directly and transitively)? Cycle-safe, per-tier fan-out capped at 50, total-visit cap 50 000. `truncated: true` when caps fire. Returns symbol identities (qname + path + line of definition), not call-site lines. Use this to understand what changing X *requires* you to also understand (callees) versus what changing X *risks breaking* (callers). Output uses ReferenceDigest with the `tiers` field populated."
     )]
-    async fn code_callees(&self, params: Parameters<CallersParams>) -> String {
+    pub async fn code_callees(&self, params: Parameters<CallersParams>) -> String {
         self.instrumented("code_callees", async move {
             self.callers_or_callees_inner(params, false).await
         })
@@ -2494,7 +2518,7 @@ impl ReconServer {
         name = "code_context",
         description = "One-shot bundle of everything an agent needs to reason about a symbol \u{2014} replaces the canonical 4-call understand-X loop (find_symbol \u{2192} read_symbol \u{2192} find_refs \u{2192} search-for-tests). Returns: (1) the target symbol's signature + doc + first ~20 body lines, (2) up to 5 immediate callers, (3) up to 5 immediate callees, (4) up to 3 referenced types, (5) up to 3 tests that exercise it. Honors `token_budget` (default 2000); drops sections under pressure in this order: tests \u{2192} callees \u{2192} types \u{2192} callers (skeleton+body always kept). Accepts a bare name or a fully qualified name. When ambiguous (multiple symbols share the bare name) returns an Error with kind 'invalid_params' listing up to 5 candidates; reissue with a qualified name. Output uses SymbolCard with the `context` envelope populated. Test detection in v0.3 is Rust-only (tests::* qname patterns and test_* / Test* function names); cross-language coverage is on the v0.4 roadmap."
     )]
-    async fn code_context(&self, params: Parameters<ContextParams>) -> String {
+    pub async fn code_context(&self, params: Parameters<ContextParams>) -> String {
         self.instrumented_measured("code_context", async move {
             let symbols = self.cached_all_symbols();
             let matches = Self::resolve_symbol_to_indices(&symbols, &params.0.symbol);
@@ -2758,7 +2782,7 @@ impl ReconServer {
         name = "code_impact",
         description = "Blast radius of changing `symbol` \u{2014} transitive callers up to `depth` rings (default 4, max 6) plus tests that exercise it. Returns one tier per ring (production callers), a separate `tests` array for transitively-reaching test functions (Rust-only Phase-1 detector: tests::* qnames + test_* / Test* names), and `truncated: true` when fan-out caps fire. Use to answer 'what might break if I change X?' before refactoring. Per-tier fan-out cap 50, total-visit cap 50 000 \u{2014} a god-node query terminates with a marker rather than blowing up. Output uses ReferenceDigest with the `tiers` and `tests` fields populated."
     )]
-    async fn code_impact(&self, params: Parameters<ImpactParams>) -> String {
+    pub async fn code_impact(&self, params: Parameters<ImpactParams>) -> String {
         self.instrumented("code_impact", async move {
             let depth = params.0.depth;
             if depth == 0 {
@@ -2826,7 +2850,7 @@ impl ReconServer {
         name = "code_subsystems",
         description = "List the natural subsystems of the repo \u{2014} weakly-connected components of the reference graph. Each subsystem has an id (use with code_subsystem), the qualified-name of its highest-degree symbol (the 'hub'), the dominant directory, and a symbol count. Use to orient yourself before drilling in: subsystems separate cleanly along architectural lines (e.g. recon-search vs recon-storage) without you having to know the directory structure. Sorted by symbol count descending. `limit` caps the number returned (default 50). Output uses Skeleton with subsystems rendered as one line each. Phase 2 v0.3.x: connected components only. Future v0.4.x adds Leiden modularity-optimized clustering."
     )]
-    async fn code_subsystems(&self, params: Parameters<SubsystemsParams>) -> String {
+    pub async fn code_subsystems(&self, params: Parameters<SubsystemsParams>) -> String {
         self.instrumented("code_subsystems", async move {
             let symbols = self.cached_all_symbols();
             let graph = self.cached_call_graph();
@@ -2883,7 +2907,7 @@ impl ReconServer {
         name = "code_subsystem",
         description = "Detailed view of one subsystem (from code_subsystems). Returns a skeleton-style summary of all symbols in the component \u{2014} qname, kind, file:line \u{2014} within `token_budget` tokens (default 1500). Use after code_subsystems to drill into a specific cluster without reading every file in the directory. Output uses Skeleton."
     )]
-    async fn code_subsystem(&self, params: Parameters<SubsystemParams>) -> String {
+    pub async fn code_subsystem(&self, params: Parameters<SubsystemParams>) -> String {
         self.instrumented("code_subsystem", async move {
             let symbols = self.cached_all_symbols();
             let graph = self.cached_call_graph();
@@ -2940,7 +2964,7 @@ impl ReconServer {
     /// not registered as an MCP tool (no `#[tool(...)]` attribute) so
     /// agents don't burn context introspecting their own savings.
     /// Users get the same data through the CLI and the dashboard.
-    async fn code_savings(&self, _params: Parameters<SavingsParams>) -> String {
+    pub async fn code_savings(&self, _params: Parameters<SavingsParams>) -> String {
         self.instrumented("code_savings", async move {
             let mut content = String::from(
                 "# tool\tcalls\tresponse_tokens\tbaseline\ttokens_saved\tavg_latency_ms\n",
@@ -2993,7 +3017,7 @@ impl ReconServer {
         name = "code_search",
         description = "Search for text patterns. Modes: exact (default), regex, hybrid (BM25 + text fused via reciprocal rank fusion). Use instead of Grep for code search."
     )]
-    async fn code_search(&self, params: Parameters<SearchParams>) -> String {
+    pub async fn code_search(&self, params: Parameters<SearchParams>) -> String {
         self.instrumented_measured("code_search", async move {
             let paths = self.cached_file_paths();
 
@@ -3208,7 +3232,7 @@ impl ReconServer {
         name = "code_list",
         description = "List indexed source files with language, line count, and top symbols. Use instead of Glob when you need structured file listings. Supports language filter."
     )]
-    async fn code_list(&self, params: Parameters<ListParams>) -> String {
+    pub async fn code_list(&self, params: Parameters<ListParams>) -> String {
         self.instrumented_measured("code_list", async move {
             // Single query for all files + symbol counts + top symbols
             let summaries = self.read_pool.file_symbol_summaries().unwrap_or_default();
@@ -3306,7 +3330,7 @@ impl ReconServer {
         name = "code_repo_map",
         description = "Generate a ranked overview of the most important symbols in the repo. Uses personalized PageRank over the reference graph with Aider-style edge weights. Output fits within a token budget (default 2000). Best first tool to call for orientation."
     )]
-    async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
+    pub async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
         self.instrumented("code_repo_map", async move {
             let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
             let budget = params.0.token_budget;
@@ -3400,7 +3424,7 @@ impl ReconServer {
         name = "code_find_strings",
         description = "Search for patterns in string literals and comments. Finds SQL fragments, i18n keys, log messages that structural search misses."
     )]
-    async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
+    pub async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
         self.instrumented_measured("code_find_strings", async move {
             let paths = self.cached_file_paths();
 
@@ -3457,7 +3481,7 @@ impl ReconServer {
         name = "code_multi_find",
         description = "Search for multiple patterns at once. More efficient than multiple code_search calls. Returns results grouped by pattern."
     )]
-    async fn code_multi_find(&self, params: Parameters<MultiFindParams>) -> String {
+    pub async fn code_multi_find(&self, params: Parameters<MultiFindParams>) -> String {
         self.instrumented_measured("code_multi_find", async move {
         let paths = self.cached_file_paths();
 
@@ -3495,7 +3519,7 @@ impl ReconServer {
         name = "code_reindex",
         description = "Trigger a full re-index of the repository. Use when you suspect the index is stale or after major file changes outside the editor."
     )]
-    async fn code_reindex(&self, params: Parameters<ReindexParams>) -> String {
+    pub async fn code_reindex(&self, params: Parameters<ReindexParams>) -> String {
         self.instrumented("code_reindex", async move {
             let force = params.0.force;
 
@@ -3644,7 +3668,7 @@ impl ReconServer {
     /// MCP tool (no `#[tool(...)]` attribute) so agents don't burn
     /// context on operator-level diagnostics. The dashboard surfaces
     /// the same numbers for end users.
-    async fn code_stats(&self, _params: Parameters<StatsParams>) -> String {
+    pub async fn code_stats(&self, _params: Parameters<StatsParams>) -> String {
         self.instrumented("code_stats", async move {
             let mut file_count = self.cached_file_count.load(Ordering::Relaxed);
             if file_count == 0 {

@@ -904,7 +904,11 @@ fn read_server(repo: PathBuf) -> Result<ReconServer> {
 }
 
 /// Serve the MCP server over Streamable HTTP.
-async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
+async fn serve_http(
+    mcp_service: recon_server::multi_repo::MultiRepoService,
+    host: &str,
+    port: u16,
+) -> Result<()> {
     use hyper_util::rt::TokioIo;
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -929,14 +933,17 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
             format!("::1:{port}"),
         ]);
 
-    // Hold a clone of the server outside the StreamableHttpService factory
-    // so the listen-loop can `select!` on its shutdown notify in addition
-    // to signal + accept. Without this clone the only way to stop the
-    // bound port is SIGTERM — a worker-side license rejection would leave
-    // the listener exposed indefinitely.
-    let server_for_shutdown = server.clone();
+    // Hold a snapshot of the currently-active ReconServer outside the
+    // StreamableHttpService factory so the listen-loop can `select!` on
+    // its shutdown notify in addition to signal + accept. Without this
+    // the only way to stop the bound port is SIGTERM — a worker-side
+    // license rejection would leave the listener exposed indefinitely.
+    // The license revalidation task fires `request_shutdown` on the
+    // initial server, so snapshotting here is correct.
+    let server_for_shutdown = mcp_service.active();
     let session_manager = Arc::new(LocalSessionManager::default());
-    let service = StreamableHttpService::new(move || Ok(server.clone()), session_manager, config);
+    let service =
+        StreamableHttpService::new(move || Ok(mcp_service.clone()), session_manager, config);
 
     let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1560,9 +1567,37 @@ async fn main() -> Result<()> {
                 });
             }
 
+            // ── Multi-repo wrapper for the rmcp transport ─────────────────────
+            //
+            // A `MultiRepoService` is what the rmcp stdio / HTTP transport
+            // sees from this point on. It exposes the same 18 stateful
+            // tools as `ReconServer` (via thin shims that delegate to the
+            // currently-active server) plus the two new multi-repo tools
+            // `code_activate_repo` and `code_list_repos`.
+            //
+            // The router is constructed with the validated tier so the
+            // first `code_activate_repo` call already enforces
+            // `max_repos`. `restore_session` re-loads the loaded set
+            // recorded by the previous `recon serve` so agents do not
+            // have to re-issue activate after every restart.
+            let router = std::sync::Arc::new(recon_server::router::RepoRouter::new(license.tier));
+            if license.expires_at != 0 {
+                router.set_expires_at(license.expires_at);
+            }
+            let config_dir = recon_server::license::global_config_dir();
+            let mcp_service = recon_server::multi_repo::MultiRepoService::new(
+                router.clone(),
+                server.clone(),
+                config_dir,
+            );
+            let restored = mcp_service.restore_session();
+            if restored > 0 {
+                info!(restored, "restored multi-repo session");
+            }
+
             if let Some(port) = port {
                 // serve_http already drives its own shutdown via ctrl_c + cancel.
-                let result = serve_http(server.clone(), &host, port).await;
+                let result = serve_http(mcp_service.clone(), &host, port).await;
                 shutdown_with_timeout(&server).await;
                 maybe_auto_push_savings(&repo);
                 result
@@ -1573,7 +1608,7 @@ async fn main() -> Result<()> {
                 // just SIGINT/SIGTERM. So select on both: signal *or* the
                 // MCP service loop terminating on its own.
                 let (stdin, stdout) = rmcp::transport::io::stdio();
-                let service = server.clone().serve((stdin, stdout)).await?;
+                let service = mcp_service.clone().serve((stdin, stdout)).await?;
                 let mut waiter = Box::pin(service.waiting());
                 tokio::select! {
                     _ = wait_for_shutdown_signal() => {

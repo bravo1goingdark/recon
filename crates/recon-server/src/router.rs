@@ -384,6 +384,19 @@ impl RepoRouter {
         self.repos.iter().map(|r| r.key().clone()).collect()
     }
 
+    /// List loaded repos with their cached `(file_count, symbol_count)`
+    /// tuples. Reads lock-free from each `ReconServer`'s atomic caches —
+    /// no SQL queries, no allocations beyond the result `Vec`.
+    pub fn loaded_repos_with_stats(&self) -> Vec<(PathBuf, u64, u64)> {
+        self.repos
+            .iter()
+            .map(|r| {
+                let server = &r.value().server;
+                (r.key().clone(), server.file_count(), server.symbol_count())
+            })
+            .collect()
+    }
+
     /// Explicitly unload a repo (e.g. on user request).
     pub fn unload(&self, repo_path: &Path) -> bool {
         self.repos.remove(repo_path).is_some()

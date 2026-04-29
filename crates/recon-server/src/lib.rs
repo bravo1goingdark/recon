@@ -3,6 +3,7 @@
 
 pub mod account;
 pub mod license;
+pub mod multi_repo;
 pub mod repos;
 pub mod router;
 pub mod server;
