@@ -108,6 +108,29 @@ fn redact_response(response: String) -> String {
     redact::redact_secrets(&response).unwrap_or(response)
 }
 
+/// Wrap a row-oriented tool response in the canonical [`ToolOutput::Hits`]
+/// envelope and run secret redaction once on the final wire JSON.
+///
+/// `kind` selects the row schema (`"symbol"`, `"text"`, `"file"`,
+/// `"string"`, `"multi_find"`, `"repo"`, `"savings"`); `cap` is the
+/// tool-specific row limit — when `entries.len() >= cap`, the response
+/// carries `truncated: true` so callers know results were capped.
+///
+/// The `entries` Vec is moved into `HitsView` (no clone) and serialised
+/// once; net wire-size overhead vs the bare-array format is the
+/// `{"shape":"Hits","kind":"…","count":N}` envelope (≈40 bytes) — well
+/// under 1% of typical row-oriented responses.
+fn hits_response(kind: &'static str, entries: Vec<serde_json::Value>, cap: usize) -> String {
+    let truncated = entries.len() >= cap;
+    let view = ToolOutput::Hits(HitsView {
+        kind: kind.into(),
+        count: entries.len(),
+        hits: entries,
+        truncated,
+    });
+    redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+}
+
 /// Build a search-hit JSON object, omitting `col` when not captured.
 ///
 /// Token diet (v0.2.2): `"col":null` was emitted on every lexical hit and on
@@ -2285,9 +2308,9 @@ impl ReconServer {
                 })
                 .collect();
 
-            redact_response(
-                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-            )
+            // Every retrieval tier caps at 20 — pass the cap so the
+            // envelope carries `truncated: true` when a tier hits its limit.
+            hits_response("symbol", entries, 20)
         })
         .await
     }
@@ -3011,13 +3034,7 @@ impl ReconServer {
                                 |(id, dist)| serde_json::json!({"symbol_id": id, "distance": dist}),
                             )
                             .collect();
-                        return (
-                            redact_response(
-                                serde_json::to_string(&entries)
-                                    .unwrap_or_else(|e| format!("Error: {e}")),
-                            ),
-                            None,
-                        );
+                        return (hits_response("text", entries, 20), None);
                     }
                     _ => return (
                         "semantic search requires the embed service — run `recon login <key>`, \
@@ -3089,12 +3106,7 @@ impl ReconServer {
                 let entries: Vec<serde_json::Value> =
                     sorted.into_iter().take(30).map(|(_, v)| v).collect();
 
-                return (
-                    redact_response(
-                        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                    ),
-                    Some(measured),
-                );
+                return (hits_response("text", entries, 30), Some(measured));
             }
 
             if params.0.mode == "regex" {
@@ -3114,12 +3126,7 @@ impl ReconServer {
                     })
                     .collect();
 
-                return (
-                    redact_response(
-                        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                    ),
-                    Some(measured),
-                );
+                return (hits_response("text", entries, 30), Some(measured));
             }
 
             // Exact mode: try Tantivy first (sub-ms), fall back to grep only if empty.
@@ -3172,12 +3179,7 @@ impl ReconServer {
                         )
                     })
                     .collect();
-                return (
-                    redact_response(
-                        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                    ),
-                    Some(measured),
-                );
+                return (hits_response("text", entries, 30), Some(measured));
             }
 
             // Tantivy had no hits — fall back to text grep, which gets a measured baseline.
@@ -3197,12 +3199,7 @@ impl ReconServer {
                 })
                 .collect();
 
-            (
-                redact_response(
-                    serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                ),
-                Some(measured),
-            )
+            (hits_response("text", entries, 30), Some(measured))
         })
         .await
     }
@@ -3296,9 +3293,10 @@ impl ReconServer {
                 }
             }
             let measured = Some(measured_total);
-            let response = redact_response(
-                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-            );
+            // `code_list` has no built-in row cap (it streams everything that
+            // passes the filters), so pass `usize::MAX` as a sentinel — the
+            // `truncated` flag is always omitted from the wire.
+            let response = hits_response("file", entries, usize::MAX);
             (response, measured)
         })
         .await
@@ -3446,9 +3444,10 @@ impl ReconServer {
                 })
                 .collect();
 
-            let response = redact_response(
-                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-            );
+            // Underlying grep caps `max_results` at 30; that's the truncation
+            // signal even after the literal/comment classifier filters out a
+            // few hits, since the cap was already applied upstream.
+            let response = hits_response("string", entries, 30);
             (response, Some(measured))
         })
         .await
@@ -3485,7 +3484,9 @@ impl ReconServer {
             })
             .collect();
 
-        let response = redact_response(serde_json::to_string(&results).unwrap_or_else(|e| format!("Error: {e}")));
+        // Multi-find returns one row per pattern; row-cap doesn't apply to
+        // the pattern dimension. Pass `usize::MAX` so `truncated` is omitted.
+        let response = hits_response("multi_find", results, usize::MAX);
         (response, Some(measured))
             }).await
     }
@@ -4193,7 +4194,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_find_symbol should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("symbol"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(!entries.is_empty(), "should find 'add' symbol: {result}");
         assert!(
             entries
@@ -4217,7 +4221,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_find_symbol with kind filter should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("symbol"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(!entries.is_empty(), "should find 'add' as a function");
     }
 
@@ -4271,7 +4278,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_search regex should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("text"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(!entries.is_empty(), "regex search should find matches");
     }
 
@@ -4328,7 +4338,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_list should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("file"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(
             entries.len() >= 2,
             "should list at least 2 Rust files, got {}",
@@ -4411,7 +4424,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_multi_find should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("multi_find"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(
             !entries.is_empty(),
             "multi_find should return at least 1 pattern result"
