@@ -4245,6 +4245,7 @@ dependencies = [
  "compact_str",
  "dashmap",
  "dirs",
+ "file-id",
  "hmac",
  "parking_lot",
  "rayon",

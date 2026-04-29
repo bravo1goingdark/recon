@@ -127,32 +127,22 @@ const MAX_READ_FILE_SIZE: u64 = 2 * 1024 * 1024;
 
 /// Cross-platform "is this the same file?" oracle.
 ///
-/// Returns a stable identifier for the file at `path` — Unix inode on
-/// Linux/macOS, NTFS file-index on Windows. The returned value is only
-/// meaningful for equality comparison ("did the file at this path get
-/// replaced under me?") — the absolute number is opaque.
+/// Returns a stable identifier for the file at `path` that's only
+/// meaningful for equality comparison: callers ask "did the file at
+/// this path get replaced under me?" — they don't read the bits.
+///
+/// Implementation: delegates to the `file-id` crate, which wraps
+/// `stat().st_ino` on Unix and `GetFileInformationByHandle` (returning
+/// the NTFS file index) on Windows.  Doing this in std would require
+/// the unstable `windows_by_handle` feature (rust-lang/rust#63010), so
+/// the helper crate is the only stable path that works on both.
 ///
 /// Returns `None` when the file is missing, inaccessible, or the
-/// platform doesn't expose a file id (wasi, redox, …). Callers should
+/// platform doesn't expose a file id (wasi, redox, …).  Callers should
 /// treat `None` from a previously-`Some` reading as "the file is gone"
-/// and handle it equivalently to "the inode changed."
-fn file_id(path: &std::path::Path) -> Option<u64> {
-    let m = std::fs::metadata(path).ok()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Some(m.ino())
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        m.file_index()
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = m;
-        None
-    }
+/// and handle it equivalently to "the file id changed."
+fn file_id(path: &std::path::Path) -> Option<file_id::FileId> {
+    file_id::get_file_id(path).ok()
 }
 
 /// Coalesces concurrent refresh requests into a single worker thread.
@@ -988,14 +978,14 @@ impl ReconServer {
         // CLI invocations write to a fresh file at the same path — silent
         // split-brain.
         //
-        // Linux/macOS: `metadata().ino()` from `std::os::unix::fs::MetadataExt`.
-        // Windows: `metadata().file_index()` from `std::os::windows::fs::MetadataExt`.
-        //   Modern SQLite opens with FILE_SHARE_DELETE on Windows, so the
-        //   deleted-while-open case is reachable there too — the file is
-        //   marked for deletion and lingers until our last handle closes.
-        // Other platforms (wasi, redox, ...): None — the check no-ops and
-        // we keep v0.3.3 behavior.
-        let initial_db_inode: Option<u64> = file_id(&repo_root.join(".recon/index.db"));
+        // Cross-platform via the `file-id` crate (see `file_id` helper):
+        // Unix inode on Linux/macOS, NTFS file index on Windows. Modern
+        // SQLite opens with FILE_SHARE_DELETE on Windows, so the
+        // deleted-while-open case is reachable there too — the file is
+        // marked for deletion and lingers until our last handle closes.
+        // Other platforms (wasi, redox, …): the helper returns `None`,
+        // the check below short-circuits, and we keep v0.3.3 behavior.
+        let initial_db_inode: Option<file_id::FileId> = file_id(&repo_root.join(".recon/index.db"));
         // Snapshot the Arc handles once; the hot path inside the loop needs no locks.
         #[cfg(feature = "embed")]
         let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.load_full();
@@ -1158,11 +1148,11 @@ impl ReconServer {
                 //
                 // Cross-platform via `file_id`: Unix inode, Windows
                 // NTFS file-index, None elsewhere (no-op fallback).
-                if let Some(initial) = initial_db_inode {
+                if let Some(ref initial) = initial_db_inode {
                     let current = file_id(&repo_root.join(".recon/index.db"));
-                    if current != Some(initial) {
+                    if current.as_ref() != Some(initial) {
                         warn!(
-                            initial_id = initial,
+                            initial_id = ?initial,
                             current_id = ?current,
                             "watcher: .recon/index.db file-id changed under us; \
                              requesting shutdown so the supervisor respawns against the live file",
