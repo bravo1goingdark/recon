@@ -412,4 +412,153 @@ describe("GET /v1/dashboard/savings", () => {
     expect(body.daily).toEqual([]);
     expect(body.totals.calls).toBe(0);
   });
+
+  it("Per-repo: SUM-aggregates across repo_fingerprint per day", async () => {
+    // Two repos under one user push to the same day. The dashboard sees
+    // the SUM, not MAX (the v0.3.2 bug fixed in 0.3.3).
+    const fpA =
+      "a".repeat(64); // 64-char hex sentinel for repo A
+    const fpB =
+      "b".repeat(64); // 64-char hex sentinel for repo B
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-multi", tier: "Pro" });
+    await seedSession({ userId: "u_pro", token: "sess-multi" });
+
+    await push("sk-recon-multi", {
+      day: TODAY,
+      repo_fingerprint: fpA,
+      calls: 100,
+      response_tokens: 10_000,
+      baseline_tokens: 60_000,
+      tokens_saved: 50_000,
+      latency_micros: 1_000_000,
+    });
+    await push("sk-recon-multi", {
+      day: TODAY,
+      repo_fingerprint: fpB,
+      calls: 80,
+      response_tokens: 8_000,
+      baseline_tokens: 48_000,
+      tokens_saved: 40_000,
+      latency_micros: 800_000,
+    });
+
+    const r = await fetchSavings("sess-multi");
+    const body = r.body as {
+      daily: { day: string; calls: number; tokens_saved: number }[];
+      totals: { calls: number; tokens_saved: number };
+    };
+    expect(body.daily).toHaveLength(1);
+    expect(body.daily[0].day).toBe(TODAY);
+    // SUM, not MAX: repo A (100) + repo B (80) = 180. The v0.3.2 bug
+    // reported 100 here because MAX-merge collapsed both pushes into
+    // one row keyed only by (user_id, day).
+    expect(body.daily[0].calls).toBe(180);
+    expect(body.daily[0].tokens_saved).toBe(90_000);
+    expect(body.totals.calls).toBe(180);
+    expect(body.totals.tokens_saved).toBe(90_000);
+  });
+
+  it("Legacy bucket: pre-v0.3.3 push (no fingerprint) keyed under '' and shown to user", async () => {
+    // Older CLIs omit `repo_fingerprint`. The route defaults to the
+    // empty-string legacy bucket — old pushes still land and the
+    // dashboard still sees them.
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-legacy", tier: "Pro" });
+    await seedSession({ userId: "u_pro", token: "sess-legacy" });
+
+    const r = await push("sk-recon-legacy", {
+      day: TODAY,
+      // intentionally no repo_fingerprint
+      calls: 42,
+      response_tokens: 4000,
+      baseline_tokens: 30000,
+      tokens_saved: 26000,
+      latency_micros: 500_000,
+    });
+    expect(r.status).toBe(200);
+
+    const view = await fetchSavings("sess-legacy");
+    const body = view.body as {
+      daily: { calls: number; tokens_saved: number }[];
+      totals: { calls: number; tokens_saved: number };
+    };
+    expect(body.totals.calls).toBe(42);
+    expect(body.totals.tokens_saved).toBe(26000);
+  });
+
+  it("Per-repo + legacy: a legacy push and a per-repo push from same user SUM together", async () => {
+    // Migration left v0.3.2 rows in the legacy `''` bucket; v0.3.3+
+    // pushes go to their own per-repo rows. The GROUP BY day SUM on
+    // read folds both buckets into one daily total — no double-count,
+    // no lost data.
+    const fp = "f".repeat(64);
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-mix", tier: "Pro" });
+    await seedSession({ userId: "u_pro", token: "sess-mix" });
+
+    // Legacy-shape push (the v0.3.2 client).
+    await push("sk-recon-mix", {
+      day: TODAY,
+      calls: 30,
+      response_tokens: 3000,
+      baseline_tokens: 18000,
+      tokens_saved: 15000,
+      latency_micros: 200_000,
+    });
+    // New-shape push from a real repo.
+    await push("sk-recon-mix", {
+      day: TODAY,
+      repo_fingerprint: fp,
+      calls: 70,
+      response_tokens: 7000,
+      baseline_tokens: 42000,
+      tokens_saved: 35000,
+      latency_micros: 700_000,
+    });
+
+    const r = await fetchSavings("sess-mix");
+    const body = r.body as {
+      totals: { calls: number; tokens_saved: number };
+    };
+    expect(body.totals.calls).toBe(100);
+    expect(body.totals.tokens_saved).toBe(50000);
+  });
+
+  it("Rejects malformed repo_fingerprint", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-badfp", tier: "Pro" });
+
+    // Wrong length
+    let r = await push("sk-recon-badfp", {
+      day: TODAY,
+      repo_fingerprint: "abc123",
+      calls: 1,
+      response_tokens: 1,
+      baseline_tokens: 1,
+      tokens_saved: 0,
+      latency_micros: 1,
+    });
+    expect(r.status).toBe(400);
+
+    // Uppercase hex
+    r = await push("sk-recon-badfp", {
+      day: TODAY,
+      repo_fingerprint: "A".repeat(64),
+      calls: 1,
+      response_tokens: 1,
+      baseline_tokens: 1,
+      tokens_saved: 0,
+      latency_micros: 1,
+    });
+    expect(r.status).toBe(400);
+
+    // Non-hex characters
+    r = await push("sk-recon-badfp", {
+      day: TODAY,
+      repo_fingerprint: "z".repeat(64),
+      calls: 1,
+      response_tokens: 1,
+      baseline_tokens: 1,
+      tokens_saved: 0,
+      latency_micros: 1,
+    });
+    expect(r.status).toBe(400);
+  });
 });

@@ -4,9 +4,89 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
-## [0.3.4] — 2026-04-29
+## [0.3.3] — 2026-04-29
 
 CLI + MCP correctness sweep. Watcher → query loop now async-refresh.
+Savings dashboard now aggregates true cross-repo totals.
+
+### Changed — savings dashboard SUMs across repos (was MAX)
+
+The v0.3.2 savings dashboard keyed `usage_rollups` on `(user_id, day)`,
+so multi-repo users (Pro tier allows up to 10) had every push from every
+repo MAX-merged into one bucket. The headline was the high-water mark
+of one repo, not the cross-repo total — accurate per-row but misleading
+in aggregate. We labeled it "tokens saved" without that caveat.
+
+This release widens the dimension. Concretely:
+
+- **New migration `0010_usage_rollups_per_repo.sql`** adds a
+  `repo_fingerprint TEXT NOT NULL DEFAULT ''` column and changes the
+  primary key to `(user_id, repo_fingerprint, day)`. Existing v0.3.2
+  rows are migrated under `repo_fingerprint = ''` (the legacy bucket)
+  so no data is lost; the table-rebuild dance is wrapped in the
+  migration's implicit transaction.
+- **`POST /v1/account/savings`** accepts an optional
+  `repo_fingerprint` field — same 64-char SHA-256 hex format as the
+  fingerprint that `recon init` already registers via
+  `/v1/account/repos`. Older CLIs that omit it land in the legacy
+  bucket; new CLIs pin to their real repo. A new `validOptionalFingerprint`
+  guard rejects anything that isn't `''` / null / a 64-char lowercase
+  hex string so we don't store arbitrary client text in a PK column.
+- **`GET /v1/dashboard/savings`** now folds with
+  `SUM(...) ... GROUP BY day` across `repo_fingerprint`. Single-repo
+  users see byte-identical responses to v0.3.2 (one bucket per day);
+  multi-repo users now see the true cross-repo total. Response shape is
+  unchanged — clients that read `daily[*].tokens_saved` keep working.
+- **`recon savings push`** computes the same canonical-path SHA-256
+  fingerprint that `recon init` uses (via
+  `recon_server::account::fingerprint_path`) and includes it in the
+  body. `skip_serializing_if "".is_empty()` keeps the wire compact when
+  fingerprinting is unavailable (e.g. a path that fails to canonicalise).
+
+Backwards compat: a v0.3.2 CLI continues to push successfully against
+the v0.3.3 worker and lands in the legacy bucket. A v0.3.3 CLI pushing
+against a hypothetical v0.3.2 worker (which won't see this code, but
+the field would be ignored) lands fine too — the worker's old PK would
+just collapse those pushes into one row, identical to current behavior.
+
+### Changed — savings panel chart upgrade
+
+The dashboard's daily-savings chart was a 120 px-tall straight-line
+polyline. Replaced with a 200 px chart that renders inline SVG only —
+no chart library, no JS interactivity, no extra requests:
+
+- Smooth curve via Catmull-Rom → Bézier conversion at tension 0.5;
+  faithful at endpoints, no overshoot.
+- Gradient-filled area below the curve from 32 % opacity at the line
+  to 0 at the chart floor.
+- Three dashed gridlines at 25 / 50 / 75 % of plot height.
+- Per-point dots so the eye can count the sample size.
+- Peak-day marker (filled dot + "Xk peak" label, edge-aware so it
+  stays inside the canvas).
+- Start/end date labels in muted mono on the bottom strip.
+- Y-axis floor pinned to zero (not the data minimum) so a
+  flat-but-nonzero series doesn't visually exaggerate.
+
+Per-render unique gradient `id` so two charts on the same page never
+collide. Rendering cost is unchanged (one DOM string-concat).
+
+### Changed — savings labels are honest about being an estimate
+
+Headline + sparkline + table copy across `site/dashboard/index.html`
+and `site/js/dashboard.js`:
+
+- "tokens · saved" → "tokens · estimated saved"
+- table column "Saved" → "Est. saved"
+- explainer paragraph rewritten to spell out: "Each tool call accumulates
+  a hardcoded per-tool baseline (what the same question would have cost
+  via Read+Grep+Glob) and an exact count of bytes recon emitted; saved
+  = baseline − response. The baseline is a fixed estimate per tool,
+  not measured against your repo, so this figure is a directional
+  indicator, not a precise per-call measurement."
+
+The previous wording implied a measurement; this is a transparent
+model. Calling it that lets us keep showing the number without
+overclaiming what it represents.
 
 ### Fixed — `recon savings` couldn't find the local DB
 
@@ -148,18 +228,33 @@ first push lands.
   (`crates/recon-cli/src/bin/bench-watcher.rs`) for save→query latency
   and 50-file burst measurement. Useful for verifying the async-refresh
   Phase 3 win on a real workload.
-- All 491 workspace tests pass: storage 31, server 138, parser 30,
-  search 96, indexer 45, embed 10, core 56, cli 85.
+- 4 new worker tests in `worker/tests/savings.test.ts` covering
+  per-repo SUM aggregation, legacy-bucket back-compat, mixed
+  legacy + per-repo on the same user, and malformed-fingerprint
+  rejection. 18 total in that file.
+- 3 new CLI tests in `crates/recon-cli/src/savings.rs::tests` covering
+  fingerprint pass-through, `skip_serializing_if` empty-string
+  omission, and emission when present. 8 total.
+- All 491 Rust workspace tests + 18 worker savings tests pass.
 
 ### Migration notes
 
-This is a patch release — no schema or config changes on the recon side.
-The `index.db` filename has always been the canonical name; only the
-savings subcommand had drifted to `recon.db` as the lookup target. After
-upgrading the binary, `recon savings push/show` work without any
-re-init.
+- **Worker / D1**: migration `0010_usage_rollups_per_repo.sql` must be
+  applied to production D1 (`wrangler d1 migrations apply
+  recon-production --remote`). Idempotent on the existing dev/test
+  setup via the migration runner pattern in `worker/tests/setup.ts`.
+  The table-rebuild dance preserves all v0.3.2 rows under the legacy
+  `''` repo_fingerprint bucket — no data lost.
+- **CLI**: rebuild + reinstall (`cargo install --path crates/recon-cli
+  --force` with the production HMAC key in env) to pick up the savings
+  fingerprint, the `index.db` filename fix, the dispatch-table tools,
+  and the search/strings/multi/--json fixes. No re-init required.
+- **Single-repo users** see byte-identical responses on the dashboard
+  pull endpoint vs v0.3.2 (one bucket per day; SUM of one row is the
+  same number). Multi-repo users see a one-time correction in
+  the headline and sparkline as the totals start summing across repos.
 
-[0.3.4]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.4
+[0.3.3]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.3
 
 ## [0.3.2] — 2026-04-29
 

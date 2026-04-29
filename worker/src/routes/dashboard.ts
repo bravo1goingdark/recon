@@ -292,14 +292,24 @@ dashboardRoutes.get("/savings", async (c) => {
   const start = utcDayString(range - 1);
   const db = c.env.RECON_DB;
 
-  // Single index-only scan. (user_id, day) is the PK so this is one
-  // contiguous slice of the B-tree — no separate index lookup, no row
-  // store visit beyond the columns selected.
+  // SUM across `repo_fingerprint` per day so the daily series is the true
+  // cross-repo total, not the high-water mark of one repo. The PK
+  // `(user_id, repo_fingerprint, day)` is leading-`user_id` so this is
+  // still a contiguous slice — the GROUP BY just folds the per-repo rows
+  // before they hit JS. For a single-repo user the result is identical
+  // to v0.3.2 (one repo per day-bucket); for multi-repo users this is
+  // strictly more accurate.
   const result = await db
     .prepare(
-      `SELECT day, calls, response_tokens, baseline_tokens, tokens_saved, latency_micros
+      `SELECT day,
+              SUM(calls)           AS calls,
+              SUM(response_tokens) AS response_tokens,
+              SUM(baseline_tokens) AS baseline_tokens,
+              SUM(tokens_saved)    AS tokens_saved,
+              SUM(latency_micros)  AS latency_micros
        FROM usage_rollups
        WHERE user_id = ? AND day >= ? AND day <= ?
+       GROUP BY day
        ORDER BY day ASC`,
     )
     .bind(user.id, start, today)

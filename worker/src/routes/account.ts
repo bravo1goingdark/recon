@@ -231,9 +231,29 @@ function canPushSavings(tier: string): boolean {
   return tier === "Pro" || tier === "Team" || tier === "Enterprise";
 }
 
+/**
+ * Optional `repo_fingerprint` validator for the savings push.
+ *
+ * New CLIs (v0.3.3+) send the same SHA-256 path fingerprint that
+ * `recon init` registers via /v1/account/repos. Older CLIs omit it; we
+ * default to `''` (empty string) so their pushes land in the legacy
+ * bucket alongside any pre-v0.3.3 rows.
+ *
+ * Differs from `validFingerprint` (the strict variant used by repo
+ * register/remove): here `undefined`, `null`, and `''` are all valid
+ * and route to the legacy bucket. Anything else must be a 64-character
+ * lowercase hex string — same shape as a real fingerprint, since we
+ * store it directly in a primary-key column.
+ */
+function validOptionalFingerprint(v: unknown): boolean {
+  if (v === undefined || v === null || v === "") return true;
+  return typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+}
+
 accountRoutes.post("/savings", async (c) => {
   let body: {
     day?: unknown;
+    repo_fingerprint?: unknown;
     calls?: unknown;
     response_tokens?: unknown;
     baseline_tokens?: unknown;
@@ -252,6 +272,15 @@ accountRoutes.post("/savings", async (c) => {
       400,
     );
   }
+  if (!validOptionalFingerprint(body.repo_fingerprint)) {
+    return c.json(
+      {
+        error:
+          "repo_fingerprint, when supplied, must be a 64-character lowercase hex string",
+      },
+      400,
+    );
+  }
   if (
     !validCount(body.calls) ||
     !validCount(body.response_tokens) ||
@@ -267,6 +296,12 @@ accountRoutes.post("/savings", async (c) => {
       400,
     );
   }
+  // Default missing/null to '' (legacy bucket). The route already widened
+  // the type to accept undefined; the column has the same default at the
+  // SQL level, but binding explicit values keeps the prepared-statement
+  // shape stable across old and new clients.
+  const repoFingerprint =
+    typeof body.repo_fingerprint === "string" ? body.repo_fingerprint : "";
 
   const user = c.get("user");
   const apiKey = c.get("apiKey");
@@ -293,9 +328,9 @@ accountRoutes.post("/savings", async (c) => {
   await db
     .prepare(
       `INSERT INTO usage_rollups
-         (user_id, day, calls, response_tokens, baseline_tokens, tokens_saved, latency_micros)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(user_id, day) DO UPDATE SET
+         (user_id, repo_fingerprint, day, calls, response_tokens, baseline_tokens, tokens_saved, latency_micros)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, repo_fingerprint, day) DO UPDATE SET
          calls           = MAX(usage_rollups.calls,           excluded.calls),
          response_tokens = MAX(usage_rollups.response_tokens, excluded.response_tokens),
          baseline_tokens = MAX(usage_rollups.baseline_tokens, excluded.baseline_tokens),
@@ -305,6 +340,7 @@ accountRoutes.post("/savings", async (c) => {
     )
     .bind(
       user.id,
+      repoFingerprint,
       body.day,
       body.calls,
       body.response_tokens,

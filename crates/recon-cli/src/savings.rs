@@ -26,9 +26,20 @@ const DEFAULT_API_URL: &str = "https://recon-api.kumarashutosh34169.workers.dev"
 
 /// Structure of the snapshot we push. Matches the worker route's body
 /// schema (POST /v1/account/savings) byte-for-byte.
+///
+/// `repo_fingerprint` is the SHA-256 path fingerprint that `recon init`
+/// already registers via /v1/account/repos. Including it here lets the
+/// worker key per-repo rows so the dashboard can SUM across all of a
+/// user's repos instead of MAX-merging them into one bucket. Older
+/// workers (< v0.3.3) silently ignore the field; newer workers route
+/// missing/empty values to a legacy bucket. `skip_serializing_if`
+/// avoids sending `""` over the wire — saves a handful of bytes and
+/// keeps tcpdump output cleaner.
 #[derive(Debug, Clone, Serialize)]
 struct PushBody {
     day: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    repo_fingerprint: String,
     calls: u64,
     response_tokens: u64,
     baseline_tokens: u64,
@@ -79,8 +90,9 @@ struct ToolSnapshot {
 }
 
 /// Aggregate the per-tool snapshots into the daily roll-up shape the
-/// worker expects.
-fn aggregate(per_tool: &[(String, ToolSnapshot)]) -> PushBody {
+/// worker expects. `repo_fingerprint` is filled in by the caller from
+/// the canonical repo path; aggregation itself is purely numeric.
+fn aggregate(per_tool: &[(String, ToolSnapshot)], repo_fingerprint: String) -> PushBody {
     let mut calls = 0u64;
     let mut response_tokens = 0u64;
     let mut baseline_tokens = 0u64;
@@ -94,6 +106,7 @@ fn aggregate(per_tool: &[(String, ToolSnapshot)]) -> PushBody {
     let tokens_saved = baseline_tokens.saturating_sub(response_tokens);
     PushBody {
         day: today_utc(),
+        repo_fingerprint,
         calls,
         response_tokens,
         baseline_tokens,
@@ -192,6 +205,20 @@ fn load_local_snapshots(db_path: &Path) -> Result<Vec<(String, ToolSnapshot)>> {
 
 /// `recon savings push` — read local counters, POST to worker.
 pub fn push(repo: Option<PathBuf>) -> Result<()> {
+    // Resolve the canonical path before we open the DB so the
+    // fingerprint matches whatever `recon init` registered with the
+    // worker (`/v1/account/repos`). If canonicalize() fails (e.g. the
+    // repo argument doesn't exist), fall back to the raw path and let
+    // resolve_db_path emit its own clean error.
+    let repo_root = match &repo {
+        Some(p) => p.canonicalize().unwrap_or_else(|_| p.clone()),
+        None => std::env::current_dir()
+            .context("could not get current directory")?
+            .canonicalize()
+            .context("could not canonicalize current directory")?,
+    };
+    let repo_fingerprint = recon_server::account::fingerprint_path(&repo_root);
+
     let db_path = resolve_db_path(repo)?;
     let snapshots = load_local_snapshots(&db_path)?;
     if snapshots.is_empty() {
@@ -201,7 +228,7 @@ pub fn push(repo: Option<PathBuf>) -> Result<()> {
         );
         return Ok(());
     }
-    let body = aggregate(&snapshots);
+    let body = aggregate(&snapshots, repo_fingerprint);
 
     // Authenticate via the same cached API key the rest of the CLI uses.
     let config_dir = recon_server::license::global_config_dir();
@@ -364,7 +391,7 @@ mod tests {
                 },
             ),
         ];
-        let body = aggregate(&snapshots);
+        let body = aggregate(&snapshots, String::new());
         assert_eq!(body.calls, 8);
         assert_eq!(body.response_tokens, 700);
         assert_eq!(body.baseline_tokens, 30_000);
@@ -385,14 +412,42 @@ mod tests {
                 latency_micros_total: 100,
             },
         )];
-        let body = aggregate(&snapshots);
+        let body = aggregate(&snapshots, String::new());
         assert_eq!(body.tokens_saved, 0);
     }
 
     #[test]
     fn aggregate_empty_returns_zeros() {
-        let body = aggregate(&[]);
+        let body = aggregate(&[], String::new());
         assert_eq!(body.calls, 0);
         assert_eq!(body.tokens_saved, 0);
+    }
+
+    #[test]
+    fn aggregate_carries_repo_fingerprint_through() {
+        let fp = "a".repeat(64);
+        let body = aggregate(&[], fp.clone());
+        assert_eq!(body.repo_fingerprint, fp);
+    }
+
+    #[test]
+    fn push_body_omits_empty_fingerprint_on_wire() {
+        // The Serialize impl uses skip_serializing_if so the legacy bucket
+        // stays a quiet path: pre-init repos and dev-mode pushes don't
+        // emit a `"repo_fingerprint":""` field at all.
+        let body = aggregate(&[], String::new());
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(!json.contains("repo_fingerprint"), "unexpected: {json}");
+    }
+
+    #[test]
+    fn push_body_emits_fingerprint_when_present() {
+        let fp = "b".repeat(64);
+        let body = aggregate(&[], fp.clone());
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            json.contains(&format!("\"repo_fingerprint\":\"{fp}\"")),
+            "missing fingerprint in: {json}"
+        );
     }
 }

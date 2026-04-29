@@ -198,41 +198,160 @@ function fmtCompact(n) {
  * layout never collapses on a first-time-paid user.
  */
 function renderSparkline(daily) {
-  var W = 600, H = 120, PAD = 6;
+  // 200-unit-tall canvas with breathing room around the trace.
+  // Bottom strip reserved for date axis labels (start / end).
+  var W = 600, H = 200, PAD_X = 12, PAD_TOP = 16, PAD_BOTTOM = 28;
+  var plotH = H - PAD_TOP - PAD_BOTTOM;
+
   if (!daily || daily.length === 0) {
     return (
       '<svg viewBox="0 0 ' +
       W +
       " " +
       H +
-      '" style="width:100%;height:120px;background:var(--paper-2);border:1px solid var(--rule-soft);border-radius:4px">' +
+      '" style="width:100%;height:200px;background:var(--paper-2);border:1px solid var(--rule-soft);border-radius:6px">' +
       '<text x="50%" y="50%" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="var(--ink-3)">push from `recon savings push` to populate</text>' +
       "</svg>"
     );
   }
+
   var values = daily.map(function (d) { return d.tokens_saved; });
-  var max = Math.max.apply(null, values);
-  var min = Math.min.apply(null, values);
-  if (max === 0) max = 1; // avoid div-by-zero on flat-zero series
-  var range = Math.max(1, max - min);
-  var stepX = (W - 2 * PAD) / Math.max(1, values.length - 1);
-  var points = values
-    .map(function (v, i) {
-      var x = PAD + i * stepX;
-      // Invert Y so high values are visually high.
-      var y = H - PAD - ((v - min) / range) * (H - 2 * PAD);
-      return x.toFixed(1) + "," + y.toFixed(1);
+  var rawMax = Math.max.apply(null, values);
+  var rawMin = Math.min.apply(null, values);
+  // Use 0 as the floor so the user sees the absolute scale, not a
+  // misleading min-baseline that exaggerates a flat-but-nonzero series.
+  var min = 0;
+  var max = rawMax === 0 ? 1 : rawMax;
+  var range = max - min;
+  var stepX = (W - 2 * PAD_X) / Math.max(1, values.length - 1);
+
+  // Map data-space → screen-space.
+  var pts = values.map(function (v, i) {
+    var x = PAD_X + i * stepX;
+    // Invert Y so high values render high.
+    var y = PAD_TOP + plotH - ((v - min) / range) * plotH;
+    return { x: x, y: y };
+  });
+
+  // Smooth path via cardinal-spline-style midpoint Bezier control points.
+  // Uses the previous + next neighbours to pick smooth handles; keeps
+  // the curve faithful at endpoints (no overshoot) and cheap to compute.
+  // Falls back to a straight line for two-point series.
+  function smoothPath(pts) {
+    if (pts.length < 2) return "";
+    if (pts.length === 2) {
+      return "M" + pts[0].x.toFixed(1) + "," + pts[0].y.toFixed(1) +
+             " L" + pts[1].x.toFixed(1) + "," + pts[1].y.toFixed(1);
+    }
+    var d = "M" + pts[0].x.toFixed(1) + "," + pts[0].y.toFixed(1);
+    for (var i = 0; i < pts.length - 1; i++) {
+      var p0 = pts[i - 1] || pts[i];
+      var p1 = pts[i];
+      var p2 = pts[i + 1];
+      var p3 = pts[i + 2] || p2;
+      // Catmull-Rom → Bezier conversion at tension 0.5.
+      var c1x = p1.x + (p2.x - p0.x) / 6;
+      var c1y = p1.y + (p2.y - p0.y) / 6;
+      var c2x = p2.x - (p3.x - p1.x) / 6;
+      var c2y = p2.y - (p3.y - p1.y) / 6;
+      d += " C" + c1x.toFixed(1) + "," + c1y.toFixed(1) +
+           " " + c2x.toFixed(1) + "," + c2y.toFixed(1) +
+           " " + p2.x.toFixed(1) + "," + p2.y.toFixed(1);
+    }
+    return d;
+  }
+
+  var linePath = smoothPath(pts);
+  // Closed area path under the line, anchored to the plot baseline so
+  // the gradient fills downward from the curve to the chart floor.
+  var baselineY = PAD_TOP + plotH;
+  var areaPath = linePath +
+    " L" + pts[pts.length - 1].x.toFixed(1) + "," + baselineY.toFixed(1) +
+    " L" + pts[0].x.toFixed(1) + "," + baselineY.toFixed(1) + " Z";
+
+  // Three subtle gridlines at 25/50/75% of the plot height — gives
+  // scale without dominating the trace.
+  var gridLines = [0.25, 0.5, 0.75]
+    .map(function (frac) {
+      var y = PAD_TOP + plotH * (1 - frac);
+      return (
+        '<line x1="' + PAD_X + '" y1="' + y.toFixed(1) +
+        '" x2="' + (W - PAD_X) + '" y2="' + y.toFixed(1) +
+        '" stroke="var(--rule-soft)" stroke-width="1" stroke-dasharray="2 4"/>'
+      );
     })
-    .join(" ");
+    .join("");
+
+  // Find the high-water mark and label it with both a dot and the
+  // formatted value. If multiple days tie for max, pick the most recent
+  // (last in the series).
+  var maxIdx = -1;
+  for (var i = 0; i < values.length; i++) {
+    if (values[i] === rawMax && rawMax > 0) maxIdx = i;
+  }
+  var maxMarker = "";
+  if (maxIdx >= 0) {
+    var mp = pts[maxIdx];
+    var labelX = mp.x;
+    var anchor = "middle";
+    // Keep the label inside the canvas at the edges.
+    if (mp.x < 50) { labelX = mp.x + 4; anchor = "start"; }
+    else if (mp.x > W - 50) { labelX = mp.x - 4; anchor = "end"; }
+    maxMarker =
+      '<circle cx="' + mp.x.toFixed(1) + '" cy="' + mp.y.toFixed(1) +
+      '" r="3.5" fill="var(--clay)" stroke="var(--paper-2)" stroke-width="1.5"/>' +
+      '<text x="' + labelX.toFixed(1) + '" y="' + (mp.y - 8).toFixed(1) +
+      '" text-anchor="' + anchor +
+      '" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">' +
+      escapeHtml(fmtCompact(rawMax)) + ' peak</text>';
+  }
+
+  // Per-point dots — small, low-contrast, give the eye a sense of the
+  // sample count without competing with the curve.
+  var dots = pts
+    .map(function (p) {
+      return (
+        '<circle cx="' + p.x.toFixed(1) +
+        '" cy="' + p.y.toFixed(1) +
+        '" r="1.8" fill="var(--paper-2)" stroke="var(--clay)" stroke-width="1"/>'
+      );
+    })
+    .join("");
+
+  // Date axis: just the start and end day strings, in the muted mono
+  // type. Anything more (every-tick) gets noisy below ~7 points and
+  // collides above ~30. Two anchors are enough for orientation.
+  var startDay = daily[0].day;
+  var endDay = daily[daily.length - 1].day;
+  var axis =
+    '<text x="' + PAD_X + '" y="' + (H - 8).toFixed(1) +
+    '" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">' +
+    escapeHtml(startDay) + '</text>' +
+    '<text x="' + (W - PAD_X) + '" y="' + (H - 8).toFixed(1) +
+    '" text-anchor="end" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">' +
+    escapeHtml(endDay) + '</text>';
+
+  // Unique gradient id per render so multiple charts on the same page
+  // don't collide. (Not currently the case, but cheap insurance.)
+  var gradId = "savings-grad-" + Math.random().toString(36).slice(2, 9);
+
   return (
-    '<svg viewBox="0 0 ' +
-    W +
-    " " +
-    H +
-    '" style="width:100%;height:120px;background:var(--paper-2);border:1px solid var(--rule-soft);border-radius:4px;overflow:visible">' +
-    '<polyline points="' +
-    points +
-    '" fill="none" stroke="var(--clay)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
+    '<svg viewBox="0 0 ' + W + ' ' + H +
+    '" style="width:100%;height:200px;background:var(--paper-2);' +
+    'border:1px solid var(--rule-soft);border-radius:6px;overflow:visible">' +
+      '<defs>' +
+        '<linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1">' +
+          '<stop offset="0%" stop-color="var(--clay)" stop-opacity="0.32"/>' +
+          '<stop offset="100%" stop-color="var(--clay)" stop-opacity="0"/>' +
+        '</linearGradient>' +
+      '</defs>' +
+      gridLines +
+      '<path d="' + areaPath + '" fill="url(#' + gradId + ')" stroke="none"/>' +
+      '<path d="' + linePath + '" fill="none" stroke="var(--clay)" ' +
+        'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
+      dots +
+      maxMarker +
+      axis +
     "</svg>"
   );
 }
@@ -274,7 +393,7 @@ function renderSavings(data) {
     box.innerHTML =
       '<div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:14px">' +
       '<div style="font-size:38px;font-family:var(--serif);letter-spacing:-.02em">0 tokens</div>' +
-      '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
+      '<div style="color:var(--ink-3);font-size:13px">estimated saved · last ' +
       escapeHtml(String(range)) +
       " days</div></div>" +
       renderSparkline([]) +
@@ -314,12 +433,14 @@ function renderSavings(data) {
     '<div style="font-size:44px;font-family:var(--serif);letter-spacing:-.02em">' +
     fmtCompact(saved) +
     " tokens</div>" +
-    '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
+    '<div style="color:var(--ink-3);font-size:13px">estimated saved · last ' +
     escapeHtml(String(range)) +
     " days · " +
     fmtInt(calls) +
     " tool calls</div></div>" +
-    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">vs. the Read+Grep+Glob equivalent path; convert against your provider&rsquo;s rate sheet for $.</div>' +
+    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">Estimate, not a measurement: per-tool baseline ' +
+    "constants (what Read+Grep+Glob would have cost) minus what recon emitted. " +
+    "See the note below for the full method.</div>" +
     renderSparkline(daily) +
     '<table style="margin-top:18px;width:100%;border-collapse:collapse;font-size:13px">' +
     '<thead><tr style="border-bottom:1px solid var(--rule);text-align:left">' +
@@ -327,7 +448,7 @@ function renderSavings(data) {
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Calls</th>' +
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Response tokens</th>' +
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Baseline</th>' +
-    '<th style="padding:8px 4px;font-weight:500;text-align:right">Saved</th>' +
+    '<th style="padding:8px 4px;font-weight:500;text-align:right">Est. saved</th>' +
     "</tr></thead><tbody>" +
     rows +
     "</tbody></table>";
