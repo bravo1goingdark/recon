@@ -4,6 +4,93 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.3.4] — 2026-04-29
+
+Hardening release. Three concurrency / process-supervision bugs surfaced
+during normal multi-tool development against a long-running
+`recon serve`; all three fixed end-to-end.
+
+### Fixed — `e2e_self_host` no longer wipes the live workspace `.recon/`
+
+`crates/recon-cli/tests/e2e_self_host.rs` resolved its target with
+`CARGO_MANIFEST_DIR.parent().parent()`, which evaluates to the actual
+working repo root, then ran `fs::remove_dir_all(workspace_root.join(".recon"))`
+twice (entry + exit). For anyone running `cargo test --workspace`
+while a `recon serve` was open against the same checkout (Claude Code
+/ Cursor / Windsurf during development), the test silently unlinked
+files the running server had open file descriptors on. The kernel
+kept the inode alive for the open fds; the on-disk path was
+recreated by the test's own `recon index` run; the running server kept
+operating against the orphaned (deleted) inode while everything else
+on disk pointed at a fresh inode. Silent split-brain — visible only
+via `ls -l /proc/<pid>/fd | grep deleted`.
+
+The test now copies a representative subset of the workspace
+(`Cargo.toml`, `Cargo.lock`, `crates/recon-core/`, `crates/recon-storage/`)
+into a `tempfile::TempDir` and indexes that. The tempdir is
+auto-cleaned on Drop. The live workspace `.recon/` is never touched.
+A regression-guard `assert_ne!` on the path itself locks the new
+behavior in.
+
+### Fixed — `recon serve` self-heals when its `.recon/index.db` is unlinked
+
+Even with the test fixed, the same failure mode can be triggered by
+any `rm -rf .recon/`, container restart racing with a still-running
+server, or a botched manual recovery. `start_watcher` now captures
+the inode of `.recon/index.db` at startup (Unix only — Windows
+rejects unlink on a file with open handles, so the failure mode
+doesn't apply) and stat()s the path on each 500 ms recv-timeout
+cycle of the watcher loop. If the inode diverges (file unlinked,
+or replaced by a new inode at the same path), the server logs a
+warning, sets the shutdown flag, wakes the `tokio::sync::Notify`
+that v0.3.2 added for license-revocation shutdowns, and exits cleanly.
+The IDE supervisor (Claude Code / Cursor / Windsurf / opencode) sees
+the child exit and respawns it; the new child opens the live inode
+on startup and operates correctly. Cost on the hot path is one
+`stat()` per 500 ms — ~3 µs on Linux ext4.
+
+### Fixed — `server.shutdown()` no longer wedges on a phantom DB
+
+When the underlying `index.db` was unlinked (the failure mode above
+in either form), the synchronous WAL flush in
+`Telemetry::flush_sync` and `Store::exit_indexing_mode` blocked on
+the orphaned inode forever — SIGTERM was ignored, only SIGKILL
+worked. Real impact: systemd `kill --signal=TERM`, Docker
+`stop --time=10`, and Kubernetes graceful-shutdown windows all
+expire and force-kill, losing any unflushed telemetry that *would*
+have flushed if shutdown had returned in bounded time.
+
+Both serve paths (stdio + HTTP) now wrap `server.shutdown().await`
+in `tokio::time::timeout(5s, ...)` via the new
+`shutdown_with_timeout` helper. If the deadline fires we log a
+warning naming the most likely cause (unlinked `.recon/`) and let
+the process exit anyway. Healthy shutdowns finish in well under a
+second on the largest indexes we've measured; 5 s is the
+pathological-case ceiling.
+
+### Tests
+
+- `e2e_self_host::index_self_and_verify_symbols` rewritten against a
+  tempdir snapshot; new helpers `copy_tree` and
+  `build_isolated_workspace_snapshot` factor the source-copy logic.
+  Verified end-to-end: `cargo test --workspace` now leaves the live
+  `.recon/` mtime untouched.
+- All 491 prior workspace tests still pass; cargo fmt clean; clippy
+  `-D warnings` clean.
+
+### Migration notes
+
+- **CLI**: rebuild + reinstall. The Fix #2 self-heal and Fix #3
+  shutdown timeout only land in the new binary — existing v0.3.3
+  installs are still vulnerable to the orphaned-inode trap in any
+  scenario where `.recon/` is unlinked under them. (After v0.3.4
+  installs, an unlink triggers a clean restart instead of silent
+  drift.)
+- **Worker / D1 / dashboard**: no changes in v0.3.4 — no migration,
+  no `wrangler deploy` needed. Schema is untouched from v0.3.3.
+
+[0.3.4]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.4
+
 ## [0.3.3] — 2026-04-29
 
 CLI + MCP correctness sweep. Watcher → query loop now async-refresh.

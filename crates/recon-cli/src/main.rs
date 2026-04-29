@@ -391,6 +391,28 @@ enum SavingsAction {
 
 // ── Auto-push helpers ──────────────────────────────────────────────────────────
 
+/// Run `server.shutdown()` with a hard upper bound so a stuck SQLite
+/// flush (e.g. our `.recon/` was unlinked from underneath us and the
+/// final WAL write blocks on a phantom inode) cannot wedge the
+/// process at exit time.
+///
+/// 5 s is generous: a healthy shutdown commits Tantivy, flushes
+/// telemetry, and runs `exit_indexing_mode` in well under a second on
+/// the largest indexes we've measured. Anything past 5 s is the
+/// pathological case that justified Fix #3 in v0.3.4.
+async fn shutdown_with_timeout(server: &recon_server::server::ReconServer) {
+    let deadline = std::time::Duration::from_secs(5);
+    if (tokio::time::timeout(deadline, server.shutdown()).await).is_err() {
+        tracing::warn!(
+            "server.shutdown() did not return within {} s; forcing exit. \
+             A stuck SQLite/Tantivy flush is the most common cause; \
+             check whether `.recon/` was unlinked while the server was \
+             running.",
+            deadline.as_secs()
+        );
+    }
+}
+
 /// Opt-in: when `RECON_AUTO_PUSH_SAVINGS=1` is set, push the local
 /// telemetry rollup to the dashboard after `recon serve` exits.
 ///
@@ -1532,7 +1554,7 @@ async fn main() -> Result<()> {
             if let Some(port) = port {
                 // serve_http already drives its own shutdown via ctrl_c + cancel.
                 let result = serve_http(server.clone(), &host, port).await;
-                server.shutdown().await;
+                shutdown_with_timeout(&server).await;
                 maybe_auto_push_savings(&repo);
                 result
             } else {
@@ -1566,7 +1588,7 @@ async fn main() -> Result<()> {
                 // Drop the pinned waiter: its DropGuard cancels the service
                 // task and its owned transport, releasing stdin/stdout.
                 drop(waiter);
-                server.shutdown().await;
+                shutdown_with_timeout(&server).await;
                 maybe_auto_push_savings(&repo);
                 Ok(())
             }

@@ -949,6 +949,24 @@ impl ReconServer {
         let cached_refs = self.cached_refs.clone();
         let cached_call_graph = self.cached_call_graph.clone();
         let shutdown_flag = self.shutdown_flag.clone();
+        let shutdown_notify = self.shutdown_notify.clone();
+        // Capture the initial inode of `.recon/index.db` so we can detect
+        // it being unlinked from underneath us (rare in normal use, but
+        // happens when a misbehaving test or `rm -rf .recon/` clobbers
+        // the dir while we're running). Without this guard, the kernel
+        // keeps our open fds alive against a phantom inode while new
+        // tools/CLI invocations write to a fresh inode at the same path
+        // — silent split-brain. Unix only: Windows rejects unlink on a
+        // file with open handles, so the failure mode doesn't apply.
+        #[cfg(unix)]
+        let initial_db_inode: Option<u64> = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(repo_root.join(".recon/index.db"))
+                .ok()
+                .map(|m| m.ino())
+        };
+        #[cfg(not(unix))]
+        let initial_db_inode: Option<u64> = None;
         // Snapshot the Arc handles once; the hot path inside the loop needs no locks.
         #[cfg(feature = "embed")]
         let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.load_full();
@@ -1098,6 +1116,33 @@ impl ReconServer {
                     debug!("watcher: shutdown flag set, exiting loop");
                     break;
                 }
+
+                // Self-heal guard: if `.recon/index.db` was unlinked
+                // since we started (rare; only happens when a
+                // sibling process `rm -rf .recon/`s us), our open fds
+                // now point at a deleted inode. Continuing the loop
+                // means writing into a phantom DB nothing else can
+                // see. Better to exit cleanly so the IDE supervisor
+                // respawns us against the live inode.
+                #[cfg(unix)]
+                if let Some(initial) = initial_db_inode {
+                    use std::os::unix::fs::MetadataExt;
+                    let current = std::fs::metadata(repo_root.join(".recon/index.db"))
+                        .ok()
+                        .map(|m| m.ino());
+                    if current != Some(initial) {
+                        warn!(
+                            initial_inode = initial,
+                            current_inode = ?current,
+                            "watcher: .recon/index.db inode changed under us; \
+                             requesting shutdown so the supervisor respawns against the live inode",
+                        );
+                        shutdown_flag.store(true, Ordering::Relaxed);
+                        shutdown_notify.notify_waiters();
+                        break;
+                    }
+                }
+
                 let changed_paths = match watcher.recv_timeout(Duration::from_millis(500)) {
                     Ok(paths) => paths,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,

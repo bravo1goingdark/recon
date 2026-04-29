@@ -1,11 +1,88 @@
-//! E2E test: index recon's own codebase and verify symbol lookups.
+//! E2E test: index a representative copy of recon's own source and
+//! verify symbol lookups.
+//!
+//! **Why we don't index `workspace_root` directly any more.** Up to v0.3.3
+//! this test ran `recon index --repo <workspace_root>` and wiped
+//! `<workspace_root>/.recon` on entry and exit. That's destructive when
+//! a long-running `recon serve` (e.g. spawned by Claude Code / Cursor /
+//! Windsurf against the same checkout) is currently using that index dir
+//! — the test unlinks the inode while the running process holds open
+//! file descriptors to it, leaving the server writing into a phantom
+//! database the on-disk filesystem can't see, until SIGKILL.
+//!
+//! v0.3.4 fix: copy a representative subset of the workspace into a
+//! `tempfile::TempDir`, point `recon index` at that, and let the
+//! drop-handler clean up. The test still exercises the real binary
+//! against real source code — just not the user's live source code.
 
+use std::path::Path;
 use std::process::Command;
 
 fn seed_license_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     recon_server::license::seed_dev_cache(dir.path()).expect("seed_dev_cache failed");
     dir
+}
+
+/// Copy a directory tree recursively. Symlinks are followed (we want
+/// the real file content); skips entries whose name appears in
+/// `skip_names` so we don't pull `target/`, `.recon/`, `.git/`, etc.
+fn copy_tree(src: &Path, dst: &Path, skip_names: &[&str]) {
+    std::fs::create_dir_all(dst).expect("create dst dir");
+    let entries = std::fs::read_dir(src).expect("read_dir src");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if skip_names.iter().any(|s| *s == name_str) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let ft = entry.file_type().expect("file_type");
+        if ft.is_dir() {
+            copy_tree(&from, &to, skip_names);
+        } else {
+            std::fs::copy(&from, &to).expect("copy file");
+        }
+    }
+}
+
+/// Materialise a self-contained "mini-workspace" snapshot in a tempdir
+/// that's enough to exercise multi-crate indexing. Returns the tempdir
+/// (kept alive via Drop until the test finishes).
+fn build_isolated_workspace_snapshot() -> tempfile::TempDir {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let snap = tempfile::tempdir().expect("snapshot tempdir");
+    let dst = snap.path();
+
+    // Top-level workspace anchor + license + readme.
+    for f in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"] {
+        let from = workspace_root.join(f);
+        if from.exists() {
+            std::fs::copy(&from, dst.join(f)).expect("copy top-level file");
+        }
+    }
+
+    // Two representative crates — small enough to copy fast, varied
+    // enough to exercise cross-crate indexing.
+    let skip = &[
+        "target",
+        ".recon",
+        ".git",
+        "node_modules",
+        ".idea",
+        ".vscode",
+    ];
+    let crates_dst = dst.join("crates");
+    std::fs::create_dir_all(&crates_dst).expect("create crates dir");
+    for c in ["recon-core", "recon-storage"] {
+        let from = workspace_root.join("crates").join(c);
+        if from.exists() {
+            copy_tree(&from, &crates_dst.join(c), skip);
+        }
+    }
+    snap
 }
 
 #[test]
@@ -23,13 +100,16 @@ fn index_self_and_verify_symbols() {
         assert!(status.success());
     }
 
-    // Clean previous index
-    let recon_dir = workspace_root.join(".recon");
+    // Snapshot: isolated tempdir copy of representative source. The
+    // tempdir's `.recon/` is the one we wipe; the live workspace's
+    // is never touched.
+    let snap = build_isolated_workspace_snapshot();
+    let snap_root = snap.path();
+    let recon_dir = snap_root.join(".recon");
     let _ = std::fs::remove_dir_all(&recon_dir);
 
-    // Index our own repo
     let output = Command::new(&binary)
-        .args(["index", "--repo", workspace_root.to_str().unwrap()])
+        .args(["index", "--repo", snap_root.to_str().unwrap()])
         .env("RECON_CONFIG_DIR", lic.path())
         .output()
         .expect("failed to run recon index");
@@ -49,12 +129,24 @@ fn index_self_and_verify_symbols() {
         "missing symbol count in output: {combined}"
     );
 
-    // Verify the index directory was created
-    assert!(recon_dir.join("index.db").exists(), "SQLite index missing");
-    assert!(recon_dir.join("tantivy").exists(), "Tantivy index missing");
+    // Verify the index directory was created inside the snapshot — and
+    // that the live workspace `.recon/` is untouched (regression guard
+    // for the v0.3.3 test-isolation bug).
+    assert!(
+        recon_dir.join("index.db").exists(),
+        "SQLite index missing in snapshot"
+    );
+    assert!(
+        recon_dir.join("tantivy").exists(),
+        "Tantivy index missing in snapshot"
+    );
+    assert_ne!(
+        recon_dir,
+        workspace_root.join(".recon"),
+        "snapshot recon_dir must not equal workspace .recon"
+    );
 
-    // Clean up
-    let _ = std::fs::remove_dir_all(&recon_dir);
+    // tempdir auto-cleans on drop; no manual remove_dir_all needed.
 }
 
 #[test]
