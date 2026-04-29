@@ -62,16 +62,6 @@ pub struct ReconServer {
     /// `meta` table every `FLUSH_THRESHOLD` calls + on shutdown so
     /// lifetime totals survive restarts.
     telemetry: Arc<crate::telemetry::Telemetry>,
-    /// Per-call measured-baseline opt-in. When `true`, the 9 bucket-1
-    /// handlers (outline / skeleton / read_symbol / search /
-    /// find_symbol / find_refs / find_strings / multi_find / list)
-    /// compute the actual Read/grep alternative cost and pass it to
-    /// `Telemetry::record`. Read once at server construction from
-    /// `RECON_MEASURED_BASELINES=1`; defaults to false so existing
-    /// users see no behavior or latency change. See the migration plan
-    /// at `docs/HOSTED_EMBED_PLAN.md`-adjacent design notes (or the
-    /// PR that introduces measured baselines) for the rollout phases.
-    measure_baselines: bool,
     /// Lock-free embedding service — set once in `init_embed`, read on every
     /// embed-backed tool call. `ArcSwapOption` gives true lock-free reads.
     #[cfg(feature = "embed")]
@@ -354,17 +344,6 @@ impl ReconServer {
         let telemetry = Arc::new(crate::telemetry::Telemetry::new());
         telemetry.hydrate_from_store(&store);
 
-        // Read the measured-baselines flag once at startup. Mirrors the
-        // pattern used by `request_timeout` for `RECON_REQUEST_TIMEOUT_SECS`
-        // — checked once per process, not per request, so flipping the
-        // env var requires a server restart (acceptable since flipping
-        // mid-run would mix measured + estimated counters in confusing
-        // ways anyway). Any value besides "1" is treated as off.
-        let measure_baselines = std::env::var("RECON_MEASURED_BASELINES")
-            .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false);
-
         Ok(Self {
             tool_router: Self::tool_router(),
             write_store: Arc::new(Mutex::new(store)),
@@ -379,7 +358,6 @@ impl ReconServer {
             cached_refs: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             cached_call_graph: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             telemetry,
-            measure_baselines,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             watcher_handle: Arc::new(Mutex::new(None)),
@@ -618,19 +596,16 @@ impl ReconServer {
     }
 
     /// Compute the "what would Read of this file have cost" baseline,
-    /// in tokens, when the `measure_baselines` flag is on. Reuses the
-    /// same `MAX_READ_FILE_SIZE` cap that real Read-shaped handlers
-    /// apply (see `code_skeleton` at line ~1828) so the baseline
-    /// reflects what the agent would actually have been able to read.
+    /// in tokens. Reuses the same `MAX_READ_FILE_SIZE` cap that real
+    /// Read-shaped handlers apply (see `code_skeleton` at line ~1828)
+    /// so the baseline reflects what the agent would actually have
+    /// been able to read.
     ///
-    /// Returns `None` when measurement is disabled, the file is too
-    /// large to read, or the read fails — those are all cases where
-    /// reporting a number would be misleading. The caller passes this
-    /// straight through to [`Self::instrumented_measured`].
+    /// Returns `None` when the file is too large or unreadable —
+    /// those are cases where reporting a number would be misleading.
+    /// The caller passes this straight through to
+    /// [`Self::instrumented_measured`].
     async fn measure_read_baseline(&self, abs_path: &Path) -> Option<u64> {
-        if !self.measure_baselines {
-            return None;
-        }
         match tokio::fs::metadata(abs_path).await {
             Ok(m) if m.len() > MAX_READ_FILE_SIZE => return None,
             Err(_) => return None,
@@ -1913,10 +1888,8 @@ impl ReconServer {
                         );
                     }
                 };
-                if self.measure_baselines {
-                    measured_from_fallback =
-                        Some(recon_search::tokens::estimate_tokens(&content) as u64);
-                }
+                measured_from_fallback =
+                    Some(recon_search::tokens::estimate_tokens(&content) as u64);
                 skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
             }
 
@@ -2013,12 +1986,9 @@ impl ReconServer {
 
             // Measured baseline: token-cost of the full file we just
             // read. Captured here so it's available on every successful
-            // path below — we already paid the read I/O.
-            let measured = if self.measure_baselines {
-                Some(recon_search::tokens::estimate_tokens(&content) as u64)
-            } else {
-                None
-            };
+            // path below — we already paid the read I/O for our own work.
+            let measured: Option<u64> =
+                Some(recon_search::tokens::estimate_tokens(&content) as u64);
 
             let rel_path = PathBuf::from(&params.0.path);
             let symbols = self
@@ -2848,23 +2818,33 @@ impl ReconServer {
                 if snapshot.calls == 0 {
                     continue;
                 }
+                // `baseline` here is the sum of static + measured —
+                // exactly one of the two contributes per call, so the
+                // sum is the per-tool baseline credit regardless of
+                // whether the tool is on the measured path.
+                let baseline = snapshot
+                    .static_baseline_tokens
+                    .saturating_add(snapshot.measured_baseline_tokens);
                 content.push_str(&format!(
                     "{name}\t{calls}\t{resp}\t{base}\t{saved}\t{latency:.2}\n",
                     name = name,
                     calls = snapshot.calls,
                     resp = snapshot.response_tokens,
-                    base = snapshot.baseline_tokens,
+                    base = baseline,
                     saved = snapshot.tokens_saved(),
                     latency = snapshot.avg_latency_ms(),
                 ));
             }
             // Aggregate trailer.
             let agg = self.telemetry.aggregate();
+            let agg_baseline = agg
+                .static_baseline_tokens
+                .saturating_add(agg.measured_baseline_tokens);
             content.push_str(&format!(
                 "# total\t{calls}\t{resp}\t{base}\t{saved}\t-\n",
                 calls = agg.calls,
                 resp = agg.response_tokens,
-                base = agg.baseline_tokens,
+                base = agg_baseline,
                 saved = agg.tokens_saved(),
             ));
 
@@ -3552,7 +3532,9 @@ impl ReconServer {
                 "session_uptime_seconds": uptime,
                 "calls": agg.calls,
                 "response_tokens": agg.response_tokens,
-                "baseline_tokens_avoided": agg.baseline_tokens,
+                "baseline_tokens_avoided": agg
+                    .static_baseline_tokens
+                    .saturating_add(agg.measured_baseline_tokens),
                 "tokens_saved": agg.tokens_saved(),
             });
 

@@ -42,23 +42,20 @@ struct PushBody {
     repo_fingerprint: String,
     calls: u64,
     response_tokens: u64,
-    baseline_tokens: u64,
+    /// Sum of static-baseline tokens for tools that don't have a
+    /// per-call measurement path (composite + no-alternative tools).
+    static_baseline_tokens: u64,
+    /// Sum of measured-baseline tokens for migrated handlers
+    /// (`code_outline`, `code_skeleton`, `code_read_symbol`, …).
+    /// Exactly one of `static_baseline_tokens` or this field accrues
+    /// per call.
+    measured_baseline_tokens: u64,
+    /// Total saved = (static + measured) - response_tokens, clamped at
+    /// 0 on the client. The worker re-derives the same number on the
+    /// read path; emitting it keeps CLI-side math visible to operators
+    /// reading the wire payload.
     tokens_saved: u64,
     latency_micros: u64,
-    /// Sum of *measured* baseline tokens — populated only on calls that
-    /// ran with `RECON_MEASURED_BASELINES=1` on the server. Zero on
-    /// unmeasured calls. Always emitted on the wire (zero is correct
-    /// data); old workers that don't know the field silently drop it,
-    /// so this addition is back-compat in both directions.
-    measured_baseline_tokens: u64,
-    /// Sum of response_tokens for the measured-call subset only — lets
-    /// the worker compute `measured_tokens_saved` against just the
-    /// measured slice, without re-deriving from totals.
-    measured_response_tokens: u64,
-    /// Number of calls included in the measured slice. The dashboard
-    /// uses `measured_calls / calls` to decide whether to show the
-    /// "Measured" badge.
-    measured_calls: u64,
 }
 
 /// Worker response on success. We don't strictly need the body — the
@@ -89,11 +86,8 @@ struct UpsellResponse {
 }
 
 /// Per-tool counter snapshot loaded from `.recon/index.db`. Mirrors
-/// `recon_server::telemetry::CounterSnapshot` so a future shape change
-/// in either side is a compile error rather than a silent skew. Every
-/// field uses `#[serde(default)]` so a `tel:tool:*` row written by a
-/// pre-measured-baselines server hydrates cleanly with the new fields
-/// zeroed — no DB migration needed.
+/// `recon_server::telemetry::CounterSnapshot` exactly — a shape drift
+/// on either side is a compile error rather than a silent skew.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ToolSnapshot {
     #[serde(default)]
@@ -101,15 +95,11 @@ struct ToolSnapshot {
     #[serde(default)]
     response_tokens: u64,
     #[serde(default)]
-    baseline_tokens: u64,
-    #[serde(default)]
-    latency_micros_total: u64,
+    static_baseline_tokens: u64,
     #[serde(default)]
     measured_baseline_tokens: u64,
     #[serde(default)]
-    measured_response_tokens: u64,
-    #[serde(default)]
-    measured_calls: u64,
+    latency_micros_total: u64,
 }
 
 /// Aggregate the per-tool snapshots into the daily roll-up shape the
@@ -118,34 +108,30 @@ struct ToolSnapshot {
 fn aggregate(per_tool: &[(String, ToolSnapshot)], repo_fingerprint: String) -> PushBody {
     let mut calls = 0u64;
     let mut response_tokens = 0u64;
-    let mut baseline_tokens = 0u64;
-    let mut latency_micros = 0u64;
+    let mut static_baseline_tokens = 0u64;
     let mut measured_baseline_tokens = 0u64;
-    let mut measured_response_tokens = 0u64;
-    let mut measured_calls = 0u64;
+    let mut latency_micros = 0u64;
     for (_, s) in per_tool {
         calls = calls.saturating_add(s.calls);
         response_tokens = response_tokens.saturating_add(s.response_tokens);
-        baseline_tokens = baseline_tokens.saturating_add(s.baseline_tokens);
-        latency_micros = latency_micros.saturating_add(s.latency_micros_total);
+        static_baseline_tokens =
+            static_baseline_tokens.saturating_add(s.static_baseline_tokens);
         measured_baseline_tokens =
             measured_baseline_tokens.saturating_add(s.measured_baseline_tokens);
-        measured_response_tokens =
-            measured_response_tokens.saturating_add(s.measured_response_tokens);
-        measured_calls = measured_calls.saturating_add(s.measured_calls);
+        latency_micros = latency_micros.saturating_add(s.latency_micros_total);
     }
-    let tokens_saved = baseline_tokens.saturating_sub(response_tokens);
+    let tokens_saved = static_baseline_tokens
+        .saturating_add(measured_baseline_tokens)
+        .saturating_sub(response_tokens);
     PushBody {
         day: today_utc(),
         repo_fingerprint,
         calls,
         response_tokens,
-        baseline_tokens,
+        static_baseline_tokens,
+        measured_baseline_tokens,
         tokens_saved,
         latency_micros,
-        measured_baseline_tokens,
-        measured_response_tokens,
-        measured_calls,
     }
 }
 
@@ -294,7 +280,11 @@ pub fn push(repo: Option<PathBuf>) -> Result<()> {
             );
             println!(
                 "  calls={} · response_tokens={} · baseline={} · saved={}",
-                body.calls, body.response_tokens, body.baseline_tokens, body.tokens_saved
+                body.calls,
+                body.response_tokens,
+                body.static_baseline_tokens
+                    .saturating_add(body.measured_baseline_tokens),
+                body.tokens_saved
             );
             Ok(())
         }
@@ -347,7 +337,13 @@ pub fn show(repo: Option<PathBuf>) -> Result<()> {
     println!("# tool\tcalls\tresponse_tokens\tbaseline\ttokens_saved\tavg_latency_ms");
     let mut totals = ToolSnapshot::default();
     for (tool, s) in &snapshots {
-        let saved = s.baseline_tokens.saturating_sub(s.response_tokens);
+        // Each call accrues exactly one of the two baseline counters,
+        // so the per-tool baseline column is just their sum. `saved` is
+        // the same delta the dashboard surfaces.
+        let baseline = s
+            .static_baseline_tokens
+            .saturating_add(s.measured_baseline_tokens);
+        let saved = baseline.saturating_sub(s.response_tokens);
         let avg_ms = if s.calls == 0 {
             0.0
         } else {
@@ -355,19 +351,21 @@ pub fn show(repo: Option<PathBuf>) -> Result<()> {
         };
         println!(
             "{}\t{}\t{}\t{}\t{}\t{:.2}",
-            tool, s.calls, s.response_tokens, s.baseline_tokens, saved, avg_ms
+            tool, s.calls, s.response_tokens, baseline, saved, avg_ms
         );
         totals.calls += s.calls;
         totals.response_tokens += s.response_tokens;
-        totals.baseline_tokens += s.baseline_tokens;
+        totals.static_baseline_tokens += s.static_baseline_tokens;
+        totals.measured_baseline_tokens += s.measured_baseline_tokens;
         totals.latency_micros_total += s.latency_micros_total;
     }
-    let saved_total = totals
-        .baseline_tokens
-        .saturating_sub(totals.response_tokens);
+    let totals_baseline = totals
+        .static_baseline_tokens
+        .saturating_add(totals.measured_baseline_tokens);
+    let saved_total = totals_baseline.saturating_sub(totals.response_tokens);
     println!(
         "# total\t{}\t{}\t{}\t{}\t-",
-        totals.calls, totals.response_tokens, totals.baseline_tokens, saved_total
+        totals.calls, totals.response_tokens, totals_baseline, saved_total
     );
     Ok(())
 }
@@ -405,13 +403,14 @@ mod tests {
 
     #[test]
     fn aggregate_sums_per_tool_counters() {
+        // Two non-migrated tools — both contribute via static_baseline_tokens.
         let snapshots = vec![
             (
-                "code_outline".into(),
+                "code_find_symbol".into(),
                 ToolSnapshot {
                     calls: 5,
                     response_tokens: 500,
-                    baseline_tokens: 15_000,
+                    static_baseline_tokens: 15_000,
                     latency_micros_total: 5_000,
                     ..ToolSnapshot::default()
                 },
@@ -421,7 +420,7 @@ mod tests {
                 ToolSnapshot {
                     calls: 3,
                     response_tokens: 200,
-                    baseline_tokens: 15_000,
+                    static_baseline_tokens: 15_000,
                     latency_micros_total: 3_000,
                     ..ToolSnapshot::default()
                 },
@@ -430,61 +429,57 @@ mod tests {
         let body = aggregate(&snapshots, String::new());
         assert_eq!(body.calls, 8);
         assert_eq!(body.response_tokens, 700);
-        assert_eq!(body.baseline_tokens, 30_000);
+        assert_eq!(body.static_baseline_tokens, 30_000);
+        assert_eq!(body.measured_baseline_tokens, 0);
         assert_eq!(body.tokens_saved, 29_300);
         assert_eq!(body.latency_micros, 8_000);
-        // No measured data in either snapshot → measured aggregate is zero.
-        assert_eq!(body.measured_calls, 0);
-        assert_eq!(body.measured_baseline_tokens, 0);
-        assert_eq!(body.measured_response_tokens, 0);
     }
 
     #[test]
-    fn aggregate_sums_measured_fields() {
+    fn aggregate_mixes_static_and_measured() {
+        // One migrated tool (measured) + one non-migrated (static).
         let snapshots = vec![
             (
                 "code_outline".into(),
                 ToolSnapshot {
-                    calls: 5,
-                    response_tokens: 500,
-                    baseline_tokens: 15_000,
-                    latency_micros_total: 5_000,
+                    calls: 4,
+                    response_tokens: 400,
+                    static_baseline_tokens: 0,
                     measured_baseline_tokens: 12_000,
-                    measured_response_tokens: 400,
-                    measured_calls: 4,
+                    latency_micros_total: 4_000,
                 },
             ),
             (
-                "code_skeleton".into(),
+                "code_path".into(),
                 ToolSnapshot {
                     calls: 2,
                     response_tokens: 100,
-                    baseline_tokens: 6_000,
+                    static_baseline_tokens: 10_000,
+                    measured_baseline_tokens: 0,
                     latency_micros_total: 1_000,
-                    measured_baseline_tokens: 5_500,
-                    measured_response_tokens: 100,
-                    measured_calls: 2,
                 },
             ),
         ];
         let body = aggregate(&snapshots, String::new());
-        assert_eq!(body.measured_calls, 6);
-        assert_eq!(body.measured_baseline_tokens, 17_500);
-        assert_eq!(body.measured_response_tokens, 500);
+        assert_eq!(body.calls, 6);
+        assert_eq!(body.response_tokens, 500);
+        assert_eq!(body.static_baseline_tokens, 10_000);
+        assert_eq!(body.measured_baseline_tokens, 12_000);
+        // (10_000 + 12_000) - 500 = 21_500.
+        assert_eq!(body.tokens_saved, 21_500);
     }
 
     #[test]
     fn aggregate_clamps_savings_at_zero() {
-        // Pathological: response > baseline. Should clamp to 0, never
-        // report negative savings.
+        // Pathological: response > combined baseline. Clamp to 0.
         let snapshots = vec![(
-            "code_outline".into(),
+            "code_find_symbol".into(),
             ToolSnapshot {
                 calls: 1,
                 response_tokens: 5_000,
-                baseline_tokens: 3_000,
+                static_baseline_tokens: 1_500,
+                measured_baseline_tokens: 1_000,
                 latency_micros_total: 100,
-                ..ToolSnapshot::default()
             },
         )];
         let body = aggregate(&snapshots, String::new());
@@ -527,49 +522,27 @@ mod tests {
     }
 
     #[test]
-    fn push_body_emits_measured_fields_when_present() {
+    fn push_body_emits_both_baseline_fields() {
         let snapshots = vec![(
             "code_outline".into(),
             ToolSnapshot {
                 calls: 1,
                 response_tokens: 200,
-                baseline_tokens: 3_000,
-                latency_micros_total: 1_000,
+                static_baseline_tokens: 0,
                 measured_baseline_tokens: 2_500,
-                measured_response_tokens: 200,
-                measured_calls: 1,
+                latency_micros_total: 1_000,
             },
         )];
         let body = aggregate(&snapshots, String::new());
         let json = serde_json::to_string(&body).unwrap();
-        // All three new fields appear on the wire (always emitted, even
-        // when zero — old workers silently drop unknowns and that's
-        // exactly what we want for the back-compat story).
-        assert!(json.contains("\"measured_baseline_tokens\":2500"), "wire: {json}");
-        assert!(json.contains("\"measured_response_tokens\":200"), "wire: {json}");
-        assert!(json.contains("\"measured_calls\":1"), "wire: {json}");
-    }
-
-    #[test]
-    fn push_body_handles_missing_measured_fields_from_old_db_row() {
-        // A `tel:tool:*` row written by a pre-measured-baselines server
-        // has no `measured_*` fields. ToolSnapshot's `#[serde(default)]`
-        // must fill them with zero so the aggregate succeeds without
-        // a DB migration.
-        let legacy_json = r#"{
-            "calls": 7,
-            "response_tokens": 500,
-            "baseline_tokens": 21000,
-            "latency_micros_total": 2500
-        }"#;
-        let snap: ToolSnapshot =
-            serde_json::from_str(legacy_json).expect("legacy snapshot must parse");
-        assert_eq!(snap.calls, 7);
-        assert_eq!(snap.measured_calls, 0);
-        assert_eq!(snap.measured_baseline_tokens, 0);
-        let body = aggregate(&[("code_outline".into(), snap)], String::new());
-        assert_eq!(body.calls, 7);
-        assert_eq!(body.measured_calls, 0);
-        assert_eq!(body.tokens_saved, 20_500);
+        assert!(
+            json.contains("\"static_baseline_tokens\":0"),
+            "wire: {json}"
+        );
+        assert!(
+            json.contains("\"measured_baseline_tokens\":2500"),
+            "wire: {json}"
+        );
+        assert!(json.contains("\"tokens_saved\":2300"), "wire: {json}");
     }
 }

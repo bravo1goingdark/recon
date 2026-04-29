@@ -482,7 +482,7 @@ function renderSavings(data) {
     box.innerHTML =
       '<div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:14px">' +
       '<div style="font-size:38px;font-family:var(--serif);letter-spacing:-.02em">0 tokens</div>' +
-      '<div style="color:var(--ink-3);font-size:13px">estimated saved · last ' +
+      '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
       escapeHtml(String(range)) +
       " days</div></div>" +
       renderSparkline([]) +
@@ -490,11 +490,13 @@ function renderSavings(data) {
     return;
   }
 
-  // Paid + data: headline + chart + table.
+  // Paid + data: headline + chart + table. Per-row baseline is the sum
+  // of the static and measured columns (each call accrues exactly one).
   var rows = daily
     .slice()
     .reverse() // newest first in the table; chart stays time-ordered
     .map(function (d) {
+      var rowBaseline = (d.static_baseline_tokens || 0) + (d.measured_baseline_tokens || 0);
       return (
         "<tr>" +
         '<td style="font-family:var(--mono);font-size:12px;color:var(--ink-2)">' +
@@ -507,7 +509,7 @@ function renderSavings(data) {
         fmtInt(d.response_tokens) +
         "</td>" +
         '<td style="text-align:right">' +
-        fmtInt(d.baseline_tokens) +
+        fmtInt(rowBaseline) +
         "</td>" +
         '<td style="text-align:right;color:var(--clay);font-weight:500">' +
         fmtInt(d.tokens_saved) +
@@ -517,63 +519,20 @@ function renderSavings(data) {
     })
     .join("");
 
-  // ── Measured / Estimated badge ───────────────────────────────────
-  // The dashboard shows three different surfaces depending on how
-  // many of today's calls were actually measured against a real
-  // Read/grep alternative (i.e. ran with RECON_MEASURED_BASELINES=1
-  // on the server). The thresholds match the migration plan:
-  //   ratio >= 0.8        → "Measured"      + new disclaimer
-  //   0.05 <= ratio < 0.8 → "Mostly estimated" + legacy disclaimer
-  //   ratio <  0.05       → unchanged from pre-v0.4 (legacy line)
-  // The split-row beneath the headline shows both numbers so users
-  // can see the static estimate side-by-side with the live measurement.
-  var measuredCalls = (totals.measured_calls || 0);
-  var measuredSaved = (totals.measured_tokens_saved || 0);
-  var measuredRatio = calls > 0 ? measuredCalls / calls : 0;
-  var estimatedSaved = saved - measuredSaved;
-  if (estimatedSaved < 0) estimatedSaved = 0; // defensive clamp
-  var badgeHtml;
-  var disclaimer;
-  if (measuredRatio >= 0.8) {
-    badgeHtml =
-      '<span style="display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;' +
-      'padding:2px 8px;border-radius:2px;background:var(--clay-soft);color:var(--clay);margin-left:8px">Measured</span>';
-    disclaimer = "Measured against in-process Read/grep equivalent on every call.";
-  } else if (measuredRatio >= 0.05) {
-    badgeHtml =
-      '<span style="display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;' +
-      'padding:2px 8px;border-radius:2px;border:1px solid var(--rule);color:var(--ink-3);margin-left:8px">Mostly estimated</span>';
-    disclaimer = "Estimate, not a measurement.";
-  } else {
-    badgeHtml = "";
-    disclaimer = "Estimate, not a measurement.";
-  }
-  // Split row only renders when there's at least some measured data.
-  // Otherwise the legacy single-headline UX is preserved exactly.
-  var splitRow = "";
-  if (measuredCalls > 0) {
-    splitRow =
-      '<div style="display:flex;flex-wrap:wrap;gap:24px;margin-top:6px;margin-bottom:14px;font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:.04em">' +
-        '<span>Estimated saved · <strong style="color:var(--ink-2);font-weight:500">' +
-          fmtCompact(estimatedSaved) + '</strong></span>' +
-        '<span>Measured saved · <strong style="color:var(--clay);font-weight:500">' +
-          fmtCompact(measuredSaved) + '</strong></span>' +
-      '</div>';
-  }
-
   box.innerHTML =
     '<div style="display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;margin-bottom:8px">' +
     '<div style="font-size:44px;font-family:var(--serif);letter-spacing:-.02em">' +
     fmtCompact(saved) +
-    " tokens" + badgeHtml + "</div>" +
-    '<div style="color:var(--ink-3);font-size:13px">estimated saved · last ' +
+    " tokens</div>" +
+    '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
     escapeHtml(String(range)) +
     " days · " +
     fmtInt(calls) +
     " tool calls</div></div>" +
-    splitRow +
-    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">' +
-    escapeHtml(disclaimer) +
+    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px;line-height:1.55">' +
+    "Read/grep equivalent measured per-call against the in-process index. " +
+    "Composite tools (<code>code_repo_map</code>, <code>code_path</code>, " +
+    "<code>code_context</code>, …) still use static baselines." +
     '</div>' +
     renderSparkline(daily) +
     '<table style="margin-top:18px;width:100%;border-collapse:collapse;font-size:13px">' +
@@ -582,7 +541,7 @@ function renderSavings(data) {
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Calls</th>' +
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Response tokens</th>' +
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Baseline</th>' +
-    '<th style="padding:8px 4px;font-weight:500;text-align:right">Est. saved</th>' +
+    '<th style="padding:8px 4px;font-weight:500;text-align:right">Saved</th>' +
     "</tr></thead><tbody>" +
     rows +
     "</tbody></table>";

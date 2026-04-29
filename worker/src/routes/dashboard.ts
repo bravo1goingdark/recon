@@ -247,15 +247,14 @@ interface RollupRow {
   day: string;
   calls: number;
   response_tokens: number;
-  baseline_tokens: number;
+  static_baseline_tokens: number;
+  measured_baseline_tokens: number;
+  /// Derived in SQL: MAX(0, (static + measured) - response_tokens).
+  /// Replaces the per-row stored `tokens_saved` for the read path —
+  /// the column still exists for write-path validation but is not
+  /// returned (the derived figure is the source of truth).
   tokens_saved: number;
   latency_micros: number;
-  measured_baseline_tokens: number;
-  measured_response_tokens: number;
-  measured_calls: number;
-  /// Derived in SQL via MAX(0, measured_baseline_tokens - measured_response_tokens).
-  /// Same clamp rule as the legacy `tokens_saved`.
-  measured_tokens_saved: number;
 }
 
 dashboardRoutes.get("/savings", async (c) => {
@@ -274,7 +273,8 @@ dashboardRoutes.get("/savings", async (c) => {
       totals: {
         calls: 0,
         response_tokens: 0,
-        baseline_tokens: 0,
+        static_baseline_tokens: 0,
+        measured_baseline_tokens: 0,
         tokens_saved: 0,
         latency_micros: 0,
       },
@@ -310,14 +310,13 @@ dashboardRoutes.get("/savings", async (c) => {
       `SELECT day,
               SUM(calls)                    AS calls,
               SUM(response_tokens)          AS response_tokens,
-              SUM(baseline_tokens)          AS baseline_tokens,
-              SUM(tokens_saved)             AS tokens_saved,
-              SUM(latency_micros)           AS latency_micros,
+              SUM(static_baseline_tokens)   AS static_baseline_tokens,
               SUM(measured_baseline_tokens) AS measured_baseline_tokens,
-              SUM(measured_response_tokens) AS measured_response_tokens,
-              SUM(measured_calls)           AS measured_calls,
-              MAX(0, SUM(measured_baseline_tokens) - SUM(measured_response_tokens))
-                                            AS measured_tokens_saved
+              MAX(0,
+                  SUM(static_baseline_tokens)
+                  + SUM(measured_baseline_tokens)
+                  - SUM(response_tokens))   AS tokens_saved,
+              SUM(latency_micros)           AS latency_micros
        FROM usage_rollups
        WHERE user_id = ? AND day >= ? AND day <= ?
        GROUP BY day
@@ -329,30 +328,26 @@ dashboardRoutes.get("/savings", async (c) => {
   const daily = result.results ?? [];
 
   // JS-side fold to compute totals. ~30..365 rows max, faster than a
-  // second SUM() round-trip for our range caps.
+  // second SUM() round-trip for our range caps. tokens_saved is summed
+  // from the per-day clamped values — the totals stay non-negative
+  // even if a single day's response exceeded its credited baselines.
   const totals = daily.reduce(
     (acc, r) => {
       acc.calls += r.calls;
       acc.response_tokens += r.response_tokens;
-      acc.baseline_tokens += r.baseline_tokens;
+      acc.static_baseline_tokens += r.static_baseline_tokens;
+      acc.measured_baseline_tokens += r.measured_baseline_tokens;
       acc.tokens_saved += r.tokens_saved;
       acc.latency_micros += r.latency_micros;
-      acc.measured_baseline_tokens += r.measured_baseline_tokens;
-      acc.measured_response_tokens += r.measured_response_tokens;
-      acc.measured_calls += r.measured_calls;
-      acc.measured_tokens_saved += r.measured_tokens_saved;
       return acc;
     },
     {
       calls: 0,
       response_tokens: 0,
-      baseline_tokens: 0,
+      static_baseline_tokens: 0,
+      measured_baseline_tokens: 0,
       tokens_saved: 0,
       latency_micros: 0,
-      measured_baseline_tokens: 0,
-      measured_response_tokens: 0,
-      measured_calls: 0,
-      measured_tokens_saved: 0,
     },
   );
 

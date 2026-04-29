@@ -16,12 +16,19 @@
 //!
 //! ## Baselines
 //!
-//! Per-tool baselines in [`BASELINES`] are conservative, audit-friendly
-//! estimates of what an agent would have spent in tokens using only
-//! Read/Grep/Glob. Each baseline cites the dominant alternative path.
-//! These are static constants by design — defending the numbers is a
-//! marketing asset, and per-user tweaking dilutes the "saved N tokens"
-//! claim.
+//! Two parallel sources of "what would Read+grep have cost":
+//!
+//! - **Migrated handlers** (the bucket-1 tools that have a clean Read /
+//!   grep alternative path) compute the figure per-call from real bytes
+//!   and pass it via `Telemetry::record(.., Some(measured))`. Their
+//!   credit accumulates into `measured_baseline_tokens`.
+//! - **Non-migrated handlers** (composite tools, `code_repo_map`,
+//!   `code_stats`, etc.) pass `None` and accrue a static [`BASELINES`]
+//!   entry into `static_baseline_tokens`. Each `BASELINES` row is a
+//!   conservative, audit-friendly estimate documented inline.
+//!
+//! Exactly one of the two baseline counters increments per call. The
+//! dashboard sums them; tooltip / disclaimer makes the source explicit.
 //!
 //! ## Why no dollar conversion
 //!
@@ -55,24 +62,31 @@ pub struct Baseline {
     pub rationale: &'static str,
 }
 
-/// Per-tool baseline table. Conservative honest estimates documented for
-/// audit. Update with each new tool.
+/// Per-tool baseline table. Conservative honest estimates for tools
+/// that have not been migrated to the per-call measured path. Migrated
+/// handlers keep an entry here with `baseline_tokens: 0` so
+/// [`Telemetry::new`] still allocates a [`ToolCounter`] for them, but
+/// `baseline_for(tool)` returns 0 — the static counter never accrues.
+/// Update with each new tool; flip an entry's `baseline_tokens` to 0
+/// when the handler graduates to the measured path.
 pub const BASELINES: &[Baseline] = &[
+    // ── Migrated to per-call measurement (zeroed) ──────────────────
     Baseline {
         tool: "code_outline",
-        baseline_tokens: 3000,
-        rationale: "Read of avg 500-line file",
+        baseline_tokens: 0,
+        rationale: "measured per-call against the indexed file",
     },
     Baseline {
         tool: "code_skeleton",
-        baseline_tokens: 3000,
-        rationale: "Read of full file",
+        baseline_tokens: 0,
+        rationale: "measured per-call against the indexed file",
     },
     Baseline {
         tool: "code_read_symbol",
-        baseline_tokens: 3000,
-        rationale: "Read full file to extract one symbol",
+        baseline_tokens: 0,
+        rationale: "measured per-call (full-file Read equivalent)",
     },
+    // ── Static estimates (composite tools, no clean alternative) ───
     Baseline {
         tool: "code_find_symbol",
         baseline_tokens: 5000,
@@ -174,29 +188,27 @@ pub fn baseline_for(tool: &str) -> u64 {
 /// Lock-free per-tool counter. Hot path increments via `Relaxed`
 /// `fetch_add`; readers (the `code_stats` / `code_savings` snapshots)
 /// take a single `Acquire` load each. No mutexes on the call path.
+///
+/// Each call increments exactly one of `static_baseline_tokens` or
+/// `measured_baseline_tokens`, never both. Migrated handlers (the
+/// bucket-1 tools that ran a real Read / grep alternative) supply
+/// `Some(measured)` to [`Telemetry::record`]; non-migrated handlers
+/// pass `None` and accrue the static [`BASELINES`] entry instead.
 pub struct ToolCounter {
     /// Number of times this tool was invoked since startup
     /// (lifetime-cumulative when persisted state is loaded on start).
     pub calls: AtomicU64,
     /// Sum of estimated response token counts emitted by this tool.
     pub response_tokens: AtomicU64,
-    /// Sum of baseline tokens credited for this tool's calls.
-    pub baseline_tokens: AtomicU64,
+    /// Sum of static [`BASELINES`] tokens for calls that did NOT supply
+    /// a per-call measurement. Zero for migrated tools whose entries
+    /// have been removed from `BASELINES`.
+    pub static_baseline_tokens: AtomicU64,
+    /// Sum of *measured* Read / grep alternative tokens for calls that
+    /// supplied a per-call measurement. Zero for non-migrated tools.
+    pub measured_baseline_tokens: AtomicU64,
     /// Sum of measured tool-handler latency in microseconds.
     pub latency_micros_total: AtomicU64,
-    /// Sum of *measured* baseline tokens — populated only on calls that
-    /// ran with `RECON_MEASURED_BASELINES=1` and produced a real Read /
-    /// grep alternative number. Zero on calls that fell back to the
-    /// static [`BASELINES`] table. Tracked separately so the dashboard
-    /// can split "estimated" vs "measured" savings honestly.
-    pub measured_baseline_tokens: AtomicU64,
-    /// Sum of response_tokens for the subset of calls that contributed
-    /// to `measured_baseline_tokens`. Lets downstream compute
-    /// `measured_tokens_saved` against only the measured slice.
-    pub measured_response_tokens: AtomicU64,
-    /// Number of calls included in the measured slice (i.e. invocations
-    /// where a measured baseline was supplied).
-    pub measured_calls: AtomicU64,
 }
 
 impl Default for ToolCounter {
@@ -204,11 +216,9 @@ impl Default for ToolCounter {
         Self {
             calls: AtomicU64::new(0),
             response_tokens: AtomicU64::new(0),
-            baseline_tokens: AtomicU64::new(0),
-            latency_micros_total: AtomicU64::new(0),
+            static_baseline_tokens: AtomicU64::new(0),
             measured_baseline_tokens: AtomicU64::new(0),
-            measured_response_tokens: AtomicU64::new(0),
-            measured_calls: AtomicU64::new(0),
+            latency_micros_total: AtomicU64::new(0),
         }
     }
 }
@@ -219,11 +229,9 @@ impl ToolCounter {
         CounterSnapshot {
             calls: self.calls.load(Ordering::Acquire),
             response_tokens: self.response_tokens.load(Ordering::Acquire),
-            baseline_tokens: self.baseline_tokens.load(Ordering::Acquire),
-            latency_micros_total: self.latency_micros_total.load(Ordering::Acquire),
+            static_baseline_tokens: self.static_baseline_tokens.load(Ordering::Acquire),
             measured_baseline_tokens: self.measured_baseline_tokens.load(Ordering::Acquire),
-            measured_response_tokens: self.measured_response_tokens.load(Ordering::Acquire),
-            measured_calls: self.measured_calls.load(Ordering::Acquire),
+            latency_micros_total: self.latency_micros_total.load(Ordering::Acquire),
         }
     }
 
@@ -233,65 +241,41 @@ impl ToolCounter {
         self.calls.store(s.calls, Ordering::Release);
         self.response_tokens
             .store(s.response_tokens, Ordering::Release);
-        self.baseline_tokens
-            .store(s.baseline_tokens, Ordering::Release);
-        self.latency_micros_total
-            .store(s.latency_micros_total, Ordering::Release);
+        self.static_baseline_tokens
+            .store(s.static_baseline_tokens, Ordering::Release);
         self.measured_baseline_tokens
             .store(s.measured_baseline_tokens, Ordering::Release);
-        self.measured_response_tokens
-            .store(s.measured_response_tokens, Ordering::Release);
-        self.measured_calls
-            .store(s.measured_calls, Ordering::Release);
+        self.latency_micros_total
+            .store(s.latency_micros_total, Ordering::Release);
     }
 }
 
 /// Plain-old-data snapshot of a [`ToolCounter`] for serialization.
-///
-/// All fields use `#[serde(default)]` so older `tel:tool:*` rows in
-/// users' SQLite — written before the measured fields existed — parse
-/// cleanly with the new fields zeroed. No schema migration is required.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CounterSnapshot {
     /// Number of calls.
-    #[serde(default)]
     pub calls: u64,
     /// Total response tokens emitted.
-    #[serde(default)]
     pub response_tokens: u64,
-    /// Total baseline tokens credited.
-    #[serde(default)]
-    pub baseline_tokens: u64,
-    /// Total handler latency in microseconds.
-    #[serde(default)]
-    pub latency_micros_total: u64,
-    /// Total *measured* baseline tokens (subset of calls only).
-    #[serde(default)]
+    /// Total static-baseline tokens credited (non-migrated tools).
+    pub static_baseline_tokens: u64,
+    /// Total measured-baseline tokens credited (migrated tools).
     pub measured_baseline_tokens: u64,
-    /// Total response tokens for the measured-call subset.
-    #[serde(default)]
-    pub measured_response_tokens: u64,
-    /// Number of calls in the measured subset.
-    #[serde(default)]
-    pub measured_calls: u64,
+    /// Total handler latency in microseconds.
+    pub latency_micros_total: u64,
 }
 
 impl CounterSnapshot {
-    /// Tokens saved = baseline credited - tokens actually emitted, clamped
-    /// at 0. Conservative: a response that exceeds its baseline reports 0
-    /// savings, never negative.
+    /// Tokens saved = (static + measured baselines) - response tokens,
+    /// clamped at 0. The two baseline fields are mutually exclusive
+    /// per-call — measured for migrated tools, static for the rest —
+    /// so summing them gives the total credited baseline across all
+    /// calls in the snapshot.
     #[inline]
     pub fn tokens_saved(&self) -> u64 {
-        self.baseline_tokens.saturating_sub(self.response_tokens)
-    }
-
-    /// Tokens saved on the *measured* slice only — same clamping rule as
-    /// [`Self::tokens_saved`] but using the per-call measured baselines
-    /// captured when `RECON_MEASURED_BASELINES=1` was set on the server.
-    #[inline]
-    pub fn measured_tokens_saved(&self) -> u64 {
-        self.measured_baseline_tokens
-            .saturating_sub(self.measured_response_tokens)
+        self.static_baseline_tokens
+            .saturating_add(self.measured_baseline_tokens)
+            .saturating_sub(self.response_tokens)
     }
 
     /// Average latency in milliseconds, or 0.0 when no calls recorded yet.
@@ -345,17 +329,18 @@ impl Telemetry {
         }
     }
 
-    /// Record one tool call. Lock-free hot path: up to 7 atomic adds + a
+    /// Record one tool call. Lock-free hot path: 4 atomic adds + a
     /// best-effort counter reset on threshold. Returns `true` if a
     /// flush should be scheduled (caller is responsible for spawning
     /// the SQLite write task).
     ///
-    /// `measured_baseline` is `Some(n)` when the handler ran with
-    /// `RECON_MEASURED_BASELINES=1` and computed a real Read/grep
-    /// alternative; otherwise `None`. The static [`BASELINES`] credit
-    /// is added on every call regardless — keeps the legacy column
-    /// populated through the v0/v1/v2 rollout so old workers and
-    /// dashboards continue to work.
+    /// `measured_baseline` is `Some(n)` when the handler computed a
+    /// per-call Read / grep alternative; otherwise `None`. Exactly one
+    /// of `static_baseline_tokens` or `measured_baseline_tokens`
+    /// accrues per call — never both. Migrated tools always pass
+    /// `Some(_)` (their `BASELINES` entry is removed so static lookup
+    /// is 0); non-migrated tools always pass `None` and accrue the
+    /// static figure.
     ///
     /// Concurrency note: the threshold reset uses a plain `store` and
     /// is best-effort. Under heavy parallelism two threads may both
@@ -371,26 +356,24 @@ impl Telemetry {
         response_tokens: u64,
         measured_baseline: Option<u64>,
     ) -> bool {
-        let baseline = baseline_for(tool);
         if let Some((_, c)) = self.tools.iter().find(|(name, _)| *name == tool) {
             c.calls.fetch_add(1, Ordering::Relaxed);
             c.response_tokens
                 .fetch_add(response_tokens, Ordering::Relaxed);
-            c.baseline_tokens.fetch_add(baseline, Ordering::Relaxed);
             c.latency_micros_total
                 .fetch_add(latency.as_micros() as u64, Ordering::Relaxed);
-            if let Some(m) = measured_baseline {
-                c.measured_baseline_tokens
-                    .fetch_add(m, Ordering::Relaxed);
-                c.measured_response_tokens
-                    .fetch_add(response_tokens, Ordering::Relaxed);
-                c.measured_calls.fetch_add(1, Ordering::Relaxed);
+            match measured_baseline {
+                Some(m) => {
+                    c.measured_baseline_tokens.fetch_add(m, Ordering::Relaxed);
+                }
+                None => {
+                    c.static_baseline_tokens
+                        .fetch_add(baseline_for(tool), Ordering::Relaxed);
+                }
             }
         }
         let n = self.calls_since_flush.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= FLUSH_THRESHOLD {
-            // Reset so subsequent calls don't keep firing the threshold.
-            // Use Release so the reset is observable by the next reader.
             self.calls_since_flush.store(0, Ordering::Release);
             return true;
         }
@@ -404,11 +387,9 @@ impl Telemetry {
             let s = c.snapshot();
             agg.calls += s.calls;
             agg.response_tokens += s.response_tokens;
-            agg.baseline_tokens += s.baseline_tokens;
-            agg.latency_micros_total += s.latency_micros_total;
+            agg.static_baseline_tokens += s.static_baseline_tokens;
             agg.measured_baseline_tokens += s.measured_baseline_tokens;
-            agg.measured_response_tokens += s.measured_response_tokens;
-            agg.measured_calls += s.measured_calls;
+            agg.latency_micros_total += s.latency_micros_total;
         }
         agg
     }
@@ -499,8 +480,9 @@ mod tests {
 
     #[test]
     fn baseline_lookup_known_tool() {
-        assert_eq!(baseline_for("code_outline"), 3000);
+        // Composite tools keep their static baselines.
         assert_eq!(baseline_for("code_repo_map"), 20000);
+        assert_eq!(baseline_for("code_find_symbol"), 5000);
     }
 
     #[test]
@@ -509,40 +491,42 @@ mod tests {
     }
 
     #[test]
-    fn record_increments_counters() {
+    fn baseline_lookup_migrated_tool_returns_zero() {
+        // Migrated handlers always supply a measured baseline; their
+        // static lookup must be 0 so the static counter never accrues
+        // for them.
+        assert_eq!(baseline_for("code_outline"), 0);
+        assert_eq!(baseline_for("code_skeleton"), 0);
+        assert_eq!(baseline_for("code_read_symbol"), 0);
+    }
+
+    #[test]
+    fn record_static_path_for_non_migrated_tool() {
         let t = Arc::new(Telemetry::new());
-        // Run several calls; threshold check is the boolean return.
         for _ in 0..10 {
-            assert!(!t.record("code_outline", Duration::from_millis(2), 400, None));
+            assert!(!t.record("code_find_symbol", Duration::from_millis(2), 400, None));
         }
         let agg = t.aggregate();
         assert_eq!(agg.calls, 10);
         assert_eq!(agg.response_tokens, 4000);
-        assert_eq!(agg.baseline_tokens, 30_000);
-        assert_eq!(agg.tokens_saved(), 26_000);
-        // No measured baseline supplied → measured fields stay at zero.
-        assert_eq!(agg.measured_calls, 0);
+        // 10 × 5000 (code_find_symbol static).
+        assert_eq!(agg.static_baseline_tokens, 50_000);
         assert_eq!(agg.measured_baseline_tokens, 0);
-        assert_eq!(agg.measured_response_tokens, 0);
-        assert_eq!(agg.measured_tokens_saved(), 0);
+        assert_eq!(agg.tokens_saved(), 46_000);
     }
 
     #[test]
-    fn record_with_measured_baseline_populates_measured_fields() {
+    fn record_measured_path_for_migrated_tool() {
         let t = Arc::new(Telemetry::new());
-        // Mix measured + unmeasured calls. Static baseline_tokens
-        // accrues on every call; measured_* only on the measured slice.
         t.record("code_outline", Duration::from_millis(1), 200, Some(2500));
-        t.record("code_outline", Duration::from_millis(1), 300, None);
         t.record("code_outline", Duration::from_millis(1), 250, Some(2700));
         let agg = t.aggregate();
-        assert_eq!(agg.calls, 3);
-        assert_eq!(agg.response_tokens, 750);
-        assert_eq!(agg.baseline_tokens, 9000); // 3 × 3000 (code_outline static)
-        assert_eq!(agg.measured_calls, 2);
+        assert_eq!(agg.calls, 2);
+        assert_eq!(agg.response_tokens, 450);
+        // Migrated tool — static credit is zero, measured holds the truth.
+        assert_eq!(agg.static_baseline_tokens, 0);
         assert_eq!(agg.measured_baseline_tokens, 5200);
-        assert_eq!(agg.measured_response_tokens, 450); // 200 + 250
-        assert_eq!(agg.measured_tokens_saved(), 4750);
+        assert_eq!(agg.tokens_saved(), 4750);
     }
 
     #[test]
@@ -550,7 +534,7 @@ mod tests {
         let t = Arc::new(Telemetry::new());
         let mut triggers = 0;
         for _ in 0..(FLUSH_THRESHOLD + 1) {
-            if t.record("code_outline", Duration::from_micros(50), 100, None) {
+            if t.record("code_find_symbol", Duration::from_micros(50), 100, None) {
                 triggers += 1;
             }
         }
@@ -561,14 +545,14 @@ mod tests {
     fn unknown_tool_records_call_to_threshold_only() {
         // Unknown tool name still increments the global flush counter so
         // an experimental tool doesn't break flush cadence — but no
-        // per-tool counter is mutated. Same applies when a measured
-        // baseline is supplied for the unknown tool: nothing accrues.
+        // per-tool counter is mutated, regardless of whether a measured
+        // baseline was supplied.
         let t = Arc::new(Telemetry::new());
         let _ = t.record("not_a_tool", Duration::from_millis(1), 100, Some(500));
         let agg = t.aggregate();
         assert_eq!(agg.calls, 0);
         assert_eq!(agg.response_tokens, 0);
-        assert_eq!(agg.measured_calls, 0);
+        assert_eq!(agg.static_baseline_tokens, 0);
         assert_eq!(agg.measured_baseline_tokens, 0);
         assert_eq!(t.calls_since_flush.load(Ordering::Acquire), 1);
     }
@@ -576,16 +560,26 @@ mod tests {
     #[test]
     fn snapshot_saturating_subtraction() {
         let s = CounterSnapshot {
-            calls: 1,
+            calls: 2,
             response_tokens: 5000,
-            baseline_tokens: 3000,
-            latency_micros_total: 0,
+            static_baseline_tokens: 1000,
             measured_baseline_tokens: 2000,
-            measured_response_tokens: 5000,
-            measured_calls: 1,
+            latency_micros_total: 0,
         };
+        // (1000 + 2000) - 5000 saturates to 0.
         assert_eq!(s.tokens_saved(), 0, "negative savings clamp to 0");
-        assert_eq!(s.measured_tokens_saved(), 0, "measured slice clamps too");
+    }
+
+    #[test]
+    fn tokens_saved_sums_both_baseline_sources() {
+        let s = CounterSnapshot {
+            calls: 5,
+            response_tokens: 800,
+            static_baseline_tokens: 6000,
+            measured_baseline_tokens: 4000,
+            latency_micros_total: 0,
+        };
+        assert_eq!(s.tokens_saved(), 9200);
     }
 
     #[test]
@@ -617,30 +611,8 @@ mod tests {
             .snapshot();
         assert_eq!(snap_after.calls, 2);
         assert_eq!(snap_after.response_tokens, 300);
-        assert_eq!(snap_after.baseline_tokens, 6000);
-        assert_eq!(snap_after.measured_calls, 2);
+        assert_eq!(snap_after.static_baseline_tokens, 0);
         assert_eq!(snap_after.measured_baseline_tokens, 5200);
-        assert_eq!(snap_after.measured_response_tokens, 300);
-    }
-
-    #[test]
-    fn old_snapshot_without_measured_fields_hydrates_via_serde_default() {
-        // A `tel:tool:*` row written by a pre-measured-baselines build
-        // (no measured_* fields in the JSON) must still parse cleanly,
-        // with measured fields zeroed. This is the back-compat
-        // contract that lets us ship without a schema migration.
-        let legacy_json = r#"{
-            "calls": 7,
-            "response_tokens": 900,
-            "baseline_tokens": 21000,
-            "latency_micros_total": 1234
-        }"#;
-        let snap: CounterSnapshot =
-            serde_json::from_str(legacy_json).expect("legacy snapshot must parse");
-        assert_eq!(snap.calls, 7);
-        assert_eq!(snap.baseline_tokens, 21000);
-        assert_eq!(snap.measured_baseline_tokens, 0);
-        assert_eq!(snap.measured_response_tokens, 0);
-        assert_eq!(snap.measured_calls, 0);
     }
 }
+
