@@ -78,6 +78,41 @@
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
   </div>
 
+  <article class="release" id="v0-5-0">
+    <header>
+      <h2>v0.5.0</h2>
+      <span class="when">2026-04-30</span>
+    </header>
+    <span class="tag">Multi-repo MCP + canonical Hits envelope + audit-driven fixes</span>
+    <p>Three audit-driven changes plus the long-promised multi-repo surface. Wire-format hard-cut at this release: bundled CLI version-locks against the server, so there is no in-the-wild consumer mismatch.</p>
+
+    <p><b>Multi-repo MCP service.</b> The <code>RepoRouter</code> infrastructure that has been quietly enforcing tier limits in the CLI is now exposed to agents as two new MCP tools, with session persistence so agents do not re-activate after every restart.</p>
+    <ul>
+      <li><b><code>code_activate_repo(path)</code></b> — switch the active repository for subsequent stateful tools. Canonicalises the path, routes through the router (subject to <code>max_repos</code> for the current tier), atomically swaps the active server pointer, persists the new session. Returns a Skeleton view with the activated repo's path plus its file and symbol counts.</li>
+      <li><b><code>code_list_repos()</code></b> — enumerate every loaded repo with <code>path</code>, <code>files</code>, <code>symbols</code>, and an <code>active</code> flag. Returned as a <code>Hits(kind="repo")</code> envelope so the existing CLI dispatcher and agents render rows without special-casing.</li>
+      <li><b>Session persistence</b> — loaded set + active repo saved to <code>&lt;config_dir&gt;/sessions.json</code> on every successful activate. On <code>recon serve</code> startup the session is re-loaded; repos that fail under the current tier are warned and skipped, never blocking startup.</li>
+      <li><b>Hot-path cost</b> — every tool call performs one <code>ArcSwap::load_full</code> (relaxed atomic load + Arc::clone, ≈3 ns) before delegating to the active <code>ReconServer</code>. Same cost class as the single-repo <code>&amp;self</code> access today; multi-repo is effectively free on the steady-state path.</li>
+    </ul>
+
+    <p><b>Canonical <code>Hits</code> output envelope for the 5 row-oriented tools.</b> <code>ARCHITECTURE.md §3</code> promised every tool emits exactly one of the canonical shapes; five tools were shipping bare <code>Vec&lt;Value&gt;</code> arrays. This release closes that gap with a sixth canonical variant (<code>Hits</code>) used by <code>code_find_symbol</code>, <code>code_search</code>, <code>code_list</code>, <code>code_find_strings</code>, <code>code_multi_find</code>. Wire shape: <code>{shape:"Hits", kind, count, hits, truncated?}</code>. Net wire-overhead per response is ≈40 bytes — well under 1 % of typical row-oriented payloads. The <code>truncated</code> flag is omitted when the result was not capped.</p>
+
+    <p><b>Audit-driven fixes.</b> Three runtime bugs surfaced by a 4-axis promise audit (output discipline, privacy, performance, license/schema):</p>
+    <ul>
+      <li><b>Tantivy writer error visible.</b> Six call sites swallowed the underlying <code>tantivy</code> writer error via <code>.ok()</code> and logged a context-free warning. The most common cause is a stale <code>.tantivy-writer.lock</code> from a previously killed process; the new warning names that explicitly so users can act on it. Affected paths: <code>ReconServer::new</code>, <code>RepoRouter::load_repo</code>, <code>indexer::index_repo</code> / <code>::index_diff</code>, <code>recon init</code>, <code>recon index</code>.</li>
+      <li><b>Telemetry counters survive upgrades.</b> <code>CounterSnapshot::static_baseline_tokens</code> and <code>::measured_baseline_tokens</code> are now <code>#[serde(default)]</code>. Older on-disk snapshots (predating those fields) hydrate as zero instead of failing deserialisation and silently wiping the lifetime "tokens saved" history on every upgrade.</li>
+      <li><b><code>recon reindex</code> renders correctly.</b> The CLI's <code>print_output</code> dispatcher now matches the reindex arm before the bare-<code>files_indexed</code> stats arm, so reindex output renders as <code>ok N files, M symbols, X errors</code> instead of an <code>Index Health</code> block with <code>repo ?</code> / <code>tantivy 0</code>.</li>
+    </ul>
+
+    <p><b>Hygiene + perf cleanup.</b></p>
+    <ul>
+      <li><b>Path-component blocklist.</b> <code>is_blocked_path</code> now scans every component, not just the leaf. Paths like <code>vault/secret.pem/leaf.json</code> are blocked even when the leaf has a benign extension.</li>
+      <li><b>Tantivy schema-bump regression test.</b> First test that exercises the wipe-and-rebuild on <code>TANTIVY_SCHEMA_VERSION</code> mismatch — locks in recovery so a future bump cannot silently break opening.</li>
+      <li><b><code>code_skeleton</code> fallback allocation.</b> Replaced <code>content.lines().take(50).collect::&lt;Vec&lt;_&gt;&gt;().join("\n")</code> with a single-pass <code>push_str</code> loop into a pre-sized <code>String</code>. Saves the intermediate <code>Vec&lt;&amp;str&gt;</code> + <code>join</code> per fallback call.</li>
+    </ul>
+
+    <p>Out of scope for this release (documented as the natural follow-up): an optional <code>repo: Option&lt;String&gt;</code> parameter on every stateful tool to override the active dispatch on a per-call basis. The current shape covers ≥99 % of agent flows (activate-then-query); the per-call override is niche convenience for cross-repo queries within a single conversation.</p>
+  </article>
+
   <article class="release" id="v0-4-1">
     <header>
       <h2>v0.4.1</h2>
