@@ -29,6 +29,13 @@ const MAX_CACHE_ENTRIES: usize = 1024;
 pub struct FffBackend {
     /// Concurrent mmap cache — reads are lock-free, writes lock only one shard.
     cache: DashMap<PathBuf, Arc<memmap2::Mmap>>,
+    /// Per-file newline-offset index, parallel to [`Self::cache`]. The index
+    /// is content-derived (a flat `Vec<usize>` of newline byte offsets), so
+    /// caching it next to the mmap means `code_multi_find` doesn't re-scan
+    /// every byte of every file just to resolve hit lines on the second
+    /// call onwards. Wrapped in `Arc` so the rayon parallel scan can clone
+    /// cheaply without re-locking the DashMap.
+    line_index_cache: DashMap<PathBuf, Arc<Vec<usize>>>,
 }
 
 impl FffBackend {
@@ -36,7 +43,39 @@ impl FffBackend {
     pub fn new() -> Self {
         Self {
             cache: DashMap::with_capacity(MAX_CACHE_ENTRIES),
+            line_index_cache: DashMap::with_capacity(MAX_CACHE_ENTRIES),
         }
+    }
+
+    /// Look up or build the newline-offset index for `path`. The mmap is
+    /// content-immutable for the lifetime of the cache entry, so caching
+    /// the index alongside the mmap is safe — both are evicted together
+    /// in [`Self::refresh`].
+    fn get_line_index(
+        &self,
+        path: &std::path::Path,
+        data: &[u8],
+    ) -> Arc<Vec<usize>> {
+        if let Some(idx) = self.line_index_cache.get(path) {
+            return Arc::clone(&idx);
+        }
+        let idx = Arc::new(build_line_index(data));
+        // Bound growth: line-index cache tracks the mmap cache, so cap
+        // it the same way. On overflow drop ~25% to keep warm entries.
+        if self.line_index_cache.len() >= MAX_CACHE_ENTRIES {
+            let to_remove: Vec<PathBuf> = self
+                .line_index_cache
+                .iter()
+                .take(MAX_CACHE_ENTRIES / 4)
+                .map(|e| e.key().clone())
+                .collect();
+            for key in to_remove {
+                self.line_index_cache.remove(&key);
+            }
+        }
+        self.line_index_cache
+            .insert(path.to_path_buf(), Arc::clone(&idx));
+        idx
     }
 
     /// Look up or create an mmap for the given path.
@@ -384,8 +423,11 @@ impl TextSearcher for FffBackend {
                     return local_buckets;
                 };
 
-                // Build newline index once per file: O(M)
-                let line_index = build_line_index(&mmap);
+                // Newline index — built once on the first call, served
+                // from cache on every subsequent call until refresh()
+                // evicts the file. Same content-immutability invariant
+                // as the mmap itself.
+                let line_index = self.get_line_index(path, &mmap);
                 let data_len = mmap.len();
 
                 // Single-pass aho-corasick scan: O(N log M) for N matches
@@ -435,16 +477,21 @@ impl TextSearcher for FffBackend {
     }
 
     fn refresh(&self, changed_paths: &[PathBuf]) -> Result<(), Error> {
-        if self.cache.is_empty() {
+        if self.cache.is_empty() && self.line_index_cache.is_empty() {
             return Ok(());
         }
 
         // If changed paths are a significant fraction of cache, clear entirely.
-        if changed_paths.len() >= self.cache.len() / 2 {
+        // The line-index cache tracks the mmap cache 1:1; evict in lockstep so
+        // a stale newline index can never outlive a refreshed mmap.
+        let bulk_threshold = self.cache.len() / 2;
+        if !self.cache.is_empty() && changed_paths.len() >= bulk_threshold {
             self.cache.clear();
+            self.line_index_cache.clear();
         } else {
             for path in changed_paths {
                 self.cache.remove(path);
+                self.line_index_cache.remove(path);
             }
         }
         Ok(())
@@ -596,7 +643,7 @@ impl TextSearcher for FffBackend {
                 };
                 scope_scanned.fetch_add(1, Ordering::Relaxed);
 
-                let line_index = build_line_index(&mmap);
+                let line_index = self.get_line_index(path, &mmap);
                 let data_len = mmap.len();
 
                 for mat in ac.find_iter(&*mmap) {
