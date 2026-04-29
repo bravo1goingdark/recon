@@ -4,10 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>recon docs — Local-first MCP server · Tools · Filter DSL · Benchmarks</title>
-<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 20 tools (12 base + 7 graph-traversal + 1 telemetry), 5 search tiers, PageRank repo map, weakly-connected-component subsystems, token-savings telemetry, 7 languages, filter DSL, incremental indexing, secret redaction." />
+<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 18 agent-facing tools (12 base + 6 graph-traversal), 5 search tiers, PageRank repo map, weakly-connected-component subsystems, per-call measured token-savings, 7 languages, filter DSL, incremental indexing, secret redaction." />
 <link rel="canonical" href="https://mcprecon.pages.dev/Docs.html" />
 <meta property="og:title" content="recon docs — Local-first MCP server" />
-<meta property="og:description" content="20 symbol-aware MCP tools — graph-aware navigation, token-savings telemetry. Signed 24 MB Rust binary. SQLite + Tantivy + fff-grep search tiers. Your code stays on your machine." />
+<meta property="og:description" content="18 symbol-aware MCP tools — graph-aware navigation, per-call measured token-savings. Signed 24 MB Rust binary. SQLite + Tantivy + fff-grep search tiers. Your code stays on your machine." />
 <meta property="og:url" content="https://mcprecon.pages.dev/Docs.html" />
 <meta property="og:image" content="https://mcprecon.pages.dev/og.png" />
 <meta name="twitter:card" content="summary_large_image" />
@@ -433,7 +433,7 @@ Error: Savings dashboard is a Pro/Team feature. Upgrade at
        https://mcprecon.pages.dev/pricing</pre>
 
     <h3 id="cmd-savings-show"><code>recon savings show</code> <span class="badge">v0.3.2+</span></h3>
-    <p>Print local counters as TSV, no network. Same data the agent sees via the <code>code_savings</code> tool, available without the MCP server running.</p>
+    <p>Print local counters as TSV, no network. Reads telemetry straight from <code>.recon/index.db</code> — no MCP server needed. The dashboard surfaces the same numbers as daily rollups.</p>
 <pre>$ recon savings show
 # tool             calls  response_tokens  baseline  tokens_saved  avg_latency_ms
 code_outline       317    63400            951000    887600        4.20
@@ -677,39 +677,37 @@ $ recon strings "https://" --kind literal</pre>
       <li><code>tool</code> (positional, required) — tool name (e.g. <code>code_find_symbol</code>, <code>code_repo_map</code>).</li>
       <li><code>json-args</code> (positional, optional) — tool arguments as a JSON object. Default <code>"{}"</code>.</li>
     </ul>
-<pre>$ recon query code_stats
-$ recon query code_find_symbol '{"name":"Server","kind":"struct"}'
-$ recon query code_repo_map '{"token_budget":500}'</pre>
+<pre>$ recon query code_find_symbol '{"name":"Server","kind":"struct"}'
+$ recon query code_repo_map '{"token_budget":500}'
+$ recon query code_context '{"symbol":"render_map","token_budget":2000}'</pre>
 
     <!-- MCP TOOLS -->
     <h2 id="tools"><span class="no">08</span>MCP tools</h2>
 
-    <p>The 20 tools your AI agent calls when recon is wired up — symbol-and-text primitives, graph-aware traversals, and telemetry. Each is documented in the agent's tool listing — these are summarised here so you can audit what the agent has access to.</p>
+    <p>The 18 tools your AI agent calls when recon is wired up — symbol-and-text primitives plus graph-aware traversals. Each is documented in the agent's tool listing; these are summarised here so you can audit what the agent has access to. Operator-only telemetry (<code>recon stats</code>, <code>recon savings show</code>) lives in the CLI, not on the MCP surface.</p>
 
     <div class="cards">
-      <div class="card"><div class="t">code_outline</div><div class="d">One line per symbol in a file. Replaces Read.</div></div>
-      <div class="card"><div class="t">code_skeleton</div><div class="d">Signatures + docs; bodies as <code>…</code>. Replaces Read.</div></div>
-      <div class="card"><div class="t">code_read_symbol</div><div class="d">Single symbol + its callers. Replaces Read.</div></div>
+      <div class="card"><div class="t">code_outline <span class="badge">measured</span></div><div class="d">One line per symbol in a file. Replaces Read.</div></div>
+      <div class="card"><div class="t">code_skeleton <span class="badge">measured</span></div><div class="d">Signatures + docs; bodies as <code>…</code>. Replaces Read.</div></div>
+      <div class="card"><div class="t">code_read_symbol <span class="badge">measured</span></div><div class="d">Single symbol + its callers. Replaces Read.</div></div>
       <div class="card"><div class="t">code_find_symbol</div><div class="d">Three-tier exact → BM25 → fuzzy. Replaces Grep.</div></div>
       <div class="card"><div class="t">code_find_refs</div><div class="d">Ref count + top-k call sites. Replaces Grep.</div></div>
-      <div class="card"><div class="t">code_search</div><div class="d">Exact, regex, hybrid search. Replaces Grep.</div></div>
-      <div class="card"><div class="t">code_list</div><div class="d">Files with their top symbols. Replaces Glob.</div></div>
+      <div class="card"><div class="t">code_search <span class="badge">measured</span></div><div class="d">Exact, regex, hybrid search. Replaces Grep. Measured on grep paths.</div></div>
+      <div class="card"><div class="t">code_list <span class="badge">measured</span></div><div class="d">Files with their top symbols. Replaces Glob.</div></div>
       <div class="card"><div class="t">code_repo_map</div><div class="d">PageRank overview under a token budget.</div></div>
-      <div class="card"><div class="t">code_find_strings</div><div class="d">Literals and comments only.</div></div>
-      <div class="card"><div class="t">code_multi_find</div><div class="d">Multi-pattern fan-out search.</div></div>
+      <div class="card"><div class="t">code_find_strings <span class="badge">measured</span></div><div class="d">Literals and comments only.</div></div>
+      <div class="card"><div class="t">code_multi_find <span class="badge">measured</span></div><div class="d">Multi-pattern fan-out search.</div></div>
       <div class="card"><div class="t">code_reindex</div><div class="d">Agent-triggered reindex.</div></div>
-      <div class="card"><div class="t">code_stats</div><div class="d">Index health, top-N centrality, live token-savings block.</div></div>
       <div class="card"><div class="t">code_path</div><div class="d">Shortest call-graph path between two symbols (bidirectional BFS, max 8 hops). Replaces chained refs.</div></div>
       <div class="card"><div class="t">code_callers</div><div class="d">Transitive callers up to N rings (default 1, max 6). Cycle-safe; tiered.</div></div>
       <div class="card"><div class="t">code_callees</div><div class="d">Transitive callees up to N rings. What does X call?</div></div>
-      <div class="card"><div class="t">code_context</div><div class="d">One-shot bundle: signature, body, callers, callees, types, tests.</div></div>
+      <div class="card"><div class="t">code_context <span class="badge">measured</span></div><div class="d">One-shot bundle: signature, body, callers, callees, types, tests.</div></div>
       <div class="card"><div class="t">code_impact</div><div class="d">Blast radius — transitive callers + reachable tests. What might break if I change X?</div></div>
       <div class="card"><div class="t">code_subsystems</div><div class="d">Repo orientation by weakly-connected components. Hub + dominant directory per subsystem.</div></div>
       <div class="card"><div class="t">code_subsystem</div><div class="d">Drill into one subsystem from code_subsystems with a token-budgeted skeleton.</div></div>
-      <div class="card"><div class="t">code_savings</div><div class="d">Per-tool telemetry: calls, response tokens, baseline avoided, tokens saved, avg latency.</div></div>
     </div>
 
-    <p>Same numbers also surface as a <code>telemetry</code> block on every <code>code_stats</code> call — so dashboards can poll a single endpoint.</p>
+    <p>The <span class="badge">measured</span> badge marks tools whose token-savings are computed per-call against the in-process Read/grep equivalent. Tools without the badge use conservative static estimates (the 6 graph/ranking tools have no clean grep alternative, so a measured baseline would be synthetic). Both categories feed the same daily rollups on <code>recon savings push</code> and the dashboard.</p>
 
     <!-- FILTER DSL -->
     <h2 id="filter-dsl"><span class="no">09</span>Filter DSL</h2>
@@ -872,7 +870,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <table>
       <thead><tr><th>Tool</th><th>Zed (80K symbols)</th><th>Rust compiler (320K symbols)</th></tr></thead>
       <tbody>
-        <tr><td><code>code_stats</code></td><td>10 ms</td><td>29 ms</td></tr>
+        <tr><td><code>code_context</code></td><td>10 ms</td><td>16 ms</td></tr>
         <tr><td><code>code_find_symbol</code></td><td>8 ms</td><td>8 ms</td></tr>
         <tr><td><code>code_search</code></td><td>11 ms</td><td>33 ms</td></tr>
         <tr><td><code>code_outline</code></td><td>14 ms</td><td>13 ms</td></tr>
@@ -900,6 +898,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <!-- CHANGELOG -->
     <h2 id="changelog"><span class="no">15</span>Changelog</h2>
 
+    <p><b>v0.4.0</b> — Per-call <b>measured</b> token-savings replace static estimates for 8 tools (<code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code>, <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>) — the dashboard now reflects what the agent's Read+grep alternative would have actually cost, not a hand-tuned guess. The 10 graph/ranking tools keep documented static estimates (no clean grep equivalent for fuzzy ranking, transitive callers, or PageRank). <code>code_stats</code> and <code>code_savings</code> dropped from the MCP surface — operator diagnostics now live in <code>recon stats</code> / <code>recon savings show</code> CLI, not in the agent's tool list. <a href="/changelog#v0-4-0">Full notes →</a></p>
     <p><b>v0.3.2</b> — Pro/Team savings dashboard: <code>recon savings push/show</code> CLI subcommand, <code>RECON_AUTO_PUSH_SAVINGS</code> env var for auto-push on shutdown, dashboard "Savings" tab with per-day sparkline, <code>POST /v1/account/savings</code> + <code>GET /v1/dashboard/savings</code> worker routes, D1 migration <code>0009_usage_rollups</code>. Plus lifecycle hardening: <code>recon serve</code> now exits cleanly on license revocation / account deletion / <code>recon logout</code> against a running session, not just signals + transport close. <a href="/changelog#v0-3-2">Full notes →</a></p>
     <p><b>v0.3.1</b> — Multi-language parser parity (Python, JS/TS, Go, Java, C/C++ extractors now walk function/class/struct bodies for identifier refs, so the call graph is meaningfully populated for every supported language). Token-savings counter: new <code>code_savings</code> tool, lock-free atomic counters with SQLite-backed lifetime persistence, telemetry block on <code>code_stats</code>. Model-agnostic — reports tokens saved, leaves dollar conversion to your provider's rate sheet. <a href="/changelog#v0-3-1">Full notes →</a></p>
     <p><b>v0.3.0</b> — Seven graph-traversal tools: <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_context</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>. Built on a forward+reverse CSR call graph cached alongside <code>code_repo_map</code>'s symbol set. Replaces the canonical chained-<code>code_find_refs</code> agent loop with a single bounded BFS. Also fixes the parser/storage parser-local-id remap that silently mis-attributed refs across files. <a href="/changelog#v0-3-0">Full notes →</a></p>

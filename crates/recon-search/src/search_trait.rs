@@ -7,6 +7,22 @@ use compact_str::CompactString;
 use recon_core::error::Error;
 use std::path::PathBuf;
 
+/// Return type of [`TextSearcher::multi_search_measured`]: the
+/// per-pattern truncated hit buckets paired with a single global
+/// measured-baseline accumulator (in tokens, capped at
+/// [`MEASURED_BASELINE_CAP`]).
+pub type MultiSearchMeasured = (Vec<(String, Vec<TextHit>)>, u64);
+
+/// Maximum tokens accumulated for the measured baseline, per call.
+///
+/// Bounds the worst case where a regex matches every line in a giant
+/// repo. The "Read+grep equivalent" the agent would have paid for is
+/// already truncated by their own context window long before this
+/// figure, so anything past the cap is noise. Used by
+/// [`TextSearcher::search_measured`] /
+/// [`TextSearcher::multi_search_measured`] implementations.
+pub const MEASURED_BASELINE_CAP: u64 = 1_000_000;
+
 /// A query for text search.
 #[derive(Debug, Clone)]
 pub struct TextQuery {
@@ -54,4 +70,52 @@ pub trait TextSearcher: Send + Sync {
 
     /// Notify the backend that files have changed (invalidate caches).
     fn refresh(&self, changed_paths: &[PathBuf]) -> Result<(), Error>;
+
+    /// Search and return both the truncated hits and the total tokens
+    /// an unbounded grep alternative would have emitted (the *measured
+    /// baseline*).
+    ///
+    /// The returned baseline is summed across **all** matches the
+    /// scanner would have produced with no `max_results` cap, capped
+    /// at [`MEASURED_BASELINE_CAP`]. Implementations that short-circuit
+    /// `search` once the cap is reached must override this to do a
+    /// distinct, cap-free scan; the default fallback only sums the
+    /// truncated `search` output and undercounts on busy repos.
+    fn search_measured(&self, q: &TextQuery) -> Result<(Vec<TextHit>, u64), Error> {
+        let hits = self.search(q)?;
+        let mut total: u64 = 0;
+        for h in &hits {
+            total = total.saturating_add(h.line_text.len().div_ceil(4) as u64);
+            if total >= MEASURED_BASELINE_CAP {
+                total = MEASURED_BASELINE_CAP;
+                break;
+            }
+        }
+        Ok((hits, total))
+    }
+
+    /// Multi-pattern variant of [`Self::search_measured`]. Returns the
+    /// per-pattern truncated hit lists and a single shared accumulator
+    /// covering every match across every pattern, capped at
+    /// [`MEASURED_BASELINE_CAP`]. The shared cap mirrors how an agent
+    /// running N greps would budget against a single context window.
+    fn multi_search_measured(
+        &self,
+        patterns: &[&str],
+        scope: &[PathBuf],
+        max_per_pattern: usize,
+    ) -> Result<MultiSearchMeasured, Error> {
+        let results = self.multi_search(patterns, scope, max_per_pattern)?;
+        let mut total: u64 = 0;
+        'outer: for (_, hits) in &results {
+            for h in hits {
+                total = total.saturating_add(h.line_text.len().div_ceil(4) as u64);
+                if total >= MEASURED_BASELINE_CAP {
+                    total = MEASURED_BASELINE_CAP;
+                    break 'outer;
+                }
+            }
+        }
+        Ok((results, total))
+    }
 }

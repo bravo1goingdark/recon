@@ -124,7 +124,7 @@ describe("POST /v1/account/savings", () => {
       day: TODAY,
       calls: 42,
       response_tokens: 8000,
-      baseline_tokens: 60000,
+      static_baseline_tokens: 60000,
       tokens_saved: 52000,
       latency_micros: 12_000_000,
     });
@@ -149,7 +149,7 @@ describe("POST /v1/account/savings", () => {
       day: TODAY,
       calls: 1,
       response_tokens: 1,
-      baseline_tokens: 1,
+      static_baseline_tokens: 1,
       tokens_saved: 0,
       latency_micros: 1,
     });
@@ -169,7 +169,7 @@ describe("POST /v1/account/savings", () => {
       day: TODAY,
       calls: 10,
       response_tokens: 1000,
-      baseline_tokens: 30000,
+      static_baseline_tokens: 30000,
       tokens_saved: 100,
       latency_micros: 100,
     });
@@ -177,7 +177,7 @@ describe("POST /v1/account/savings", () => {
       day: TODAY,
       calls: 5,
       response_tokens: 500,
-      baseline_tokens: 10000,
+      static_baseline_tokens: 10000,
       tokens_saved: 30,
       latency_micros: 50,
     });
@@ -198,7 +198,7 @@ describe("POST /v1/account/savings", () => {
       day: TODAY,
       calls: 10,
       response_tokens: 1000,
-      baseline_tokens: 30000,
+      static_baseline_tokens: 30000,
       tokens_saved: 100,
       latency_micros: 100,
     });
@@ -206,7 +206,7 @@ describe("POST /v1/account/savings", () => {
       day: TODAY,
       calls: 100,
       response_tokens: 5000,
-      baseline_tokens: 80000,
+      static_baseline_tokens: 80000,
       tokens_saved: 1000,
       latency_micros: 5000,
     });
@@ -227,7 +227,7 @@ describe("POST /v1/account/savings", () => {
       day: "not-a-date",
       calls: 1,
       response_tokens: 1,
-      baseline_tokens: 1,
+      static_baseline_tokens: 1,
       tokens_saved: 0,
       latency_micros: 1,
     });
@@ -241,7 +241,7 @@ describe("POST /v1/account/savings", () => {
       day: TODAY,
       calls: -1,
       response_tokens: 0,
-      baseline_tokens: 0,
+      static_baseline_tokens: 0,
       tokens_saved: 0,
       latency_micros: 0,
     });
@@ -254,7 +254,7 @@ describe("POST /v1/account/savings", () => {
       day: TODAY,
       calls: 1.5,
       response_tokens: 0,
-      baseline_tokens: 0,
+      static_baseline_tokens: 0,
       tokens_saved: 0,
       latency_micros: 0,
     });
@@ -269,7 +269,7 @@ describe("POST /v1/account/savings", () => {
         day: TODAY,
         calls: 1,
         response_tokens: 1,
-        baseline_tokens: 1,
+        static_baseline_tokens: 1,
         tokens_saved: 0,
         latency_micros: 1,
       }),
@@ -315,7 +315,7 @@ describe("GET /v1/dashboard/savings", () => {
         day,
         calls: 10,
         response_tokens: 1000,
-        baseline_tokens: 30000,
+        static_baseline_tokens: 30000,
         tokens_saved: 29000,
         latency_micros: 100_000,
       });
@@ -357,7 +357,7 @@ describe("GET /v1/dashboard/savings", () => {
     await db
       .prepare(
         `INSERT INTO usage_rollups
-           (user_id, day, calls, response_tokens, baseline_tokens, tokens_saved, latency_micros)
+           (user_id, day, calls, response_tokens, static_baseline_tokens, tokens_saved, latency_micros)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
@@ -375,7 +375,7 @@ describe("GET /v1/dashboard/savings", () => {
       day: TODAY,
       calls: 5,
       response_tokens: 500,
-      baseline_tokens: 1500,
+      static_baseline_tokens: 1500,
       tokens_saved: 1000,
       latency_micros: 5000,
     });
@@ -402,7 +402,7 @@ describe("GET /v1/dashboard/savings", () => {
       day: TODAY,
       calls: 999,
       response_tokens: 1,
-      baseline_tokens: 1,
+      static_baseline_tokens: 1,
       tokens_saved: 1,
       latency_micros: 1,
     });
@@ -428,7 +428,7 @@ describe("GET /v1/dashboard/savings", () => {
       repo_fingerprint: fpA,
       calls: 100,
       response_tokens: 10_000,
-      baseline_tokens: 60_000,
+      static_baseline_tokens: 60_000,
       tokens_saved: 50_000,
       latency_micros: 1_000_000,
     });
@@ -437,7 +437,7 @@ describe("GET /v1/dashboard/savings", () => {
       repo_fingerprint: fpB,
       calls: 80,
       response_tokens: 8_000,
-      baseline_tokens: 48_000,
+      static_baseline_tokens: 48_000,
       tokens_saved: 40_000,
       latency_micros: 800_000,
     });
@@ -470,7 +470,7 @@ describe("GET /v1/dashboard/savings", () => {
       // intentionally no repo_fingerprint
       calls: 42,
       response_tokens: 4000,
-      baseline_tokens: 30000,
+      static_baseline_tokens: 30000,
       tokens_saved: 26000,
       latency_micros: 500_000,
     });
@@ -499,7 +499,7 @@ describe("GET /v1/dashboard/savings", () => {
       day: TODAY,
       calls: 30,
       response_tokens: 3000,
-      baseline_tokens: 18000,
+      static_baseline_tokens: 18000,
       tokens_saved: 15000,
       latency_micros: 200_000,
     });
@@ -509,7 +509,7 @@ describe("GET /v1/dashboard/savings", () => {
       repo_fingerprint: fp,
       calls: 70,
       response_tokens: 7000,
-      baseline_tokens: 42000,
+      static_baseline_tokens: 42000,
       tokens_saved: 35000,
       latency_micros: 700_000,
     });
@@ -531,7 +531,7 @@ describe("GET /v1/dashboard/savings", () => {
       repo_fingerprint: "abc123",
       calls: 1,
       response_tokens: 1,
-      baseline_tokens: 1,
+      static_baseline_tokens: 1,
       tokens_saved: 0,
       latency_micros: 1,
     });
@@ -543,7 +543,7 @@ describe("GET /v1/dashboard/savings", () => {
       repo_fingerprint: "A".repeat(64),
       calls: 1,
       response_tokens: 1,
-      baseline_tokens: 1,
+      static_baseline_tokens: 1,
       tokens_saved: 0,
       latency_micros: 1,
     });
@@ -555,10 +555,149 @@ describe("GET /v1/dashboard/savings", () => {
       repo_fingerprint: "z".repeat(64),
       calls: 1,
       response_tokens: 1,
-      baseline_tokens: 1,
+      static_baseline_tokens: 1,
       tokens_saved: 0,
       latency_micros: 1,
     });
     expect(r.status).toBe(400);
+  });
+
+  // ── Measured baselines (v0.4) ─────────────────────────────────────
+  // The wire shape requires both static_baseline_tokens and
+  // measured_baseline_tokens; each call accrues exactly one. The
+  // dashboard sums the two on the read path and clamps tokens_saved
+  // at 0.
+
+  it("Measured fields: present on push → row stored with values", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    const r = await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 5,
+      response_tokens: 200,
+      static_baseline_tokens: 0,
+      measured_baseline_tokens: 12_500,
+      tokens_saved: 12_300,
+      latency_micros: 1234,
+    });
+    expect(r.status).toBe(200);
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const row = await db
+      .prepare(
+        `SELECT static_baseline_tokens, measured_baseline_tokens
+         FROM usage_rollups WHERE user_id = ? AND day = ?`,
+      )
+      .bind("u_pro", TODAY)
+      .first<{
+        static_baseline_tokens: number;
+        measured_baseline_tokens: number;
+      }>();
+    expect(row).not.toBeNull();
+    expect(row!.static_baseline_tokens).toBe(0);
+    expect(row!.measured_baseline_tokens).toBe(12_500);
+  });
+
+  it("Measured fields: MAX-merge on conflict (same key, lower second push)", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 5,
+      response_tokens: 200,
+      static_baseline_tokens: 0,
+      measured_baseline_tokens: 12_500,
+      tokens_saved: 12_300,
+      latency_micros: 1234,
+    });
+    // Second push has lower numbers — MAX-merge must not regress them.
+    await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 4,
+      response_tokens: 150,
+      static_baseline_tokens: 0,
+      measured_baseline_tokens: 11_000,
+      tokens_saved: 10_850,
+      latency_micros: 1000,
+    });
+    const db = (env as { RECON_DB: D1Database }).RECON_DB;
+    const row = await db
+      .prepare(
+        `SELECT measured_baseline_tokens, calls
+         FROM usage_rollups WHERE user_id = ? AND day = ?`,
+      )
+      .bind("u_pro", TODAY)
+      .first<{ measured_baseline_tokens: number; calls: number }>();
+    expect(row!.measured_baseline_tokens).toBe(12_500); // higher of the two
+    expect(row!.calls).toBe(5);
+  });
+
+  it("Measured fields: rejects negative measured_baseline_tokens", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    const r = await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 1,
+      response_tokens: 1,
+      static_baseline_tokens: 1,
+      measured_baseline_tokens: -1,
+      tokens_saved: 0,
+      latency_micros: 1,
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("Dashboard: tokens_saved derived from (static + measured) and clamped at zero", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    await seedSession({ userId: "u_pro", token: "sess-measured" });
+    // Pathological: response_tokens > combined baselines. The derived
+    // tokens_saved must clamp to 0 instead of going negative.
+    await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 1,
+      response_tokens: 200,
+      static_baseline_tokens: 50,
+      measured_baseline_tokens: 50,
+      tokens_saved: 0,
+      latency_micros: 100,
+    });
+    const view = await fetchSavings("sess-measured");
+    expect(view.status).toBe(200);
+    const body = view.body as {
+      daily: Array<{
+        tokens_saved: number;
+        static_baseline_tokens: number;
+        measured_baseline_tokens: number;
+      }>;
+      totals: {
+        tokens_saved: number;
+        static_baseline_tokens: number;
+        measured_baseline_tokens: number;
+      };
+    };
+    expect(body.daily[0].tokens_saved).toBe(0);
+    expect(body.daily[0].static_baseline_tokens).toBe(50);
+    expect(body.daily[0].measured_baseline_tokens).toBe(50);
+    expect(body.totals.tokens_saved).toBe(0);
+  });
+
+  it("Dashboard: tokens_saved sums static + measured for migrated and composite tools", async () => {
+    await seedUserKey({ userId: "u_pro", key: "sk-recon-pro", tier: "Pro" });
+    await seedSession({ userId: "u_pro", token: "sess-mix" });
+    // Composite + migrated tool credits in the same day's rollup.
+    // Worker derives tokens_saved = (static + measured) - response.
+    await push("sk-recon-pro", {
+      day: TODAY,
+      calls: 6,
+      response_tokens: 500,
+      static_baseline_tokens: 10_000,
+      measured_baseline_tokens: 12_000,
+      tokens_saved: 21_500,
+      latency_micros: 5000,
+    });
+    const view = await fetchSavings("sess-mix");
+    expect(view.status).toBe(200);
+    const body = view.body as {
+      daily: Array<{ tokens_saved: number }>;
+      totals: { tokens_saved: number };
+    };
+    expect(body.daily[0].tokens_saved).toBe(21_500);
+    expect(body.totals.tokens_saved).toBe(21_500);
   });
 });

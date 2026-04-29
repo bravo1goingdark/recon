@@ -156,19 +156,29 @@ fn binary_spawn_initialize_call_tool_shutdown() {
     assert_eq!(resp["id"], 2);
     let tools = resp["result"]["tools"].as_array().expect("tools array");
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    for expected in ["code_outline", "code_find_symbol", "code_stats"] {
+    for expected in ["code_outline", "code_find_symbol", "code_list"] {
         assert!(
             names.contains(&expected),
             "tools/list must expose {expected}; got {names:?}"
         );
     }
+    // code_stats and code_savings are operator/CLI tools; v0.4 dropped
+    // their MCP `#[tool(...)]` registration so agents don't waste
+    // context introspecting their own diagnostics. They remain
+    // reachable via `recon stats` / `recon savings show`.
+    for hidden in ["code_stats", "code_savings"] {
+        assert!(
+            !names.contains(&hidden),
+            "tools/list must NOT expose {hidden}; got {names:?}"
+        );
+    }
 
-    // ── 4. tools/call → code_stats (cheapest tool, no disk read) ─────────
+    // ── 4. tools/call → code_list (cheapest agent-facing tool) ───────────
     let call = frame(
         3,
         "tools/call",
         serde_json::json!({
-            "name": "code_stats",
+            "name": "code_list",
             "arguments": {}
         }),
     );
@@ -183,10 +193,10 @@ fn binary_spawn_initialize_call_tool_shutdown() {
         "tools/call result.content must be array: {resp}"
     );
     let text = content[0]["text"].as_str().expect("content text");
-    let stats: serde_json::Value = serde_json::from_str(text).expect("code_stats body is JSON");
+    let entries: serde_json::Value = serde_json::from_str(text).expect("code_list body is JSON");
     assert!(
-        stats["files_indexed"].as_u64().unwrap_or(0) >= 1,
-        "code_stats should report at least 1 indexed file on the test project: {text}"
+        entries.as_array().is_some_and(|a| !a.is_empty()),
+        "code_list should return at least 1 indexed file on the test project: {text}"
     );
 
     // ── 5. Close stdin — simulates IDE exit ──────────────────────────────

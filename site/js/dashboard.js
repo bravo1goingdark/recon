@@ -189,54 +189,47 @@ function fmtCompact(n) {
 }
 
 /**
- * Render an inline SVG sparkline of the daily tokens-saved series.
- * No external chart library — a single <polyline> element scaled into
- * a 600×120 viewBox is all we need for a "is the trend going up?"
- * visual. Returns the SVG string ready to inject into innerHTML.
+ * Render an inline-SVG line chart of the daily tokens-saved series.
  *
- * Empty series renders an inert "no data yet" placeholder so the
+ * Aesthetic borrowed from `WebstormProjects/token`'s SpendChart (Chart.js):
+ * thin clay line, soft downward gradient, three-tier y-axis with mono
+ * tick labels, auto-skipped x-axis dates, and a hover guide + tooltip
+ * pinned to the nearest data point. We stay on inline SVG (no chart
+ * library) to keep the dashboard a single static HTML page.
+ *
+ * Empty series renders an inert "push to populate" placeholder so the
  * layout never collapses on a first-time-paid user.
  */
 function renderSparkline(daily) {
-  // 200-unit-tall canvas with breathing room around the trace.
-  // Bottom strip reserved for date axis labels (start / end).
-  var W = 600, H = 200, PAD_X = 12, PAD_TOP = 16, PAD_BOTTOM = 28;
+  var W = 720, H = 240;
+  var PAD_LEFT = 48, PAD_RIGHT = 12, PAD_TOP = 16, PAD_BOTTOM = 28;
+  var plotW = W - PAD_LEFT - PAD_RIGHT;
   var plotH = H - PAD_TOP - PAD_BOTTOM;
 
   if (!daily || daily.length === 0) {
     return (
-      '<svg viewBox="0 0 ' +
-      W +
-      " " +
-      H +
-      '" style="width:100%;height:200px;background:var(--paper-2);border:1px solid var(--rule-soft);border-radius:6px">' +
-      '<text x="50%" y="50%" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="var(--ink-3)">push from `recon savings push` to populate</text>' +
-      "</svg>"
+      '<div style="height:240px;display:flex;align-items:center;justify-content:center;' +
+        'border-top:1px solid var(--rule-soft);border-bottom:1px solid var(--rule-soft)">' +
+        '<span style="font-family:var(--mono);font-size:11px;color:var(--ink-3)">' +
+          'push from <code style="background:transparent;padding:0">recon savings push</code> to populate' +
+        '</span>' +
+      '</div>'
     );
   }
 
   var values = daily.map(function (d) { return d.tokens_saved; });
   var rawMax = Math.max.apply(null, values);
-  var rawMin = Math.min.apply(null, values);
-  // Use 0 as the floor so the user sees the absolute scale, not a
-  // misleading min-baseline that exaggerates a flat-but-nonzero series.
-  var min = 0;
   var max = rawMax === 0 ? 1 : rawMax;
-  var range = max - min;
-  var stepX = (W - 2 * PAD_X) / Math.max(1, values.length - 1);
+  var stepX = plotW / Math.max(1, values.length - 1);
+  var baselineY = PAD_TOP + plotH;
 
-  // Map data-space → screen-space.
   var pts = values.map(function (v, i) {
-    var x = PAD_X + i * stepX;
-    // Invert Y so high values render high.
-    var y = PAD_TOP + plotH - ((v - min) / range) * plotH;
-    return { x: x, y: y };
+    return {
+      x: PAD_LEFT + (values.length === 1 ? plotW / 2 : i * stepX),
+      y: PAD_TOP + plotH - (v / max) * plotH,
+    };
   });
 
-  // Smooth path via cardinal-spline-style midpoint Bezier control points.
-  // Uses the previous + next neighbours to pick smooth handles; keeps
-  // the curve faithful at endpoints (no overshoot) and cheap to compute.
-  // Falls back to a straight line for two-point series.
   function smoothPath(pts) {
     if (pts.length < 2) return "";
     if (pts.length === 2) {
@@ -249,7 +242,6 @@ function renderSparkline(daily) {
       var p1 = pts[i];
       var p2 = pts[i + 1];
       var p3 = pts[i + 2] || p2;
-      // Catmull-Rom → Bezier conversion at tension 0.5.
       var c1x = p1.x + (p2.x - p0.x) / 6;
       var c1y = p1.y + (p2.y - p0.y) / 6;
       var c2x = p2.x - (p3.x - p1.x) / 6;
@@ -262,98 +254,195 @@ function renderSparkline(daily) {
   }
 
   var linePath = smoothPath(pts);
-  // Closed area path under the line, anchored to the plot baseline so
-  // the gradient fills downward from the curve to the chart floor.
-  var baselineY = PAD_TOP + plotH;
   var areaPath = linePath +
     " L" + pts[pts.length - 1].x.toFixed(1) + "," + baselineY.toFixed(1) +
     " L" + pts[0].x.toFixed(1) + "," + baselineY.toFixed(1) + " Z";
 
-  // Three subtle gridlines at 25/50/75% of the plot height — gives
-  // scale without dominating the trace.
-  var gridLines = [0.25, 0.5, 0.75]
-    .map(function (frac) {
-      var y = PAD_TOP + plotH * (1 - frac);
-      return (
-        '<line x1="' + PAD_X + '" y1="' + y.toFixed(1) +
-        '" x2="' + (W - PAD_X) + '" y2="' + y.toFixed(1) +
-        '" stroke="var(--rule-soft)" stroke-width="1" stroke-dasharray="2 4"/>'
-      );
-    })
-    .join("");
+  // ── Y-axis: 3 ticks (0, max/2, max). Horizontal gridlines + mono
+  // tick labels in the left gutter. Skip the bottom rule (the area
+  // path's flat bottom + the x-axis labels already define the floor).
+  var yTicks = [0, max / 2, max];
+  var yAxis = yTicks.map(function (val) {
+    var y = PAD_TOP + plotH - (val / max) * plotH;
+    var grid = val === 0
+      ? ''
+      : '<line x1="' + PAD_LEFT + '" y1="' + y.toFixed(1) +
+        '" x2="' + (W - PAD_RIGHT) + '" y2="' + y.toFixed(1) +
+        '" stroke="var(--rule-soft)" stroke-width="1"/>';
+    var label =
+      '<text x="' + (PAD_LEFT - 8) + '" y="' + (y + 3).toFixed(1) +
+      '" text-anchor="end" font-family="var(--mono)" font-size="10" ' +
+      'fill="var(--ink-3)" letter-spacing="0.04em">' +
+      escapeHtml(fmtCompact(val)) + '</text>';
+    return grid + label;
+  }).join("");
 
-  // Find the high-water mark and label it with both a dot and the
-  // formatted value. If multiple days tie for max, pick the most recent
-  // (last in the series).
-  var maxIdx = -1;
-  for (var i = 0; i < values.length; i++) {
-    if (values[i] === rawMax && rawMax > 0) maxIdx = i;
+  // ── X-axis: aim for ~5 ticks. Pick evenly spaced indices into the
+  // series so dates spread out instead of crowding at the edges.
+  var targetTicks = Math.min(5, daily.length);
+  var xTickIdx = [];
+  if (targetTicks <= 1) {
+    xTickIdx = [0];
+  } else {
+    for (var t = 0; t < targetTicks; t++) {
+      xTickIdx.push(Math.round(t * (daily.length - 1) / (targetTicks - 1)));
+    }
   }
-  var maxMarker = "";
-  if (maxIdx >= 0) {
-    var mp = pts[maxIdx];
-    var labelX = mp.x;
-    var anchor = "middle";
-    // Keep the label inside the canvas at the edges.
-    if (mp.x < 50) { labelX = mp.x + 4; anchor = "start"; }
-    else if (mp.x > W - 50) { labelX = mp.x - 4; anchor = "end"; }
-    maxMarker =
-      '<circle cx="' + mp.x.toFixed(1) + '" cy="' + mp.y.toFixed(1) +
-      '" r="3.5" fill="var(--clay)" stroke="var(--paper-2)" stroke-width="1.5"/>' +
-      '<text x="' + labelX.toFixed(1) + '" y="' + (mp.y - 8).toFixed(1) +
+  // Format "YYYY-MM-DD" → relative time: "today", "1d", "3d", "14d".
+  // Data is daily UTC, so we compute distance in whole UTC days from
+  // the current UTC midnight. The hover tooltip still shows the
+  // absolute ISO date (precise on hover, at-a-glance on the axis).
+  function relativeDay(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+    if (!m) return String(iso);
+    var rowUtcMs = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+    var now = new Date();
+    var todayUtcMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    var diffDays = Math.round((todayUtcMs - rowUtcMs) / 86400000);
+    if (diffDays <= 0) return "today";
+    if (diffDays === 1) return "1d";
+    return diffDays + "d";
+  }
+  var xAxis = xTickIdx.map(function (idx, j) {
+    var x = pts[idx].x;
+    var anchor = j === 0 ? "start"
+      : j === xTickIdx.length - 1 ? "end"
+      : "middle";
+    return (
+      '<text x="' + x.toFixed(1) + '" y="' + (H - 8).toFixed(1) +
       '" text-anchor="' + anchor +
-      '" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">' +
-      escapeHtml(fmtCompact(rawMax)) + ' peak</text>';
-  }
+      '" font-family="var(--mono)" font-size="10" ' +
+      'fill="var(--ink-3)" letter-spacing="0.04em">' +
+      escapeHtml(relativeDay(daily[idx].day)) + '</text>'
+    );
+  }).join("");
 
-  // Per-point dots — small, low-contrast, give the eye a sense of the
-  // sample count without competing with the curve.
-  var dots = pts
-    .map(function (p) {
-      return (
-        '<circle cx="' + p.x.toFixed(1) +
-        '" cy="' + p.y.toFixed(1) +
-        '" r="1.8" fill="var(--paper-2)" stroke="var(--clay)" stroke-width="1"/>'
-      );
-    })
-    .join("");
+  // ── Hover layer: one invisible rect per data point covering its
+  // vertical band. Mouseover/out shows/moves a vertical guide,
+  // a circle marker, and a tooltip group above the point. Wired up
+  // post-render in `wireSparklineHover` (called by renderSavings).
+  var bands = pts.map(function (p, i) {
+    var bandX = i === 0 ? PAD_LEFT : (pts[i - 1].x + p.x) / 2;
+    var bandRight = i === pts.length - 1
+      ? (W - PAD_RIGHT)
+      : (p.x + pts[i + 1].x) / 2;
+    return (
+      '<rect class="spark-band" data-idx="' + i + '" ' +
+      'data-x="' + p.x.toFixed(1) + '" data-y="' + p.y.toFixed(1) + '" ' +
+      'data-day="' + escapeHtml(daily[i].day) + '" ' +
+      'data-saved="' + escapeHtml(fmtInt(values[i])) + '" ' +
+      'x="' + bandX.toFixed(1) + '" y="' + PAD_TOP + '" ' +
+      'width="' + Math.max(1, bandRight - bandX).toFixed(1) + '" ' +
+      'height="' + plotH + '" ' +
+      'fill="transparent" pointer-events="all"/>'
+    );
+  }).join("");
 
-  // Date axis: just the start and end day strings, in the muted mono
-  // type. Anything more (every-tick) gets noisy below ~7 points and
-  // collides above ~30. Two anchors are enough for orientation.
-  var startDay = daily[0].day;
-  var endDay = daily[daily.length - 1].day;
-  var axis =
-    '<text x="' + PAD_X + '" y="' + (H - 8).toFixed(1) +
-    '" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">' +
-    escapeHtml(startDay) + '</text>' +
-    '<text x="' + (W - PAD_X) + '" y="' + (H - 8).toFixed(1) +
-    '" text-anchor="end" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">' +
-    escapeHtml(endDay) + '</text>';
-
-  // Unique gradient id per render so multiple charts on the same page
-  // don't collide. (Not currently the case, but cheap insurance.)
   var gradId = "savings-grad-" + Math.random().toString(36).slice(2, 9);
 
   return (
-    '<svg viewBox="0 0 ' + W + ' ' + H +
-    '" style="width:100%;height:200px;background:var(--paper-2);' +
-    'border:1px solid var(--rule-soft);border-radius:6px;overflow:visible">' +
+    '<svg class="spark-svg" data-pad-top="' + PAD_TOP + '" data-baseline="' + baselineY +
+    '" viewBox="0 0 ' + W + ' ' + H +
+    '" preserveAspectRatio="none" ' +
+    'style="width:100%;height:240px;display:block;overflow:visible">' +
       '<defs>' +
         '<linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1">' +
-          '<stop offset="0%" stop-color="var(--clay)" stop-opacity="0.32"/>' +
+          '<stop offset="0%" stop-color="var(--clay)" stop-opacity="0.18"/>' +
           '<stop offset="100%" stop-color="var(--clay)" stop-opacity="0"/>' +
         '</linearGradient>' +
       '</defs>' +
-      gridLines +
+      yAxis +
       '<path d="' + areaPath + '" fill="url(#' + gradId + ')" stroke="none"/>' +
       '<path d="' + linePath + '" fill="none" stroke="var(--clay)" ' +
-        'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
-      dots +
-      maxMarker +
-      axis +
+        'stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>' +
+      xAxis +
+      // Hover overlay — initially hidden, populated on mouse move.
+      '<g class="spark-hover" style="visibility:hidden;pointer-events:none">' +
+        '<line class="spark-guide" x1="0" x2="0" y1="' + PAD_TOP + '" y2="' + baselineY +
+          '" stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="2 3" opacity="0.6"/>' +
+        '<circle class="spark-dot" r="3.5" fill="var(--clay)" stroke="var(--paper)" stroke-width="1.5"/>' +
+        '<g class="spark-tip">' +
+          '<rect class="spark-tip-bg" rx="3" ry="3" fill="var(--paper)" stroke="var(--rule)" stroke-width="1"/>' +
+          '<text class="spark-tip-day" font-family="var(--mono)" font-size="10" fill="var(--ink-3)" letter-spacing="0.04em"></text>' +
+          '<text class="spark-tip-val" font-family="var(--mono)" font-size="11" fill="var(--ink)" letter-spacing="0.02em"></text>' +
+        '</g>' +
+      '</g>' +
+      bands +
     "</svg>"
   );
+}
+
+/**
+ * Wire the hover interactions for the sparkline. Called after
+ * `renderSavings` injects the SVG into the DOM. Idempotent — re-running
+ * after a re-render rebinds against the fresh nodes.
+ *
+ * Implementation note: SVG `<text>` doesn't auto-size its background,
+ * so we measure the rendered text via getBBox() and resize the
+ * tooltip rect to fit. Tooltip flips to the right of the cursor when
+ * it would otherwise overflow the left edge.
+ */
+function wireSparklineHover() {
+  var svgs = document.querySelectorAll("svg.spark-svg");
+  svgs.forEach(function (svg) {
+    var hover = svg.querySelector(".spark-hover");
+    var guide = svg.querySelector(".spark-guide");
+    var dot = svg.querySelector(".spark-dot");
+    var tipG = svg.querySelector(".spark-tip");
+    var tipBg = svg.querySelector(".spark-tip-bg");
+    var tipDay = svg.querySelector(".spark-tip-day");
+    var tipVal = svg.querySelector(".spark-tip-val");
+    var padTop = parseFloat(svg.getAttribute("data-pad-top") || "16");
+
+    function showAt(rect) {
+      var x = parseFloat(rect.getAttribute("data-x"));
+      var y = parseFloat(rect.getAttribute("data-y"));
+      var day = rect.getAttribute("data-day");
+      var saved = rect.getAttribute("data-saved");
+
+      guide.setAttribute("x1", x);
+      guide.setAttribute("x2", x);
+      dot.setAttribute("cx", x);
+      dot.setAttribute("cy", y);
+      tipDay.textContent = day;
+      tipVal.textContent = saved + " saved";
+
+      // Position the tooltip group above the point, then size its bg
+      // to fit the rendered text. flipRight keeps the tip inside the
+      // viewBox when the cursor is on the left edge.
+      var TIP_PAD_X = 8, TIP_PAD_Y = 6;
+      var dayBox = tipDay.getBBox();
+      var valBox = tipVal.getBBox();
+      var w = Math.max(dayBox.width, valBox.width) + TIP_PAD_X * 2;
+      var h = dayBox.height + valBox.height + TIP_PAD_Y * 2 + 2;
+
+      var tipX = x - w / 2;
+      var viewW = svg.viewBox.baseVal.width;
+      if (tipX < 4) tipX = x + 12;
+      else if (tipX + w > viewW - 4) tipX = x - w - 12;
+
+      var tipY = Math.max(padTop + 2, y - h - 12);
+      tipBg.setAttribute("x", tipX);
+      tipBg.setAttribute("y", tipY);
+      tipBg.setAttribute("width", w);
+      tipBg.setAttribute("height", h);
+      tipDay.setAttribute("x", tipX + TIP_PAD_X);
+      tipDay.setAttribute("y", tipY + TIP_PAD_Y + dayBox.height - 2);
+      tipVal.setAttribute("x", tipX + TIP_PAD_X);
+      tipVal.setAttribute("y", tipY + TIP_PAD_Y + dayBox.height + valBox.height + 0);
+
+      hover.style.visibility = "visible";
+    }
+
+    var bands = svg.querySelectorAll("rect.spark-band");
+    bands.forEach(function (r) {
+      r.addEventListener("mouseenter", function () { showAt(r); });
+      r.addEventListener("mousemove", function () { showAt(r); });
+    });
+    svg.addEventListener("mouseleave", function () {
+      hover.style.visibility = "hidden";
+    });
+  });
 }
 
 /**
@@ -393,7 +482,7 @@ function renderSavings(data) {
     box.innerHTML =
       '<div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:14px">' +
       '<div style="font-size:38px;font-family:var(--serif);letter-spacing:-.02em">0 tokens</div>' +
-      '<div style="color:var(--ink-3);font-size:13px">estimated saved · last ' +
+      '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
       escapeHtml(String(range)) +
       " days</div></div>" +
       renderSparkline([]) +
@@ -401,11 +490,13 @@ function renderSavings(data) {
     return;
   }
 
-  // Paid + data: headline + chart + table.
+  // Paid + data: headline + chart + table. Per-row baseline is the sum
+  // of the static and measured columns (each call accrues exactly one).
   var rows = daily
     .slice()
     .reverse() // newest first in the table; chart stays time-ordered
     .map(function (d) {
+      var rowBaseline = (d.static_baseline_tokens || 0) + (d.measured_baseline_tokens || 0);
       return (
         "<tr>" +
         '<td style="font-family:var(--mono);font-size:12px;color:var(--ink-2)">' +
@@ -418,7 +509,7 @@ function renderSavings(data) {
         fmtInt(d.response_tokens) +
         "</td>" +
         '<td style="text-align:right">' +
-        fmtInt(d.baseline_tokens) +
+        fmtInt(rowBaseline) +
         "</td>" +
         '<td style="text-align:right;color:var(--clay);font-weight:500">' +
         fmtInt(d.tokens_saved) +
@@ -433,12 +524,19 @@ function renderSavings(data) {
     '<div style="font-size:44px;font-family:var(--serif);letter-spacing:-.02em">' +
     fmtCompact(saved) +
     " tokens</div>" +
-    '<div style="color:var(--ink-3);font-size:13px">estimated saved · last ' +
+    '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
     escapeHtml(String(range)) +
     " days · " +
     fmtInt(calls) +
     " tool calls</div></div>" +
-    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">Estimate, not a measurement.</div>' +
+    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px;line-height:1.55">' +
+    "Measured per-call against the in-process Read/grep equivalent for the 8 direct " +
+    "file/grep tools (<code>code_outline</code>, <code>code_skeleton</code>, " +
+    "<code>code_read_symbol</code>, <code>code_search</code>, <code>code_find_strings</code>, " +
+    "<code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>). " +
+    "Graph/ranking tools (<code>code_repo_map</code>, <code>code_path</code>, " +
+    "<code>code_impact</code>, <code>code_subsystem</code>, …) use conservative static estimates." +
+    '</div>' +
     renderSparkline(daily) +
     '<table style="margin-top:18px;width:100%;border-collapse:collapse;font-size:13px">' +
     '<thead><tr style="border-bottom:1px solid var(--rule);text-align:left">' +
@@ -446,25 +544,35 @@ function renderSavings(data) {
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Calls</th>' +
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Response tokens</th>' +
     '<th style="padding:8px 4px;font-weight:500;text-align:right">Baseline</th>' +
-    '<th style="padding:8px 4px;font-weight:500;text-align:right">Est. saved</th>' +
+    '<th style="padding:8px 4px;font-weight:500;text-align:right">Saved</th>' +
     "</tr></thead><tbody>" +
     rows +
     "</tbody></table>";
+
+  // Wire the hover layer against the freshly-injected SVG.
+  wireSparklineHover();
 }
 
 function renderProfile(user) {
   var el = document.getElementById("profile");
-  if (!el) return;
-  el.innerHTML =
-    '<div style="display:flex;align-items:center;gap:14px">' +
-    (user.avatar_url
-      ? '<img src="' + escapeHtml(user.avatar_url) + '" width="40" height="40" style="border-radius:50%;border:2px solid var(--rule)">'
-      : "") +
-    "<div><h1 style=\"font-size:clamp(28px,4vw,40px);letter-spacing:-.03em\">" +
-    escapeHtml(user.github_username) +
-    '</h1></div><span class="tier-badge" style="margin-left:auto">' +
-    escapeHtml(user.tier) +
-    "</span></div>";
+  if (el) {
+    el.innerHTML =
+      '<div style="display:flex;align-items:center;gap:14px">' +
+      (user.avatar_url
+        ? '<img src="' + escapeHtml(user.avatar_url) + '" width="40" height="40" style="border-radius:50%;border:2px solid var(--rule)">'
+        : "") +
+      "<div><h1 style=\"font-family:var(--serif);font-weight:400;font-size:clamp(28px,4vw,40px);letter-spacing:-.03em\">" +
+      escapeHtml(user.github_username) +
+      '</h1></div><span class="tier-badge" style="margin-left:auto">' +
+      escapeHtml(user.tier) +
+      "</span></div>";
+  }
+  // Mirror plan + email into the sidebar footer/header so the user sees
+  // their identity without relying on the main header alone.
+  var tierEl = document.getElementById("ds-tier");
+  if (tierEl) tierEl.textContent = (user.tier || "recon").toString();
+  var emailEl = document.getElementById("ds-email");
+  if (emailEl) emailEl.textContent = user.email || user.github_username || "";
 }
 
 // localStorage key for the dismiss-quickstart flag. Once set, the
@@ -998,13 +1106,12 @@ async function deleteAccount() {
 }
 
 // ─── Tabs ────────────────────────────────────────────────────────────────
-// Three round-icon tabs at the top of the dashboard (Keys / Billing /
-// Danger). One-panel-visible-at-a-time so the dashboard fits one screen
-// instead of the old long vertical stack. Uses native `hidden` attribute
-// on the panels; the active button gets a clay border + `.active` class.
+// Sidebar nav items select the visible panel; one panel renders at a time
+// (others get the native `hidden` attribute). Active button gets the
+// clay-dot indicator via `.active`.
 
 function activateTab(name) {
-  document.querySelectorAll(".tab-icon").forEach(function (btn) {
+  document.querySelectorAll(".ds-nav-item").forEach(function (btn) {
     var isActive = btn.getAttribute("data-tab") === name;
     btn.classList.toggle("active", isActive);
     btn.setAttribute("aria-selected", isActive ? "true" : "false");
@@ -1015,7 +1122,7 @@ function activateTab(name) {
 }
 
 function wireTabs() {
-  document.querySelectorAll(".tab-icon").forEach(function (btn) {
+  document.querySelectorAll(".ds-nav-item").forEach(function (btn) {
     btn.addEventListener("click", function () {
       var name = btn.getAttribute("data-tab");
       if (!name) return;
@@ -1032,8 +1139,32 @@ function wireTabs() {
   });
 }
 
+// ─── Sidebar collapse ───────────────────────────────────────────────────
+// Persist preference in localStorage so a returning user keeps their
+// chosen layout. The expand button is a floating affordance shown only
+// when the sidebar is closed.
+var SIDEBAR_KEY = "recon.dashboard.sidebar.collapsed";
+function setSidebarCollapsed(collapsed) {
+  var shell = document.getElementById("dashShell");
+  var expand = document.getElementById("dsExpand");
+  if (!shell) return;
+  shell.classList.toggle("collapsed", !!collapsed);
+  if (expand) expand.hidden = !collapsed;
+  try { localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0"); } catch (_) {}
+}
+function wireSidebar() {
+  var initial = false;
+  try { initial = localStorage.getItem(SIDEBAR_KEY) === "1"; } catch (_) {}
+  setSidebarCollapsed(initial);
+  var c = document.getElementById("dsCollapse");
+  if (c) c.addEventListener("click", function () { setSidebarCollapsed(true); });
+  var e = document.getElementById("dsExpand");
+  if (e) e.addEventListener("click", function () { setSidebarCollapsed(false); });
+}
+
 function wireControls() {
   wireTabs();
+  wireSidebar();
 
   // API key buttons. Generate is visible when the user has zero active
   // keys; Rotate replaces it when a key exists. toggleKeyButtons (called
