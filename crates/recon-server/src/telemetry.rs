@@ -39,6 +39,7 @@
 //! away from what users actually pay. We report tokens-saved and let
 //! callers convert against whatever rate sheet they price against.
 
+use ahash::AHashMap;
 use parking_lot::Mutex;
 use recon_storage::store::Store;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -323,13 +324,15 @@ impl CounterSnapshot {
 
 /// Server-wide telemetry. Held in an `Arc<Telemetry>` on `ReconServer`.
 ///
-/// `tools` is a sorted list parallel to [`BASELINES`] so per-tool lookup is
-/// `O(log n)` via binary search on `&'static str`. Adding a tool requires
-/// only an entry in [`BASELINES`]; the constructor builds counters in lock-
-/// step.
+/// `tools` is an `AHashMap` keyed by tool name so per-tool lookup is `O(1)`
+/// on the hot path (`record`). Adding a tool requires only an entry in
+/// [`BASELINES`]; the constructor builds counters in lock-step.
 pub struct Telemetry {
-    /// Per-tool counters, indexed parallel to [`BASELINES`].
-    pub tools: Vec<(&'static str, ToolCounter)>,
+    /// Per-tool counters keyed by tool name. Entries are inserted exactly
+    /// once during construction from [`BASELINES`] and never mutated again
+    /// — only the contained atomics on each `ToolCounter` are updated, so
+    /// concurrent reads are safe without an outer lock.
+    pub tools: AHashMap<&'static str, ToolCounter>,
     /// Unix seconds when this telemetry instance was created (server start).
     pub session_started_at: u64,
     /// Calls accumulated since the last persistence flush. When this
@@ -350,10 +353,10 @@ impl Default for Telemetry {
 impl Telemetry {
     /// Construct a fresh telemetry instance with zeroed counters.
     pub fn new() -> Self {
-        let tools = BASELINES
-            .iter()
-            .map(|b| (b.tool, ToolCounter::default()))
-            .collect();
+        let mut tools = AHashMap::with_capacity(BASELINES.len());
+        for b in BASELINES {
+            tools.insert(b.tool, ToolCounter::default());
+        }
         Self {
             tools,
             session_started_at: now_unix_secs(),
@@ -389,7 +392,7 @@ impl Telemetry {
         response_tokens: u64,
         measured_baseline: Option<u64>,
     ) -> bool {
-        if let Some((_, c)) = self.tools.iter().find(|(name, _)| *name == tool) {
+        if let Some(c) = self.tools.get(tool) {
             c.calls.fetch_add(1, Ordering::Relaxed);
             c.response_tokens
                 .fetch_add(response_tokens, Ordering::Relaxed);
@@ -416,7 +419,7 @@ impl Telemetry {
     /// Aggregated counter across every tool — the "lifetime totals" surface.
     pub fn aggregate(&self) -> CounterSnapshot {
         let mut agg = CounterSnapshot::default();
-        for (_, c) in &self.tools {
+        for c in self.tools.values() {
             let s = c.snapshot();
             agg.calls += s.calls;
             agg.response_tokens += s.response_tokens;
@@ -427,11 +430,13 @@ impl Telemetry {
         agg
     }
 
-    /// Per-tool snapshot for the `code_savings` breakdown.
+    /// Per-tool snapshot for the `code_savings` breakdown. Order is the
+    /// declaration order from [`BASELINES`] so consumers see a stable
+    /// listing (the underlying `AHashMap` is unordered).
     pub fn per_tool_snapshots(&self) -> Vec<(&'static str, CounterSnapshot)> {
-        self.tools
+        BASELINES
             .iter()
-            .map(|(name, c)| (*name, c.snapshot()))
+            .filter_map(|b| self.tools.get(b.tool).map(|c| (b.tool, c.snapshot())))
             .collect()
     }
 
@@ -440,7 +445,7 @@ impl Telemetry {
     /// persisted blob just means the user's lifetime counters reset; the
     /// session counters keep working.
     pub fn hydrate_from_store(self: &Arc<Self>, store: &Store) {
-        for (name, counter) in &self.tools {
+        for (name, counter) in self.tools.iter() {
             let key = format!("tel:tool:{name}");
             let raw = match store.get_meta(&key) {
                 Ok(Some(s)) => s,
@@ -467,7 +472,7 @@ impl Telemetry {
     pub fn flush_to_store(&self, store: &Store) {
         let _g = self.flush_guard.lock();
         let mut errors = 0;
-        for (name, counter) in &self.tools {
+        for (name, counter) in self.tools.iter() {
             let snapshot = counter.snapshot();
             // Skip writing when nothing has happened — keeps `meta`
             // pristine for tools that have never been used.
@@ -620,28 +625,11 @@ mod tests {
         let t = Arc::new(Telemetry::new());
         t.record("code_outline", Duration::from_millis(1), 100, Some(2400));
         t.record("code_outline", Duration::from_millis(2), 200, Some(2800));
-        let snap_before = t
-            .tools
-            .iter()
-            .find(|(n, _)| *n == "code_outline")
-            .unwrap()
-            .1
-            .snapshot();
+        let snap_before = t.tools.get("code_outline").unwrap().snapshot();
 
         let t2 = Arc::new(Telemetry::new());
-        t2.tools
-            .iter()
-            .find(|(n, _)| *n == "code_outline")
-            .unwrap()
-            .1
-            .hydrate(&snap_before);
-        let snap_after = t2
-            .tools
-            .iter()
-            .find(|(n, _)| *n == "code_outline")
-            .unwrap()
-            .1
-            .snapshot();
+        t2.tools.get("code_outline").unwrap().hydrate(&snap_before);
+        let snap_after = t2.tools.get("code_outline").unwrap().snapshot();
         assert_eq!(snap_after.calls, 2);
         assert_eq!(snap_after.response_tokens, 300);
         assert_eq!(snap_after.static_baseline_tokens, 0);
