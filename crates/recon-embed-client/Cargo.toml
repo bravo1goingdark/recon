@@ -7,6 +7,9 @@ license.workspace = true
 description = "Hosted-embedding HTTP client for recon (POST /v1/embed). Pure ureq+rustls, no native deps."
 
 [dependencies]
+# Shared trait + Error type lives in recon-core.
+recon-core = { workspace = true }
+
 # Pure-Rust HTTP + TLS — explicitly avoiding native-tls / openssl-sys
 # so this crate cross-compiles cleanly to aarch64-unknown-linux-gnu
 # and other targets where openssl sysroot is painful.
@@ -15,9 +18,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-
-# Reused for credential discovery (~/.config/recon/credentials.json).
-recon-server = { workspace = true }
+# Lookup of the global config dir (~/.config/recon/credentials.json)
+# without taking on `recon-server` as a dep — that would create a
+# cycle since `recon-server` depends on this crate for the hosted
+# embed path.
+dirs = { workspace = true }
 
 [dev-dependencies]
 # Mock HTTP server for the integration tests.
