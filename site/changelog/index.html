@@ -83,8 +83,8 @@
       <h2>v0.5.0</h2>
       <span class="when">2026-04-30</span>
     </header>
-    <span class="tag">Multi-repo MCP + canonical Hits envelope + audit-driven fixes</span>
-    <p>Three audit-driven changes plus the long-promised multi-repo surface. Wire-format hard-cut at this release: bundled CLI version-locks against the server, so there is no in-the-wild consumer mismatch.</p>
+    <span class="tag">Multi-repo MCP + canonical Hits envelope + session receipt + latency savings</span>
+    <p>Multi-repo MCP, the canonical <code>Hits</code> envelope, a session-end savings receipt to stderr, latency savings alongside token savings on the dashboard, plus seven hot-path / hygiene fixes from a 4-axis promise audit. Wire-format hard-cut at this release: bundled CLI version-locks against the server, so there is no in-the-wild consumer mismatch.</p>
 
     <p><b>Multi-repo MCP service.</b> The <code>RepoRouter</code> infrastructure that has been quietly enforcing tier limits in the CLI is now exposed to agents as two new MCP tools, with session persistence so agents do not re-activate after every restart.</p>
     <ul>
@@ -103,14 +103,44 @@
       <li><b><code>recon reindex</code> renders correctly.</b> The CLI's <code>print_output</code> dispatcher now matches the reindex arm before the bare-<code>files_indexed</code> stats arm, so reindex output renders as <code>ok N files, M symbols, X errors</code> instead of an <code>Index Health</code> block with <code>repo ?</code> / <code>tantivy 0</code>.</li>
     </ul>
 
-    <p><b>Hygiene + perf cleanup.</b></p>
+    <p><b>Session-end savings receipt to stderr</b> (closes #19). At the end of every <code>recon serve</code> session — IDE close, signal, or license revocation — recon prints a one-block summary to stderr. The IDE's MCP debug log captures stderr, so the headline reaches Claude Code / Cursor / Windsurf / OpenCode users without having to remember <code>recon savings show</code> or open the dashboard:</p>
+    <pre><code>recon · session ended
+  18 tool calls · saved 47,200 tokens · ~9.4s faster than Read+Grep loop
+  top: code_outline (12,400 tok, 1.6s)  code_search (9,800, 0.8s)  code_read_symbol (8,100, 0.6s)
+  dashboard: https://mcprecon.pages.dev/dashboard</code></pre>
+    <p>Suppressed when the session had zero tool calls (no "0 tokens saved" noise on a fresh <code>recon serve</code> nobody connected to). Honour <code>RECON_QUIET=1</code>/<code>true</code>/<code>yes</code>/<code>on</code> for CI / scripted runs. Failures are silent skips, never a blocker on shutdown.</p>
+
+    <p><b>Latency savings alongside token savings</b> (closes #20). Tokens are one number; users <i>feel</i> time more than tokens. <code>Baseline</code> now carries a per-tool <code>baseline_latency_ms</code> alongside <code>baseline_tokens</code> — a conservative estimate of the wall-time the Read+Grep alternative loop would have taken (e.g. <code>code_outline</code> 200 ms, <code>code_list</code> 2 s, <code>code_repo_map</code> 5 s). The session receipt and the dashboard headline both surface this:</p>
+    <pre><code>312,400 tokens saved · ~6m 12s faster than Read+Grep loop</code></pre>
     <ul>
-      <li><b>Path-component blocklist.</b> <code>is_blocked_path</code> now scans every component, not just the leaf. Paths like <code>vault/secret.pem/leaf.json</code> are blocked even when the leaf has a benign extension.</li>
-      <li><b>Tantivy schema-bump regression test.</b> First test that exercises the wipe-and-rebuild on <code>TANTIVY_SCHEMA_VERSION</code> mismatch — locks in recovery so a future bump cannot silently break opening.</li>
-      <li><b><code>code_skeleton</code> fallback allocation.</b> Replaced <code>content.lines().take(50).collect::&lt;Vec&lt;_&gt;&gt;().join("\n")</code> with a single-pass <code>push_str</code> loop into a pre-sized <code>String</code>. Saves the intermediate <code>Vec&lt;&amp;str&gt;</code> + <code>join</code> per fallback call.</li>
+      <li>D1 migration <code>0012_usage_rollups_latency_saved.sql</code> adds <code>latency_saved_micros INTEGER NOT NULL DEFAULT 0</code> to the <code>usage_rollups</code> table. Pre-v0.5 CLIs talking to a v0.5 worker default to 0 (the column DEFAULT catches the absent push); a fresh v0.5 push monotone-MAX-merges the row up to the real number.</li>
+      <li>Worker validates and round-trips the new field; <code>GET /v1/dashboard/savings</code> totals the column.</li>
+      <li>Dashboard JS renders a clay-coloured "<code>~6m 12s faster</code>" line next to the existing token tile, hidden when the value is 0 so pre-v0.5 rollups don't render misleading "<code>0s faster</code>".</li>
+      <li><code>recon savings show</code> TSV gains a <code>time_saved_ms</code> column (per-tool + total row).</li>
     </ul>
 
-    <p>Out of scope for this release (documented as the natural follow-up): an optional <code>repo: Option&lt;String&gt;</code> parameter on every stateful tool to override the active dispatch on a per-call basis. The current shape covers ≥99 % of agent flows (activate-then-query); the per-call override is niche convenience for cross-repo queries within a single conversation.</p>
+    <p><b>Default <code>RECON_AUTO_PUSH_SAVINGS</code> to on</b> (closes #15). Most paid users never set the env var, so the dashboard's Savings tab showed the upsell or empty state for them forever — despite live telemetry already sitting in <code>.recon/index.db</code>. Flip the default: unset (or any truthy value) is on; explicit <code>0</code> / <code>false</code> / <code>no</code> / <code>off</code> opts out. The push has always been privacy-clean (aggregated counters keyed by tool name plus the licensed user's API key — no source, no paths, no logs); defaulting to on doesn't change <i>what</i> is sent, only whether.</p>
+
+    <p><b>Hybrid telemetry flush — count OR timer</b> (closes #13). Pure count-based flushing left bursty agentic flows fine but stranded idle sessions: an IDE window with 3 calls/hr never persisted any telemetry, so <code>recon savings show</code> reported "no counters" after a real session. Lower <code>FLUSH_THRESHOLD</code> from 50 → 10 so even moderately active sessions persist quickly; add <code>FLUSH_INTERVAL_SECS = 60</code> with a periodic flush task that covers the long tail. Override via <code>RECON_TELEMETRY_FLUSH_SECS</code> (clamped to <code>[10, 3600]</code>; <code>0</code> disables the timer entirely).</p>
+
+    <p><b>Hot-path performance</b> — three caches and one O(1) lookup along the dispatcher and search paths:</p>
+    <ul>
+      <li><b>Telemetry hash lookup</b> (closes #16). <code>Telemetry::record</code> ran a linear scan over the 18-entry tools vec on every MCP tool call — ~900 string compares for a 50-call burst, for no algorithmic reason. Swap <code>Vec&lt;(&amp;'static str, ToolCounter)&gt;</code> for <code>AHashMap&lt;&amp;'static str, ToolCounter&gt;</code>: O(1) hash lookup, deterministic ordering preserved via <code>BASELINES</code> iteration in <code>per_tool_snapshots</code>.</li>
+      <li><b>Per-file newline index cache</b> (closes #18). <code>code_multi_find</code> rebuilt the line-number index for every file in scope on every call — a 320K-symbol Rust repo with 2K files in scope re-scanned ~20 MB of bytes per call just to resolve hit lines. New <code>line_index_cache: DashMap&lt;PathBuf, Arc&lt;Vec&lt;usize&gt;&gt;&gt;</code> sits next to the existing mmap cache; both invalidate together in <code>refresh()</code>.</li>
+      <li><b>Token-count cache by (path, mtime)</b> (closes #17). Each measured-baseline call re-opened and re-read the same file an agent was actively exploring — three full reads of identical bytes for the typical <code>code_outline → code_read_symbol → code_context</code> sequence. New <code>DashMap&lt;PathBuf, (mtime_secs, tokens)&gt;</code> on <code>ReconServer</code>, sized at 2,048 entries (matching <code>FffBackend</code>'s mmap cache). Self-invalidating: every lookup compares the current file mtime against the stored one; mismatch overwrites the slot.</li>
+    </ul>
+
+    <p><b>Hygiene + audit-driven fixes</b> (rolled up):</p>
+    <ul>
+      <li><b>Tantivy writer error visible.</b> Six call sites swallowed the underlying <code>tantivy</code> writer error via <code>.ok()</code> and logged a context-free warning. The most common cause is a stale <code>.tantivy-writer.lock</code> from a previously killed process; the new warning names that explicitly. Affected paths: <code>ReconServer::new</code>, <code>RepoRouter::load_repo</code>, <code>indexer::index_repo</code> / <code>::index_diff</code>, <code>recon init</code>, <code>recon index</code>.</li>
+      <li><b>Telemetry counters survive upgrades.</b> <code>CounterSnapshot::static_baseline_tokens</code> and <code>::measured_baseline_tokens</code> are now <code>#[serde(default)]</code>. Older on-disk snapshots hydrate as zero instead of failing deserialisation and silently wiping the lifetime "tokens saved" history on every upgrade.</li>
+      <li><b><code>recon reindex</code> renders correctly.</b> The CLI's <code>print_output</code> dispatcher now matches the reindex arm before the bare-<code>files_indexed</code> stats arm, so reindex output renders as <code>ok N files, M symbols, X errors</code> instead of an <code>Index Health</code> block with <code>repo ?</code> / <code>tantivy 0</code>.</li>
+      <li><b>Path-component blocklist.</b> <code>is_blocked_path</code> now scans every component, not just the leaf. Paths like <code>vault/secret.pem/leaf.json</code> are blocked even when the leaf has a benign extension.</li>
+      <li><b>Tantivy schema-bump regression test.</b> First test that exercises the wipe-and-rebuild on <code>TANTIVY_SCHEMA_VERSION</code> mismatch — locks in recovery so a future bump cannot silently break opening.</li>
+      <li><b><code>code_skeleton</code> fallback allocation.</b> Replaced the <code>collect::&lt;Vec&lt;_&gt;&gt;().join("\n")</code> with a single-pass <code>push_str</code> loop into a pre-sized <code>String</code>.</li>
+    </ul>
+
+    <p>Out of scope for this release (documented as the natural follow-up): an optional <code>repo: Option&lt;String&gt;</code> parameter on every stateful tool to override the active dispatch on a per-call basis. The current shape covers ≥99 % of agent flows (activate-then-query); the per-call override is niche convenience for cross-repo queries within a single conversation. The dashboard dollar conversion (#21, v0.5.0 milestone) ships in a follow-up — token-savings stays the headline; the picker UX is worth its own polish pass.</p>
   </article>
 
   <article class="release" id="v0-4-1">
