@@ -438,9 +438,7 @@ function renderSavings(data) {
     " days · " +
     fmtInt(calls) +
     " tool calls</div></div>" +
-    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">Estimate, not a measurement: per-tool baseline ' +
-    "constants (what Read+Grep+Glob would have cost) minus what recon emitted. " +
-    "See the note below for the full method.</div>" +
+    '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px">Estimate, not a measurement.</div>' +
     renderSparkline(daily) +
     '<table style="margin-top:18px;width:100%;border-collapse:collapse;font-size:13px">' +
     '<thead><tr style="border-bottom:1px solid var(--rule);text-align:left">' +
