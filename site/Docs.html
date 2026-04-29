@@ -759,6 +759,7 @@ allow_sensitive = <span class="h">false</span></pre>
       <tbody>
         <tr><td><code>RECON_AUTO_PUSH_SAVINGS</code></td><td>Set to <code>1</code> to auto-push the local token-savings rollup to the dashboard when each <code>recon serve</code> session ends. Pro/Team only. <span class="badge">v0.3.2+</span></td></tr>
         <tr><td><code>RECON_LOG_FORMAT</code></td><td>Set to <code>json</code> to emit structured logs on stderr (one JSON object per event). Default is human-readable text. Useful when piping into a log aggregator.</td></tr>
+        <tr><td><code>RECON_NO_EMBED</code></td><td>Set to <code>1</code> (or <code>true</code>/<code>yes</code>/<code>on</code>) to disable the embed service entirely. Semantic search (<code>code_search mode=semantic</code>) is skipped and falls back to lexical-only; everything else is unaffected. Use when you don't want any chunk text to leave your machine and don't need a local-only rebuild via <code>--features local-embed</code>. <span class="badge">v0.4.2+</span></td></tr>
       </tbody>
     </table>
 
@@ -849,11 +850,18 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <h2 id="security"><span class="no">13</span>Security</h2>
 
     <ul class="bul">
-      <li><b>Code stays local.</b> Source files are indexed on your machine; recon never uploads them. The only network call it makes is the license check (key in, tier out).</li>
+      <li><b>Source files stay local.</b> Files are indexed on your machine; recon never uploads source. The license check (key in, tier out) and the embed forwarder (chunk text in, vectors out, see below) are the only network calls.</li>
+      <li><b>Embeddings: hosted by default, opt-out and air-gap supported.</b>
+        Semantic search uses a Cloudflare worker that forwards chunk text (tens to a few hundred tokens per chunk) to a Modal-hosted Jina v2-base-code embedding model. The worker caches vectors by <code>sha256(chunk_text)</code> so repeats hit Modal once. We don't log chunk text; we don't persist it. Source files never make this trip — only the chunks the indexer extracts. Two escape hatches:
+        <ul class="bul">
+          <li><b><code>RECON_NO_EMBED=1</code></b> — disables embedding entirely. Semantic search degrades to lexical-only; everything else is unaffected.</li>
+          <li><b><code>cargo build --features local-embed -p recon-cli</code></b> — rebuilds with offline ONNX inference (fastembed + Jina v2-base-code, ~80 MB binary). Nothing leaves the machine.</li>
+        </ul>
+      </li>
       <li><b>Credentials chmod 0600.</b> The raw API key is stored at <code>~/.config/recon/credentials.json</code> with mode 0600 on Unix. <code>recon doctor</code> verifies the mode.</li>
       <li><b>Secret redaction.</b> Every tool response that includes file bytes is scanned for AWS keys, OpenAI keys, PEM blocks, and 10+ other patterns before being returned. Override only with explicit <code>allow_sensitive = true</code>.</li>
       <li><b>Path traversal guard.</b> Every tool call canonicalizes its path argument and prefix-checks against the repo root.</li>
-      <li><b>Sensitive file gate.</b> <code>.env*</code>, <code>*.pem</code>, <code>*.key</code>, <code>id_rsa*</code> are skipped by default.</li>
+      <li><b>Sensitive file gate.</b> <code>.env*</code>, <code>*.pem</code>, <code>*.key</code>, <code>id_rsa*</code> are skipped by default — they don't get indexed or embedded.</li>
       <li><b>Stdout hygiene.</b> All logging goes to stderr; a CI test spawns the server and rejects any stray <code>println!</code>.</li>
       <li><b>Signed binaries.</b> Every release ships a SHA-256 manifest signed via cosign keyless against our GitHub Actions release workflow.</li>
     </ul>

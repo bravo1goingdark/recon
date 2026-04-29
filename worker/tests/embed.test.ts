@@ -113,7 +113,6 @@ function mockModal(
       // Only intercept calls to our Modal URL; let other fetches
       // (none expected, but defensive) pass through to the real one.
       if (!url.startsWith("https://modal.test/")) {
-        // @ts-expect-error vitest exposes the original via __orig
         return (globalThis as { __origFetch?: typeof fetch }).__origFetch!(
           input,
           init,
