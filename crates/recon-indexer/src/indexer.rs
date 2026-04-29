@@ -349,7 +349,17 @@ pub fn index_repo(
 
     // Tantivy indexing — use shared writer if available, else create a local one
     let mut local_writer = if shared_writer.is_none() {
-        tantivy.and_then(|tb| tb.writer(50_000_000).ok())
+        tantivy.and_then(|tb| match tb.writer(50_000_000) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(
+                    %e,
+                    "tantivy writer creation failed during full reindex; \
+                     BM25 docs will not be updated this run"
+                );
+                None
+            }
+        })
     } else {
         None
     };
@@ -654,7 +664,17 @@ fn index_diff(
     let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
     // Use shared writer if available, else create a local one
     let mut local_writer = if shared_writer.is_none() {
-        tantivy.and_then(|tb| tb.writer(15_000_000).ok())
+        tantivy.and_then(|tb| match tb.writer(15_000_000) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(
+                    %e,
+                    "tantivy writer creation failed during incremental index; \
+                     BM25 docs for changed files will not be updated this run"
+                );
+                None
+            }
+        })
     } else {
         None
     };

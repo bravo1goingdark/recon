@@ -331,10 +331,19 @@ impl ReconServer {
         // that create the root lazily.
         let repo_root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
 
-        let writer = tantivy.writer(50_000_000).ok();
-        if writer.is_none() {
-            warn!("tantivy writer creation failed at startup");
-        }
+        let writer = match tantivy.writer(50_000_000) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(
+                    %e,
+                    "tantivy writer creation failed at startup; \
+                     BM25 search will be degraded until restart \
+                     (most often a stale lock from a previously killed process — \
+                     check the index dir for a leftover .tantivy-writer.lock)"
+                );
+                None
+            }
+        };
         // Create a lock-free read pool from the same DB file (4 connections).
         // Falls back to an in-memory pool for in-memory stores (tests).
         let read_pool = match store.db_path().and_then(|p| ReadPool::new(p, 4).ok()) {

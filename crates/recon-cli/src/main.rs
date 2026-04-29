@@ -15,7 +15,6 @@ use recon_storage::store::Store;
 use rmcp::ServiceExt;
 use std::path::{Path, PathBuf};
 use tracing::info;
-#[cfg(feature = "embed")]
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
@@ -1268,7 +1267,17 @@ async fn main() -> Result<()> {
                 Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut writer = tantivy.writer(50_000_000).ok();
+            let mut writer = match tantivy.writer(50_000_000) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    warn!(
+                        %e,
+                        "tantivy writer creation failed during `recon init`; \
+                         BM25 search will be unavailable until the next clean reindex"
+                    );
+                    None
+                }
+            };
             let stats =
                 indexer::index_repo_incremental(&store, Some(&tantivy), &repo, writer.as_mut())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1607,7 +1616,17 @@ async fn main() -> Result<()> {
                 Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut writer = tantivy.writer(50_000_000).ok();
+            let mut writer = match tantivy.writer(50_000_000) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    warn!(
+                        %e,
+                        "tantivy writer creation failed during `recon index`; \
+                         BM25 docs will not be updated this run"
+                    );
+                    None
+                }
+            };
             let stats =
                 indexer::index_repo_incremental(&store, Some(&tantivy), &repo, writer.as_mut())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;

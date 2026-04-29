@@ -92,6 +92,14 @@ pub fn print_output(raw: &str, json: bool) {
     };
 
     match &val {
+        // Reindex result — must come before the bare-`files_indexed`
+        // stats arm below, since reindex JSON also carries that field.
+        // Matching stats first would route reindex output through the
+        // `Index Health` renderer, which in turn shows `repo ?` and
+        // `tantivy 0` (those fields are absent from reindex JSON).
+        Value::Object(obj) if obj.contains_key("status") && obj.contains_key("files_indexed") => {
+            print_reindex(obj, c)
+        }
         // Stats
         Value::Object(obj) if obj.contains_key("files_indexed") => print_stats(obj, c),
         // Outline shape
@@ -111,10 +119,6 @@ pub fn print_output(raw: &str, json: bool) {
             if obj.get("shape").and_then(|s| s.as_str()) == Some("ReferenceDigest") =>
         {
             print_refs(obj, c)
-        }
-        // Reindex result
-        Value::Object(obj) if obj.contains_key("status") && obj.contains_key("files_indexed") => {
-            print_reindex(obj, c)
         }
         // Multi-find single-pattern result: {hits, pattern}
         Value::Object(obj) if obj.contains_key("hits") && obj.contains_key("pattern") => {

@@ -276,6 +276,12 @@ impl ToolCounter {
 }
 
 /// Plain-old-data snapshot of a [`ToolCounter`] for serialization.
+///
+/// `static_baseline_tokens` and `measured_baseline_tokens` are tagged
+/// `#[serde(default)]` so snapshots persisted by older recon versions
+/// (which only had `calls`, `response_tokens`, and `latency_micros_total`)
+/// still deserialize cleanly on upgrade — missing fields hydrate as 0
+/// rather than wiping the user's lifetime "tokens saved" counters.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CounterSnapshot {
     /// Number of calls.
@@ -283,8 +289,10 @@ pub struct CounterSnapshot {
     /// Total response tokens emitted.
     pub response_tokens: u64,
     /// Total static-baseline tokens credited (non-migrated tools).
+    #[serde(default)]
     pub static_baseline_tokens: u64,
     /// Total measured-baseline tokens credited (migrated tools).
+    #[serde(default)]
     pub measured_baseline_tokens: u64,
     /// Total handler latency in microseconds.
     pub latency_micros_total: u64,
@@ -638,5 +646,21 @@ mod tests {
         assert_eq!(snap_after.response_tokens, 300);
         assert_eq!(snap_after.static_baseline_tokens, 0);
         assert_eq!(snap_after.measured_baseline_tokens, 5200);
+    }
+
+    /// Snapshots persisted by older recon versions lacked the
+    /// `static_baseline_tokens` and `measured_baseline_tokens` fields.
+    /// They MUST still deserialize on upgrade — otherwise lifetime
+    /// tokens-saved counters silently reset to zero on every startup.
+    #[test]
+    fn counter_snapshot_deserializes_old_blob_without_baseline_fields() {
+        let legacy = r#"{"calls":42,"response_tokens":1234,"latency_micros_total":99999}"#;
+        let snap: CounterSnapshot =
+            serde_json::from_str(legacy).expect("legacy snapshot must deserialize");
+        assert_eq!(snap.calls, 42);
+        assert_eq!(snap.response_tokens, 1234);
+        assert_eq!(snap.latency_micros_total, 99999);
+        assert_eq!(snap.static_baseline_tokens, 0);
+        assert_eq!(snap.measured_baseline_tokens, 0);
     }
 }

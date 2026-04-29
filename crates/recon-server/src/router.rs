@@ -456,7 +456,18 @@ impl RepoRouter {
         let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
             .map_err(|e| RouterError::Search(e.to_string()))?;
 
-        let mut writer = tantivy.writer(50_000_000).ok();
+        let mut writer = match tantivy.writer(50_000_000) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(
+                    repo = %repo_path.display(),
+                    %e,
+                    "tantivy writer creation failed; BM25 indexing skipped for this repo \
+                     (most often a stale .tantivy-writer.lock from a previously killed process)"
+                );
+                None
+            }
+        };
         match indexer::index_repo_incremental(&store, Some(&tantivy), repo_path, writer.as_mut()) {
             Ok(stats) => {
                 info!(
