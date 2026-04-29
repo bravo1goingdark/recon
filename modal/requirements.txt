@@ -1,0 +1,13 @@
+# Modal `recon-embed` container deps. Pinned to known-good versions
+# rather than ranges — the image layer caches per requirements.txt
+# hash, so a pin keeps cold-starts stable.
+#
+# torch + transformers carry the heavyweight tensor + tokenizer code.
+# sentence-transformers is the thin wrapper that does .encode() with
+# pooling and L2-normalisation in one call. einops is a transitive
+# dep of the Jina model's custom code (trust_remote_code=True).
+torch==2.11.0
+transformers==5.7.0
+sentence-transformers==5.4.1
+einops==0.8.2
+fastapi==0.136.1
