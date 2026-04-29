@@ -70,6 +70,32 @@ type = "ratelimit"
 namespace_id = "1005"
 simple = { limit = 60, period = 60 }
 
+# /v1/embed — 1000 per minute per API-key prefix. Hosted-embed is a
+# Pro/Team feature, gated by the route handler at the tier level. The
+# CF binding is the burst guard on top: a misbehaving CLI looping
+# embed calls hits this before doing real damage. Daily quotas (Pro
+# 50k/day, Team unlimited) are intentionally NOT enforced here for
+# v0.4 — they need persistent counters (KV or D1) and we want to ship
+# the route first against real users to learn what limits matter.
+[[unsafe.bindings]]
+name = "RL_EMBED"
+type = "ratelimit"
+namespace_id = "1006"
+simple = { limit = 1000, period = 60 }
+
+# ── KV bindings ────────────────────────────────────────────────────────────────
+# Per-chunk vector cache for /v1/embed. Key = "v1:" + sha256(text) (hex,
+# lowercase). Value = JSON-stringified Vec<f32> of length 768. TTL 30
+# days — chunks rotate as users re-index, so stale entries age out
+# without manual cleanup. Same chunk across users hits Modal once.
+#
+# Create with:
+#   wrangler kv namespace create EMBED_CACHE
+# then paste the returned ID in place of `id = "TBD"` below.
+[[kv_namespaces]]
+binding = "EMBED_CACHE"
+id = "665a79cbc43644e3b62bcc5b2bdd438b"   # tests use Miniflare's in-memory KV regardless
+
 # Secrets (set via `wrangler secret put`):
 # GITHUB_CLIENT_ID
 # GITHUB_CLIENT_SECRET
@@ -77,4 +103,6 @@ simple = { limit = 60, period = 60 }
 # RAZORPAY_KEY_SECRET
 # RAZORPAY_WEBHOOK_SECRET
 # SESSION_SIGNING_KEY
-# LICENSE_HMAC_SECRET  ← must match RECON_LICENSE_HMAC_KEY baked into the CLI binary
+# LICENSE_HMAC_SECRET    ← must match RECON_LICENSE_HMAC_KEY baked into the CLI binary
+# MODAL_EMBED_URL        ← https://<modal-app>.modal.run for the recon-embed Modal deploy
+# MODAL_AUTH_TOKEN       ← bearer token shared with the Modal `recon-embed-auth` secret

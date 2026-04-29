@@ -20,6 +20,10 @@ export interface Env {
   FRONTEND_URL: string;
   /** HMAC-SHA256 key used to sign license responses. Set via `wrangler secret put LICENSE_HMAC_SECRET`. */
   LICENSE_HMAC_SECRET: string;
+  /** Modal-deployed embed endpoint, e.g. `https://<app>.modal.run`. Set via `wrangler secret put MODAL_EMBED_URL`. Optional so local dev / tests can mock fetch. */
+  MODAL_EMBED_URL?: string;
+  /** Bearer token shared with the Modal `recon-embed-auth` secret. Set via `wrangler secret put MODAL_AUTH_TOKEN`. Optional for the same reason. */
+  MODAL_AUTH_TOKEN?: string;
   // Rate-limit bindings — see worker/wrangler.toml for period/limit config.
   // All optional so local dev and tests don't need the bindings provisioned.
   RL_CHECKOUT?: RateLimitBinding;
@@ -27,6 +31,9 @@ export interface Env {
   RL_LICENSE?: RateLimitBinding;
   RL_DASHBOARD?: RateLimitBinding;
   RL_ACCOUNT?: RateLimitBinding;
+  RL_EMBED?: RateLimitBinding;
+  /** KV namespace for /v1/embed chunk-vector cache. Key = "v1:" + sha256(text); value = JSON-stringified Vec<f32>. TTL 30 days per entry. Optional so tests can run without binding setup. */
+  EMBED_CACHE?: KVNamespace;
 }
 
 /** D1 row: users table. */
