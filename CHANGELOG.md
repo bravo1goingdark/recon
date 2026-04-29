@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
-## [0.3.3] — 2026-04-29
+## [0.3.4] — 2026-04-29
 
 CLI + MCP correctness sweep. Watcher → query loop now async-refresh.
 
@@ -147,7 +147,7 @@ savings subcommand had drifted to `recon.db` as the lookup target. After
 upgrading the binary, `recon savings push/show` work without any
 re-init.
 
-[0.3.3]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.3
+[0.3.4]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.4
 
 ## [0.3.2] — 2026-04-29
 
