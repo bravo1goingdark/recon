@@ -444,10 +444,11 @@ fn print_session_receipt(server: &recon_server::server::ReconServer) {
         return;
     }
 
-    let snapshots = server.telemetry_arc().per_tool_snapshots();
+    let telemetry = server.telemetry_arc();
+    let snapshots = telemetry.per_tool_snapshots();
     let mut total_calls = 0u64;
     let mut total_saved = 0u64;
-    let mut per_tool: Vec<(&'static str, u64)> = Vec::with_capacity(snapshots.len());
+    let mut per_tool: Vec<(&'static str, u64, u64)> = Vec::with_capacity(snapshots.len());
     for (name, s) in &snapshots {
         if s.calls == 0 {
             continue;
@@ -455,30 +456,68 @@ fn print_session_receipt(server: &recon_server::server::ReconServer) {
         total_calls += s.calls;
         let saved = s.tokens_saved();
         total_saved += saved;
-        per_tool.push((*name, saved));
+        // Per-tool time saved: alternative latency (baseline × calls)
+        // minus recon's actual latency, clamped at 0.
+        let baseline_us = recon_server::telemetry::baseline_latency_ms_for(name)
+            .saturating_mul(s.calls)
+            .saturating_mul(1000);
+        let time_saved_us = baseline_us.saturating_sub(s.latency_micros_total);
+        per_tool.push((*name, saved, time_saved_us));
     }
     if total_calls == 0 {
         return;
     }
-    per_tool.sort_by_key(|(_, saved)| std::cmp::Reverse(*saved));
+    let total_time_saved_us = telemetry.latency_saved_micros();
+    per_tool.sort_by_key(|(_, saved, _)| std::cmp::Reverse(*saved));
 
     let top: Vec<String> = per_tool
         .iter()
         .take(3)
-        .filter(|(_, s)| *s > 0)
-        .map(|(name, saved)| format!("{name} ({})", thousands(*saved)))
+        .filter(|(_, saved, _)| *saved > 0)
+        .map(|(name, saved, t_us)| {
+            format!(
+                "{name} ({} tok, {})",
+                thousands(*saved),
+                format_duration_us(*t_us)
+            )
+        })
         .collect();
 
     eprintln!("recon · session ended");
     eprintln!(
-        "  {} tool calls · saved {} tokens vs Read+Grep equivalent",
+        "  {} tool calls · saved {} tokens · ~{} faster than Read+Grep loop",
         thousands(total_calls),
         thousands(total_saved),
+        format_duration_us(total_time_saved_us),
     );
     if !top.is_empty() {
         eprintln!("  top: {}", top.join("  "));
     }
     eprintln!("  dashboard: https://mcprecon.pages.dev/dashboard");
+}
+
+/// Format a microsecond count as a short human-friendly duration:
+/// `<1ms`, `12ms`, `1.6s`, `1m 23s`. Used in the session receipt where
+/// concise wins over precise.
+fn format_duration_us(us: u64) -> String {
+    if us == 0 {
+        return "0s".into();
+    }
+    let ms = us / 1000;
+    if ms < 1 {
+        return "<1ms".into();
+    }
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let secs_f = ms as f64 / 1000.0;
+    if secs_f < 60.0 {
+        return format!("{secs_f:.1}s");
+    }
+    let total_secs = ms / 1000;
+    let minutes = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{minutes}m {secs}s")
 }
 
 /// Format `n` with comma thousand-separators. Pure local helper for the

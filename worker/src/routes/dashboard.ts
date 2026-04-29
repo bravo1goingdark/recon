@@ -255,6 +255,12 @@ interface RollupRow {
   /// returned (the derived figure is the source of truth).
   tokens_saved: number;
   latency_micros: number;
+  /// v0.5+: aggregate "wall-time saved" across all calls in the row,
+  /// in microseconds. Stored verbatim from the CLI push (the client
+  /// computes it per-tool from baseline_latency_ms × calls and clamps
+  /// at 0). Pre-v0.5 rows have 0 here via the column DEFAULT — that
+  /// renders as "—" in the UI, not "0 minutes faster."
+  latency_saved_micros: number;
 }
 
 dashboardRoutes.get("/savings", async (c) => {
@@ -277,6 +283,7 @@ dashboardRoutes.get("/savings", async (c) => {
         measured_baseline_tokens: 0,
         tokens_saved: 0,
         latency_micros: 0,
+        latency_saved_micros: 0,
       },
       upsell: {
         message:
@@ -316,7 +323,8 @@ dashboardRoutes.get("/savings", async (c) => {
                   SUM(static_baseline_tokens)
                   + SUM(measured_baseline_tokens)
                   - SUM(response_tokens))   AS tokens_saved,
-              SUM(latency_micros)           AS latency_micros
+              SUM(latency_micros)           AS latency_micros,
+              SUM(latency_saved_micros)     AS latency_saved_micros
        FROM usage_rollups
        WHERE user_id = ? AND day >= ? AND day <= ?
        GROUP BY day
@@ -339,6 +347,7 @@ dashboardRoutes.get("/savings", async (c) => {
       acc.measured_baseline_tokens += r.measured_baseline_tokens;
       acc.tokens_saved += r.tokens_saved;
       acc.latency_micros += r.latency_micros;
+      acc.latency_saved_micros += r.latency_saved_micros ?? 0;
       return acc;
     },
     {
@@ -348,6 +357,7 @@ dashboardRoutes.get("/savings", async (c) => {
       measured_baseline_tokens: 0,
       tokens_saved: 0,
       latency_micros: 0,
+      latency_saved_micros: 0,
     },
   );
 

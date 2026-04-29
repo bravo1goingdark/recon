@@ -70,6 +70,13 @@ pub struct Baseline {
     /// Estimated tokens an agent would consume reaching the same answer
     /// without recon.
     pub baseline_tokens: u64,
+    /// Estimated wall-time the alternative Read/Grep loop would have
+    /// taken per call, in milliseconds. The session receipt + dashboard
+    /// surface `(baseline_latency_ms × calls) - actual_latency_micros`
+    /// as "time saved" — the gut-feel number that lands harder than
+    /// "saved 47 K tokens." Order-of-magnitude estimates are fine; same
+    /// rationale as `baseline_tokens`.
+    pub baseline_latency_ms: u64,
     /// One-line rationale shown via `code_savings --explain` for trust.
     pub rationale: &'static str,
 }
@@ -86,16 +93,19 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_outline",
         baseline_tokens: 0,
+        baseline_latency_ms: 200,
         rationale: "measured per-call against the indexed file",
     },
     Baseline {
         tool: "code_skeleton",
         baseline_tokens: 0,
+        baseline_latency_ms: 200,
         rationale: "measured per-call against the indexed file",
     },
     Baseline {
         tool: "code_read_symbol",
         baseline_tokens: 0,
+        baseline_latency_ms: 250,
         rationale: "measured per-call (full-file Read equivalent)",
     },
     // ── Static estimates (composite tools, no clean alternative) ───
@@ -106,6 +116,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_find_symbol",
         baseline_tokens: 5000,
+        baseline_latency_ms: 800,
         rationale: "Grep across repo + read top 2 hits",
     },
     // Static-only: handler is index-driven (refs table, no grep on
@@ -115,51 +126,61 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_find_refs",
         baseline_tokens: 3000,
+        baseline_latency_ms: 600,
         rationale: "Grep for symbol name across repo",
     },
     Baseline {
         tool: "code_find_strings",
         baseline_tokens: 0,
+        baseline_latency_ms: 400,
         rationale: "measured per-call (sum of grep match-line tokens)",
     },
     Baseline {
         tool: "code_search",
         baseline_tokens: 0,
+        baseline_latency_ms: 500,
         rationale: "measured per-call when grep path is taken; 0 for tantivy/semantic",
     },
     Baseline {
         tool: "code_multi_find",
         baseline_tokens: 0,
+        baseline_latency_ms: 1000,
         rationale: "measured per-call (sum across all patterns + matches)",
     },
     Baseline {
         tool: "code_list",
         baseline_tokens: 0,
+        baseline_latency_ms: 2000,
         rationale: "measured per-call (sum of path + lang label bytes)",
     },
     Baseline {
         tool: "code_repo_map",
         baseline_tokens: 20000,
+        baseline_latency_ms: 5000,
         rationale: "Read 5 files for orientation",
     },
     Baseline {
         tool: "code_path",
         baseline_tokens: 5000,
+        baseline_latency_ms: 2000,
         rationale: "5x chained code_find_refs",
     },
     Baseline {
         tool: "code_callers",
         baseline_tokens: 3000,
+        baseline_latency_ms: 800,
         rationale: "depth=1 chained ref lookups",
     },
     Baseline {
         tool: "code_callees",
         baseline_tokens: 3000,
+        baseline_latency_ms: 800,
         rationale: "depth=1 chained ref lookups",
     },
     Baseline {
         tool: "code_context",
         baseline_tokens: 0,
+        baseline_latency_ms: 1500,
         rationale: "measured per-call (target file read; floor on the 4-call alternative)",
     },
     // Static-only: pure graph traversal (transitive callers + test
@@ -170,6 +191,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_impact",
         baseline_tokens: 9000,
+        baseline_latency_ms: 3000,
         rationale: "transitive callers + test grep + analysis",
     },
     // Static-only: pure connected-components computation over the
@@ -179,6 +201,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_subsystems",
         baseline_tokens: 12000,
+        baseline_latency_ms: 4000,
         rationale: "repo_map + 5 file reads",
     },
     // Static-only: index-only lookup over a cluster's symbol metadata.
@@ -187,6 +210,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_subsystem",
         baseline_tokens: 5000,
+        baseline_latency_ms: 1500,
         rationale: "directory listing + reads",
     },
     // Operator/system tools — not exposed via MCP as of v0.4. They
@@ -197,16 +221,19 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_stats",
         baseline_tokens: 0,
+        baseline_latency_ms: 0,
         rationale: "CLI/operator tool, not agent-facing",
     },
     Baseline {
         tool: "code_reindex",
         baseline_tokens: 0,
+        baseline_latency_ms: 0,
         rationale: "system operation, no agent alternative",
     },
     Baseline {
         tool: "code_savings",
         baseline_tokens: 0,
+        baseline_latency_ms: 0,
         rationale: "CLI/operator tool, not agent-facing",
     },
 ];
@@ -219,6 +246,18 @@ pub fn baseline_for(tool: &str) -> u64 {
         .iter()
         .find(|b| b.tool == tool)
         .map(|b| b.baseline_tokens)
+        .unwrap_or(0)
+}
+
+/// Look up the per-call latency baseline (ms) for a tool. Returns 0 for
+/// unknown tools and for operator-only tools whose baseline is genuinely
+/// "no agent alternative."
+#[inline]
+pub fn baseline_latency_ms_for(tool: &str) -> u64 {
+    BASELINES
+        .iter()
+        .find(|b| b.tool == tool)
+        .map(|b| b.baseline_latency_ms)
         .unwrap_or(0)
 }
 
@@ -449,6 +488,25 @@ impl Telemetry {
             .iter()
             .filter_map(|b| self.tools.get(b.tool).map(|c| (b.tool, c.snapshot())))
             .collect()
+    }
+
+    /// Aggregate "wall-time saved" across every tool call recorded so
+    /// far, in microseconds. Computed as
+    /// `Σ (baseline_latency_ms × calls × 1000) - Σ latency_micros_total`,
+    /// clamped at 0 per tool so a slow recon path doesn't pull the
+    /// total negative.
+    ///
+    /// Surfaced on the session receipt (#19) and pushed to the
+    /// dashboard via `latency_saved_micros` on the `usage_rollups` row.
+    pub fn latency_saved_micros(&self) -> u64 {
+        let mut total: u64 = 0;
+        for (tool, snap) in self.per_tool_snapshots() {
+            let baseline_us = baseline_latency_ms_for(tool)
+                .saturating_mul(snap.calls)
+                .saturating_mul(1000);
+            total = total.saturating_add(baseline_us.saturating_sub(snap.latency_micros_total));
+        }
+        total
     }
 
     /// Hydrate from persisted state on server startup. Reads `tel:tool:<name>`

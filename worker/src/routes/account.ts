@@ -266,6 +266,11 @@ accountRoutes.post("/savings", async (c) => {
     measured_baseline_tokens?: unknown;
     tokens_saved?: unknown;
     latency_micros?: unknown;
+    /// v0.5+: aggregate wall-time saved vs Read+Grep alternative loop,
+    /// in microseconds. Optional on the wire so a v0.4 CLI can still
+    /// push to a v0.5 worker (defaults to 0); the column carries the
+    /// same default at the SQL level.
+    latency_saved_micros?: unknown;
   };
   try {
     body = await c.req.json();
@@ -324,10 +329,21 @@ accountRoutes.post("/savings", async (c) => {
       400,
     );
   }
+  if (
+    body.latency_saved_micros !== undefined &&
+    !validCount(body.latency_saved_micros)
+  ) {
+    return c.json(
+      { error: "latency_saved_micros, when supplied, must be a non-negative integer" },
+      400,
+    );
+  }
   const staticBaselineTokens =
     typeof body.static_baseline_tokens === "number" ? body.static_baseline_tokens : 0;
   const measuredBaselineTokens =
     typeof body.measured_baseline_tokens === "number" ? body.measured_baseline_tokens : 0;
+  const latencySavedMicros =
+    typeof body.latency_saved_micros === "number" ? body.latency_saved_micros : 0;
   // Default missing/null to '' (legacy bucket). The route already widened
   // the type to accept undefined; the column has the same default at the
   // SQL level, but binding explicit values keeps the prepared-statement
@@ -361,8 +377,8 @@ accountRoutes.post("/savings", async (c) => {
       `INSERT INTO usage_rollups
          (user_id, repo_fingerprint, day, calls, response_tokens,
           static_baseline_tokens, measured_baseline_tokens,
-          tokens_saved, latency_micros)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          tokens_saved, latency_micros, latency_saved_micros)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, repo_fingerprint, day) DO UPDATE SET
          calls                    = MAX(usage_rollups.calls,                    excluded.calls),
          response_tokens          = MAX(usage_rollups.response_tokens,          excluded.response_tokens),
@@ -370,6 +386,7 @@ accountRoutes.post("/savings", async (c) => {
          measured_baseline_tokens = MAX(usage_rollups.measured_baseline_tokens, excluded.measured_baseline_tokens),
          tokens_saved             = MAX(usage_rollups.tokens_saved,             excluded.tokens_saved),
          latency_micros           = MAX(usage_rollups.latency_micros,           excluded.latency_micros),
+         latency_saved_micros     = MAX(usage_rollups.latency_saved_micros,     excluded.latency_saved_micros),
          updated_at               = datetime('now')`,
     )
     .bind(
@@ -382,6 +399,7 @@ accountRoutes.post("/savings", async (c) => {
       measuredBaselineTokens,
       body.tokens_saved,
       body.latency_micros,
+      latencySavedMicros,
     )
     .run();
 
