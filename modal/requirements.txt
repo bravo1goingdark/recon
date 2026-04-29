@@ -6,8 +6,17 @@
 # sentence-transformers is the thin wrapper that does .encode() with
 # pooling and L2-normalisation in one call. einops is a transitive
 # dep of the Jina model's custom code (trust_remote_code=True).
-torch==2.11.0
-transformers==5.7.0
-sentence-transformers==5.4.1
-einops==0.8.2
-fastapi==0.136.1
+#
+# IMPORTANT — version pinning rationale:
+# The Jina v2-base-code repo ships custom `modeling_bert.py` that
+# imports `find_pruneable_heads_and_indices` from
+# `transformers.pytorch_utils`. That symbol was removed in
+# transformers 5.x. We therefore stay on transformers 4.x until
+# Jina ships a 5.x-compatible model revision. sentence-transformers
+# 3.x pairs cleanly with transformers 4.x; bumping both crates
+# requires re-validating the Jina load path.
+torch==2.5.1
+transformers==4.46.3
+sentence-transformers==3.3.1
+einops==0.8.0
+fastapi==0.115.5
