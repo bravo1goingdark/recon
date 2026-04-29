@@ -20,6 +20,10 @@ pub enum ToolOutput {
     ReferenceDigest(RefDigestView),
     /// Diagnostic messages in `file:line:col: msg` form.
     Diagnostics(DiagView),
+    /// Array of search/listing hits — uniform envelope for row-oriented
+    /// tools (`code_find_symbol`, `code_search`, `code_list`,
+    /// `code_find_strings`, `code_multi_find`). Row schemas vary by `kind`.
+    Hits(HitsView),
     /// Structured tool-error response. Agents pattern-match on `code` / `kind`
     /// rather than scraping an opaque "Error: …" prefix from the free-text body.
     Error(ToolErrorView),
@@ -262,6 +266,32 @@ pub struct RefTier {
 #[inline]
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// Array of search/listing hits.
+///
+/// Canonical envelope for tools whose output is row-oriented and doesn't
+/// fit one of the other shapes — concretely `code_find_symbol`,
+/// `code_search`, `code_list`, `code_find_strings`, and `code_multi_find`.
+/// Row schemas vary by [`HitsView::kind`]; agents read `kind` first to
+/// route per-row rendering.
+///
+/// Hits are stored as `serde_json::Value` so handlers can build
+/// per-tool row shapes cheaply with `json!(...)` and avoid an extra
+/// typed-struct refactor in the hot path.
+#[derive(Debug, Clone, Serialize)]
+pub struct HitsView {
+    /// Result kind. One of: `"symbol"`, `"text"`, `"file"`, `"string"`,
+    /// `"multi_find"`. Agents and the CLI dispatch row rendering on this
+    /// discriminator.
+    pub kind: CompactString,
+    /// Total hit count. Equals `hits.len()` unless `truncated` is true.
+    pub count: usize,
+    /// Hit array — row schema varies by `kind`.
+    pub hits: Vec<serde_json::Value>,
+    /// Set when results were capped by a tool-specific limit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
 }
 
 /// Diagnostic messages.
@@ -756,5 +786,37 @@ mod tests {
             !json.contains("\"context\""),
             "context=None must be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn hits_view_serializes_with_shape_discriminator() {
+        let view = ToolOutput::Hits(HitsView {
+            kind: "symbol".into(),
+            count: 1,
+            hits: vec![serde_json::json!({"qualified_name": "foo::bar"})],
+            truncated: false,
+        });
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"shape\":\"Hits\""));
+        assert!(json.contains("\"kind\":\"symbol\""));
+        assert!(json.contains("\"count\":1"));
+        assert!(json.contains("\"qualified_name\":\"foo::bar\""));
+        // truncated=false must be omitted
+        assert!(
+            !json.contains("\"truncated\""),
+            "truncated=false should be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn hits_view_emits_truncated_when_true() {
+        let view = HitsView {
+            kind: "text".into(),
+            count: 30,
+            hits: vec![serde_json::json!({"path": "src/lib.rs", "line": 1, "text": "fn"})],
+            truncated: true,
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"truncated\":true"));
     }
 }

@@ -4,10 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>recon docs — Local-first MCP server · Tools · Filter DSL · Benchmarks</title>
-<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 18 agent-facing tools (12 base + 6 graph-traversal), 5 search tiers, PageRank repo map, weakly-connected-component subsystems, per-call measured token-savings, 7 languages, filter DSL, incremental indexing, secret redaction." />
+<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 20 agent-facing tools (12 base + 6 graph-traversal + 2 multi-repo), 5 search tiers, PageRank repo map, weakly-connected-component subsystems, multi-repo activation, per-call measured token-savings, 7 languages, filter DSL, incremental indexing, secret redaction." />
 <link rel="canonical" href="https://mcprecon.pages.dev/Docs.html" />
 <meta property="og:title" content="recon docs — Local-first MCP server" />
-<meta property="og:description" content="18 symbol-aware MCP tools — graph-aware navigation, per-call measured token-savings. Signed 24 MB Rust binary. SQLite + Tantivy + fff-grep search tiers. Your code stays on your machine." />
+<meta property="og:description" content="20 symbol-aware MCP tools — graph-aware navigation, multi-repo activation, per-call measured token-savings. Small signed Rust binary. SQLite + Tantivy + fff-grep search tiers. Your code stays on your machine." />
 <meta property="og:url" content="https://mcprecon.pages.dev/Docs.html" />
 <meta property="og:image" content="https://mcprecon.pages.dev/og.png" />
 <meta name="twitter:card" content="summary_large_image" />
@@ -327,7 +327,7 @@ recon init --mcp <span class="h">cc</span>        <span class="c"># Claude Code<
     <!-- INSTALL -->
     <h2 id="install"><span class="no">02</span>Install</h2>
 
-    <p>recon ships as a single 24 MB Rust binary. The installer verifies a SHA-256 manifest and (when <code>cosign</code> is on the machine) the manifest's sigstore signature against our GitHub Actions release workflow.</p>
+    <p>recon ships as a single small Rust binary. The installer verifies a SHA-256 manifest and (when <code>cosign</code> is on the machine) the manifest's sigstore signature against our GitHub Actions release workflow.</p>
 
 <pre><span class="c"># Linux · macOS</span>
 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
@@ -684,7 +684,7 @@ $ recon query code_context '{"symbol":"render_map","token_budget":2000}'</pre>
     <!-- MCP TOOLS -->
     <h2 id="tools"><span class="no">08</span>MCP tools</h2>
 
-    <p>The 18 tools your AI agent calls when recon is wired up — symbol-and-text primitives plus graph-aware traversals. Each is documented in the agent's tool listing; these are summarised here so you can audit what the agent has access to. Operator-only telemetry (<code>recon stats</code>, <code>recon savings show</code>) lives in the CLI, not on the MCP surface.</p>
+    <p>The 20 tools your AI agent calls when recon is wired up — symbol-and-text primitives, graph-aware traversals, plus multi-repo activation. Each is documented in the agent's tool listing; these are summarised here so you can audit what the agent has access to. Operator-only telemetry (<code>recon stats</code>, <code>recon savings show</code>) lives in the CLI, not on the MCP surface.</p>
 
     <div class="cards">
       <div class="card"><div class="t">code_outline <span class="badge">measured</span></div><div class="d">One line per symbol in a file. Replaces Read.</div></div>
@@ -705,6 +705,8 @@ $ recon query code_context '{"symbol":"render_map","token_budget":2000}'</pre>
       <div class="card"><div class="t">code_impact</div><div class="d">Blast radius — transitive callers + reachable tests. What might break if I change X?</div></div>
       <div class="card"><div class="t">code_subsystems</div><div class="d">Repo orientation by weakly-connected components. Hub + dominant directory per subsystem.</div></div>
       <div class="card"><div class="t">code_subsystem</div><div class="d">Drill into one subsystem from code_subsystems with a token-budgeted skeleton.</div></div>
+      <div class="card"><div class="t">code_activate_repo</div><div class="d">Switch the active repository for subsequent stateful tools. Tier-limit aware; persists the session across restarts.</div></div>
+      <div class="card"><div class="t">code_list_repos</div><div class="d">List loaded repos with files / symbols / active flag. Pairs with code_activate_repo.</div></div>
     </div>
 
     <p>The <span class="badge">measured</span> badge marks tools whose token-savings are computed per-call against the in-process Read/grep equivalent. Tools without the badge use conservative static estimates (the 6 graph/ranking tools have no clean grep alternative, so a measured baseline would be synthetic). Both categories feed the same daily rollups on <code>recon savings push</code> and the dashboard.</p>
@@ -919,7 +921,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
       <li><code>recon purge --mcp &lt;ide&gt;</code> now also frees the server-side slot.</li>
     </ul>
     <p><b>v0.1.1</b> — Fixed license HMAC secret mismatch between CLI and worker.</p>
-    <p><b>v0.1.0</b> — Initial release. 12 tools, 9 languages, signed 24 MB Rust binary.</p>
+    <p><b>v0.1.0</b> — Initial release. 12 tools, 9 languages, small signed Rust binary.</p>
     <p style="margin-top:14px"><a href="/changelog">See the full changelog →</a></p>
 
     <!-- LICENSE -->

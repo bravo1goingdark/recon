@@ -92,6 +92,14 @@ pub fn print_output(raw: &str, json: bool) {
     };
 
     match &val {
+        // Reindex result — must come before the bare-`files_indexed`
+        // stats arm below, since reindex JSON also carries that field.
+        // Matching stats first would route reindex output through the
+        // `Index Health` renderer, which in turn shows `repo ?` and
+        // `tantivy 0` (those fields are absent from reindex JSON).
+        Value::Object(obj) if obj.contains_key("status") && obj.contains_key("files_indexed") => {
+            print_reindex(obj, c)
+        }
         // Stats
         Value::Object(obj) if obj.contains_key("files_indexed") => print_stats(obj, c),
         // Outline shape
@@ -112,9 +120,11 @@ pub fn print_output(raw: &str, json: bool) {
         {
             print_refs(obj, c)
         }
-        // Reindex result
-        Value::Object(obj) if obj.contains_key("status") && obj.contains_key("files_indexed") => {
-            print_reindex(obj, c)
+        // Hits envelope — code_find_symbol / code_search / code_list /
+        // code_find_strings / code_multi_find. Delegates row rendering to
+        // the existing field-keyed sub-renderers via `kind`.
+        Value::Object(obj) if obj.get("shape").and_then(|s| s.as_str()) == Some("Hits") => {
+            print_hits(obj, c)
         }
         // Multi-find single-pattern result: {hits, pattern}
         Value::Object(obj) if obj.contains_key("hits") && obj.contains_key("pattern") => {
@@ -142,6 +152,48 @@ pub fn print_output(raw: &str, json: bool) {
             "{}",
             serde_json::to_string_pretty(&val).unwrap_or(raw.to_string())
         ),
+    }
+}
+
+/// Renderer for the canonical `Hits` envelope. Reuses the existing
+/// per-row renderers — `print_array` already field-dispatches on
+/// `qualified_name` / `text` / `symbol_count`, and `print_multi_group`
+/// handles `{pattern, hits}` rows. Zero new row rendering logic.
+///
+/// Borrows the `hits` array as a slice, so no allocation is added on the
+/// CLI render path. A trailing dim "results truncated" marker prints when
+/// the server set `truncated: true`.
+fn print_hits(obj: &serde_json::Map<String, Value>, c: &Colors) {
+    let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+    let hits_arr = obj.get("hits").and_then(|v| v.as_array());
+
+    match (kind, hits_arr) {
+        ("multi_find", Some(arr)) => {
+            for (i, item) in arr.iter().enumerate() {
+                if let Some(group) = item.as_object() {
+                    if i > 0 {
+                        println!();
+                    }
+                    print_multi_group(group, c);
+                }
+            }
+        }
+        // symbol / text / file / string all share the field-keyed dispatcher
+        // already implemented in print_array.
+        (_, Some(arr)) => print_array(arr, c),
+        (_, None) => println!("{dim}(empty){reset}", dim = c.dim, reset = c.reset),
+    }
+
+    if obj
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        println!(
+            "{dim}…results truncated{reset}",
+            dim = c.dim,
+            reset = c.reset
+        );
     }
 }
 
@@ -492,6 +544,53 @@ mod tests {
         });
         let raw = json.to_string();
         print_output(&raw, false);
+    }
+
+    #[test]
+    fn print_hits_symbol_kind_routes_through_print_array() {
+        // shape:"Hits", kind:"symbol" — dispatches via the qualified_name
+        // arm in print_array. Test asserts non-panic on the typical
+        // code_find_symbol response.
+        let json = serde_json::json!({
+            "shape": "Hits",
+            "kind": "symbol",
+            "count": 1,
+            "hits": [{
+                "qualified_name": "foo::bar",
+                "path": "src/lib.rs",
+                "line": 1,
+                "kind": "fn",
+                "signature": "fn bar()",
+                "source": "lexical",
+            }],
+        });
+        print_output(&json.to_string(), false);
+    }
+
+    #[test]
+    fn print_hits_text_kind_with_truncated_marker() {
+        let json = serde_json::json!({
+            "shape": "Hits",
+            "kind": "text",
+            "count": 30,
+            "hits": [{ "path": "src/lib.rs", "line": 1, "text": "fn main()" }],
+            "truncated": true,
+        });
+        print_output(&json.to_string(), false);
+    }
+
+    #[test]
+    fn print_hits_multi_find_routes_through_multi_group() {
+        let json = serde_json::json!({
+            "shape": "Hits",
+            "kind": "multi_find",
+            "count": 1,
+            "hits": [{
+                "pattern": "fn main",
+                "hits": [{ "path": "src/lib.rs", "line": 1, "text": "fn main()" }],
+            }],
+        });
+        print_output(&json.to_string(), false);
     }
 
     #[test]

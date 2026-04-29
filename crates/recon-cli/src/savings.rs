@@ -56,6 +56,15 @@ struct PushBody {
     /// reading the wire payload.
     tokens_saved: u64,
     latency_micros: u64,
+    /// Aggregate "wall-time saved" across all tool calls in this rollup,
+    /// in microseconds. Computed client-side as
+    /// `Σ (baseline_latency_ms × calls × 1000) - Σ latency_micros_total`,
+    /// clamped at 0 per tool. The dashboard surfaces this as a
+    /// "X minutes faster than Read+Grep" secondary headline. The worker
+    /// stores it verbatim and round-trips it on read; back-compat with
+    /// pre-v0.5 worker rollouts is handled by the column DEFAULT 0.
+    #[serde(default)]
+    latency_saved_micros: u64,
 }
 
 /// Worker response on success. We don't strictly need the body — the
@@ -111,13 +120,21 @@ fn aggregate(per_tool: &[(String, ToolSnapshot)], repo_fingerprint: String) -> P
     let mut static_baseline_tokens = 0u64;
     let mut measured_baseline_tokens = 0u64;
     let mut latency_micros = 0u64;
-    for (_, s) in per_tool {
+    let mut latency_saved_micros = 0u64;
+    for (tool, s) in per_tool {
         calls = calls.saturating_add(s.calls);
         response_tokens = response_tokens.saturating_add(s.response_tokens);
         static_baseline_tokens = static_baseline_tokens.saturating_add(s.static_baseline_tokens);
         measured_baseline_tokens =
             measured_baseline_tokens.saturating_add(s.measured_baseline_tokens);
         latency_micros = latency_micros.saturating_add(s.latency_micros_total);
+        // Per-tool time saved: alternative-loop wall-time (baseline ×
+        // calls) minus recon's actual latency, clamped at 0.
+        let baseline_us = recon_server::telemetry::baseline_latency_ms_for(tool)
+            .saturating_mul(s.calls)
+            .saturating_mul(1000);
+        latency_saved_micros =
+            latency_saved_micros.saturating_add(baseline_us.saturating_sub(s.latency_micros_total));
     }
     let tokens_saved = static_baseline_tokens
         .saturating_add(measured_baseline_tokens)
@@ -131,6 +148,7 @@ fn aggregate(per_tool: &[(String, ToolSnapshot)], repo_fingerprint: String) -> P
         measured_baseline_tokens,
         tokens_saved,
         latency_micros,
+        latency_saved_micros,
     }
 }
 
@@ -242,7 +260,10 @@ pub fn push(repo: Option<PathBuf>) -> Result<()> {
     let snapshots = load_local_snapshots(&db_path)?;
     if snapshots.is_empty() {
         eprintln!(
-            "no telemetry counters in {} — make at least one MCP tool call before pushing.",
+            "no flushed telemetry yet in {}.\n\
+             A running `recon serve` accumulates counts in memory; they persist\n\
+             every 60 s or every 10 tool calls, whichever fires first. Use\n\
+             `recon query code_savings '{{}}'` to see the live in-memory totals.",
             db_path.display()
         );
         return Ok(());
@@ -328,13 +349,19 @@ pub fn show(repo: Option<PathBuf>) -> Result<()> {
     let snapshots = load_local_snapshots(&db_path)?;
     if snapshots.is_empty() {
         eprintln!(
-            "no telemetry counters in {} — make at least one MCP tool call first.",
+            "no flushed telemetry yet in {}.\n\
+             A running `recon serve` accumulates counts in memory; they persist\n\
+             every 60 s or every 10 tool calls, whichever fires first. Use\n\
+             `recon query code_savings '{{}}'` to see the live in-memory totals.",
             db_path.display()
         );
         return Ok(());
     }
-    println!("# tool\tcalls\tresponse_tokens\tbaseline\ttokens_saved\tavg_latency_ms");
+    println!(
+        "# tool\tcalls\tresponse_tokens\tbaseline\ttokens_saved\tavg_latency_ms\ttime_saved_ms"
+    );
     let mut totals = ToolSnapshot::default();
+    let mut total_time_saved_ms: u64 = 0;
     for (tool, s) in &snapshots {
         // Each call accrues exactly one of the two baseline counters,
         // so the per-tool baseline column is just their sum. `saved` is
@@ -348,23 +375,28 @@ pub fn show(repo: Option<PathBuf>) -> Result<()> {
         } else {
             (s.latency_micros_total as f64 / s.calls as f64) / 1000.0
         };
+        let baseline_us = recon_server::telemetry::baseline_latency_ms_for(tool)
+            .saturating_mul(s.calls)
+            .saturating_mul(1000);
+        let time_saved_ms = baseline_us.saturating_sub(s.latency_micros_total) / 1000;
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{:.2}",
-            tool, s.calls, s.response_tokens, baseline, saved, avg_ms
+            "{}\t{}\t{}\t{}\t{}\t{:.2}\t{}",
+            tool, s.calls, s.response_tokens, baseline, saved, avg_ms, time_saved_ms,
         );
         totals.calls += s.calls;
         totals.response_tokens += s.response_tokens;
         totals.static_baseline_tokens += s.static_baseline_tokens;
         totals.measured_baseline_tokens += s.measured_baseline_tokens;
         totals.latency_micros_total += s.latency_micros_total;
+        total_time_saved_ms = total_time_saved_ms.saturating_add(time_saved_ms);
     }
     let totals_baseline = totals
         .static_baseline_tokens
         .saturating_add(totals.measured_baseline_tokens);
     let saved_total = totals_baseline.saturating_sub(totals.response_tokens);
     println!(
-        "# total\t{}\t{}\t{}\t{}\t-",
-        totals.calls, totals.response_tokens, totals_baseline, saved_total
+        "# total\t{}\t{}\t{}\t{}\t-\t{}",
+        totals.calls, totals.response_tokens, totals_baseline, saved_total, total_time_saved_ms,
     );
     Ok(())
 }

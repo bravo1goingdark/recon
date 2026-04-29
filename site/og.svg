@@ -21,8 +21,8 @@
   <text x="250" y="520" font-family="Georgia, serif" font-size="40" fill="#f5f3ef">320K</text>
   <text x="430" y="490" font-family="monospace" font-size="14" fill="#706050" letter-spacing="2">LANGUAGES</text>
   <text x="430" y="520" font-family="Georgia, serif" font-size="40" fill="#f5f3ef">9</text>
-  <text x="570" y="490" font-family="monospace" font-size="14" fill="#706050" letter-spacing="2">BINARY</text>
-  <text x="570" y="520" font-family="Georgia, serif" font-size="40" fill="#f5f3ef">24MB</text>
+  <text x="570" y="490" font-family="monospace" font-size="14" fill="#706050" letter-spacing="2">TOOLS</text>
+  <text x="570" y="520" font-family="Georgia, serif" font-size="40" fill="#f5f3ef">20</text>
   <!-- URL -->
   <text x="72" y="590" font-family="monospace" font-size="16" fill="#b07040" letter-spacing="1">mcprecon.pages.dev</text>
 </svg>

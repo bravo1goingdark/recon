@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>recon — 35× fewer tokens for AI coding agents | Local-first MCP server</title>
-<meta name="description" content="Local-first MCP server for AI coding agents. A 24 MB Rust binary that replaces Read, Grep, and Glob with 18 symbol-aware tools — graph-aware navigation across 7 languages, 15–30× token reduction, 8 ms queries on 320K symbols, per-call measured token-savings telemetry. Source files stay on your machine." />
+<meta name="description" content="Local-first MCP server for AI coding agents. A small Rust binary that replaces Read, Grep, and Glob with 20 symbol-aware tools — graph-aware navigation across 7 languages, multi-repo activation, 15–30× token reduction, 8 ms queries on 320K symbols, per-call measured token-savings telemetry. Source files stay on your machine." />
 <meta name="keywords" content="MCP server, code intelligence, AI coding, token reduction, Claude Code, symbol search, tree-sitter, PageRank, code exploration, developer tools" />
 <meta name="author" content="bravo1goingdark" />
 <link rel="canonical" href="https://mcprecon.pages.dev/" />
@@ -12,7 +12,7 @@
 <!-- Open Graph -->
 <meta property="og:type" content="website" />
 <meta property="og:title" content="recon — 35× fewer tokens for AI coding agents" />
-<meta property="og:description" content="Local-first MCP server. 24 MB Rust binary. 12 symbol-aware tools. 8 ms queries. Your code stays on your machine." />
+<meta property="og:description" content="Local-first MCP server. Small Rust binary. 20 symbol-aware tools with multi-repo activation. 8 ms queries. Your code stays on your machine." />
 <meta property="og:url" content="https://mcprecon.pages.dev/" />
 <meta property="og:site_name" content="recon" />
 <meta property="og:image" content="https://mcprecon.pages.dev/og.png" />
@@ -32,7 +32,7 @@
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="recon — 35× fewer tokens for AI coding agents" />
-<meta name="twitter:description" content="Local-first MCP server. 24 MB Rust binary. 18 tools — graph-aware navigation across 7 languages with per-call measured token-savings telemetry. 8 ms queries. Source files stay on your machine." />
+<meta name="twitter:description" content="Local-first MCP server. Small Rust binary. 20 tools — graph-aware navigation across 7 languages, multi-repo activation, per-call measured token-savings telemetry. 8 ms queries. Source files stay on your machine." />
 <meta name="twitter:image" content="https://mcprecon.pages.dev/og.png" />
 
 <!-- Favicon — light/dark via media query -->
@@ -44,7 +44,7 @@
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "recon",
-  "description": "Local-first code intelligence MCP server for AI coding agents. 24 MB Rust binary. 15–30× token reduction. Source files stay on your machine.",
+  "description": "Local-first code intelligence MCP server for AI coding agents. Small Rust binary. 15–30× token reduction. Source files stay on your machine.",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "Linux, macOS, Windows",
   "datePublished": "2026-04-24",
@@ -193,6 +193,17 @@
     font-weight:300;letter-spacing:-0.01em;
   }
   .lede b{color:var(--ink);font-weight:500}
+  .lede-points{
+    margin-top:18px;max-width:560px;list-style:none;
+    display:flex;flex-direction:column;gap:8px;
+    font-size:15px;line-height:1.45;color:var(--ink-2);
+  }
+  .lede-points li{padding-left:18px;position:relative}
+  .lede-points li::before{
+    content:"";position:absolute;left:0;top:9px;
+    width:6px;height:6px;border-radius:50%;background:var(--clay);
+  }
+  .lede-points b{color:var(--ink);font-weight:500}
 
   .cta{display:flex;gap:10px;margin-top:36px;flex-wrap:wrap}
   .btn{
@@ -452,17 +463,18 @@
         <h1 class="display">Read <em>less,</em><br/>understand <em>more.</em></h1>
         <p class="lede">
           <b>recon</b> is a local-first code intelligence <b>MCP server</b> for AI coding agents.
-          A <b>24 MB Rust binary</b> that replaces <i>Read</i>, <i>Grep</i>, and <i>Glob</i>
-          with <b>18 symbol-aware tools</b> — including <b>graph-aware navigation</b>
-          (call paths, callers, callees, blast-radius) across <b>seven languages</b> and
-          <b>per-call measured token-savings</b> so you can prove the win to finance.
-          <b>15–30× fewer tokens</b> on typical exploration. Source files stay local;
-          only chunk text (tens of tokens, no logs, no storage on our side) travels for
-          embedding. Air-gapped users can rebuild with <code>--features local-embed</code> for offline inference.
+          A <b>small Rust binary</b> that replaces <i>Read</i>, <i>Grep</i>, and <i>Glob</i>
+          with <b>20 symbol-aware tools</b>. <b>15–30× fewer tokens</b> on typical exploration.
         </p>
+        <ul class="lede-points">
+          <li><b>Graph-aware navigation</b> — call paths, callers, callees, blast-radius. Across <b>seven languages</b>.</li>
+          <li><b>Multi-repo activation</b> — switch repos at runtime via <code>code_activate_repo</code>; <code>code_list_repos</code> shows what's loaded. Sessions persist across restarts.</li>
+          <li><b>Measured token-savings</b> — per-call against the Read+Grep alternative, so you can prove the win to finance.</li>
+          <li><b>Privacy-first</b> — source stays local. Only chunk text (no logs, no storage) travels for embedding; rebuild with <code>--features local-embed</code> for offline inference.</li>
+        </ul>
         <div class="cta">
           <a class="btn primary" href="#install">Install recon <span class="arr">→</span></a>
-          <a class="btn ghost" href="#tools">Browse the 18 tools</a>
+          <a class="btn ghost" href="#tools">Browse the 20 tools</a>
         </div>
       </div>
 
@@ -473,7 +485,7 @@
           <span class="t">~/projects/acme &nbsp;·&nbsp; recon</span>
         </div>
         <div><span class="prompt">$ </span><span class="cmd">agent.mcp.connect <span class="hl">"recon"</span></span></div>
-        <div class="dim">  → handshake ok · 18 tools registered</div>
+        <div class="dim">  → handshake ok · 20 tools registered</div>
         <div class="dim">  → <span class="ok">ready</span> in <span class="hl">180 ms</span></div>
         <div>&nbsp;</div>
         <div><span class="prompt">→ </span><span class="cmd">code_path <span class="hl">"Handler"</span> <span class="hl">"User"</span></span></div>
@@ -678,6 +690,16 @@
         <div class="name">code_subsystem<span class="paren">(id, budget)</span></div>
         <div class="desc">Drill into one subsystem from <code>code_subsystems</code>. Skeleton-style summary within a token budget.</div>
         <div class="meta"><span class="replaces">—</span><span>&lt;10 ms</span></div>
+      </div>
+      <div class="card">
+        <div class="name">code_activate_repo<span class="paren">(path)</span></div>
+        <div class="desc">Switch the active repository for subsequent stateful tools. Tier-limit aware via <code>RepoRouter</code>; persists the loaded set across <code>recon serve</code> restarts.</div>
+        <div class="meta"><span class="replaces">↳ multi-repo</span><span>&lt;5 ms</span></div>
+      </div>
+      <div class="card">
+        <div class="name">code_list_repos<span class="paren">()</span></div>
+        <div class="desc">Loaded repos with <code>files</code>, <code>symbols</code>, and an <code>active</code> flag. Pairs with <code>code_activate_repo</code> for discovery before switching.</div>
+        <div class="meta"><span class="replaces">↳ multi-repo</span><span>&lt;1 ms</span></div>
       </div>
     </div>
     <p style="margin-top:18px;font-size:13px;color:var(--ink-3);max-width:72ch">
@@ -1084,7 +1106,7 @@ recon init --mcp windsurf  <span class="c"># Windsurf</span></pre>
     </div>
     <div class="bottom wrap" style="padding-left:0;padding-right:0">
       <div>© 2026 recon · crafted in Rust · code stays local</div>
-      <div>p99 &lt; 36 ms · 389 tests · 24 MB signed binary</div>
+      <div>p99 &lt; 36 ms · 389 tests · small signed binary</div>
     </div>
   </div>
 </footer>
