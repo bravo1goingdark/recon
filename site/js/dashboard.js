@@ -530,9 +530,12 @@ function renderSavings(data) {
     fmtInt(calls) +
     " tool calls</div></div>" +
     '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px;line-height:1.55">' +
-    "Read/grep equivalent measured per-call against the in-process index. " +
-    "Composite tools (<code>code_repo_map</code>, <code>code_path</code>, " +
-    "<code>code_context</code>, …) still use static baselines." +
+    "Measured per-call against the in-process Read/grep equivalent for the 8 direct " +
+    "file/grep tools (<code>code_outline</code>, <code>code_skeleton</code>, " +
+    "<code>code_read_symbol</code>, <code>code_search</code>, <code>code_find_strings</code>, " +
+    "<code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>). " +
+    "Graph/ranking tools (<code>code_repo_map</code>, <code>code_path</code>, " +
+    "<code>code_impact</code>, <code>code_subsystem</code>, …) use conservative static estimates." +
     '</div>' +
     renderSparkline(daily) +
     '<table style="margin-top:18px;width:100%;border-collapse:collapse;font-size:13px">' +

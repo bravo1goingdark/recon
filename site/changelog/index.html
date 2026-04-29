@@ -78,6 +78,33 @@
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
   </div>
 
+  <article class="release" id="v0-4-0">
+    <header>
+      <h2>v0.4.0</h2>
+      <span class="when">2026-04-29</span>
+    </header>
+    <span class="tag">Measured token-savings + tighter MCP surface</span>
+    <p>Two changes that move the savings dashboard from a defensible estimate to an auditable measurement, and trim two operator-only tools off the agent's MCP surface.</p>
+
+    <p><b>Measured per-call baselines.</b> Eight tools now compute their "what Read+grep would have cost" figure from real bytes touched on the call, not a hard-coded constant. The dashboard sums those measurements into the per-day rollup; <code>recon savings show</code> reflects the same numbers locally.</p>
+    <ul>
+      <li><b>Migrated to measured</b> — <code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code> (regex / grep paths only — tantivy and semantic modes pass <code>None</code>), <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>. Each handler reuses already-warm bytes — no extra I/O, no extra grep passes — so latency stays under the 100 ms p99 budget.</li>
+      <li><b>Worst-case mitigation</b> — the running-sum search path caps match-bytes scanned at 1 MiB per call, then extrapolates by the unscanned-file ratio. Bounded wall-time on regexes that match every line of a giant repo. <a href="https://github.com/bravo1goingdark/intel/blob/main/crates/recon-search/src/fff_backend.rs">[code]</a></li>
+      <li><b>Static-only, with rationale</b> — 10 tools keep documented static estimates because their alternative is fuzzy ranking, transitive call-graph traversal, or PageRank — none of which a single-pass grep replicates honestly. <code>code_find_symbol</code>, <code>code_find_refs</code>, <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>, <code>code_repo_map</code>, <code>code_reindex</code>.</li>
+      <li><b>Calibration harness</b> — <code>cargo xtask measured-baselines-corpus --repo &lt;path&gt;</code> runs every migrated tool against a real repo, prints (static_estimate, measured, response, divergence) as TSV, and gates a PASS/FAIL on a 15 % divergence threshold. Will run in CI on PRs touching the measured handlers.</li>
+    </ul>
+
+    <p><b>Honest dashboard numbers.</b> Pre-v0.4 static baselines were conservative-by-design over-estimates. The measured numbers will be smaller for narrow / cheap calls and larger for wide regex queries — closer to what the agent's alternative actually would have cost. Disclaimer copy on the Savings tab updated to reflect which tools are measured vs estimated.</p>
+
+    <p><b>MCP surface trimmed: 20 → 18 tools.</b> <code>code_stats</code> and <code>code_savings</code> dropped their <code>#[tool(...)]</code> registrations — they're operator diagnostics, not exploration tools, and exposing them via MCP encouraged agents to introspect their own savings instead of doing the user's task. Both are still reachable via <code>recon stats</code> and <code>recon savings show</code> in the CLI; the dashboard surfaces the same data for end users.</p>
+
+    <p><b>Schema simplification.</b> The dual-baseline machinery from the v0.3.x telemetry code shrunk to two columns (<code>static_baseline_tokens</code>, <code>measured_baseline_tokens</code>); each call accrues exactly one. The legacy <code>baseline_tokens</code> column was renamed in migration <code>0011_usage_rollups_measured.sql</code>; CLI/worker/dashboard ship in lockstep, no back-compat shims.</p>
+
+    <p><b>Tests:</b> 8 new per-tool integration assertions (every migrated tool credits the measured counter, static stays at 0); <code>static_only_tools_stay_on_static_baseline</code> proves the unmigrated 10 keep their static credit; bench in <code>crates/recon-search/benches/search_bench.rs</code> demonstrates the byte-budget mitigation bounds the worst-case latency.</p>
+
+    <p><a href="/docs#tools">Browse the 18-tool surface →</a></p>
+  </article>
+
   <article class="release" id="v0-3-1">
     <header>
       <h2>v0.3.1</h2>

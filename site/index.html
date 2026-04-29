@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>recon — 35× fewer tokens for AI coding agents | Local-first MCP server</title>
-<meta name="description" content="Local-first MCP server for AI coding agents. A 24 MB Rust binary that replaces Read, Grep, and Glob with 20 symbol-aware tools — graph-aware navigation across 7 languages, 15–30× token reduction, 8 ms queries on 320K symbols, built-in token-savings telemetry. Your code never leaves your machine." />
+<meta name="description" content="Local-first MCP server for AI coding agents. A 24 MB Rust binary that replaces Read, Grep, and Glob with 18 symbol-aware tools — graph-aware navigation across 7 languages, 15–30× token reduction, 8 ms queries on 320K symbols, per-call measured token-savings telemetry. Your code never leaves your machine." />
 <meta name="keywords" content="MCP server, code intelligence, AI coding, token reduction, Claude Code, symbol search, tree-sitter, PageRank, code exploration, developer tools" />
 <meta name="author" content="bravo1goingdark" />
 <link rel="canonical" href="https://mcprecon.pages.dev/" />
@@ -32,7 +32,7 @@
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="recon — 35× fewer tokens for AI coding agents" />
-<meta name="twitter:description" content="Local-first MCP server. 24 MB Rust binary. 20 tools — graph-aware navigation across 7 languages with built-in token-savings telemetry. 8 ms queries. Code never leaves your machine." />
+<meta name="twitter:description" content="Local-first MCP server. 24 MB Rust binary. 18 tools — graph-aware navigation across 7 languages with per-call measured token-savings telemetry. 8 ms queries. Code never leaves your machine." />
 <meta name="twitter:image" content="https://mcprecon.pages.dev/og.png" />
 
 <!-- Favicon — light/dark via media query -->
@@ -453,14 +453,14 @@
         <p class="lede">
           <b>recon</b> is a local-first code intelligence <b>MCP server</b> for AI coding agents.
           A <b>24 MB Rust binary</b> that replaces <i>Read</i>, <i>Grep</i>, and <i>Glob</i>
-          with <b>20 symbol-aware tools</b> — including <b>graph-aware navigation</b>
-          (call paths, callers, callees, blast-radius) across <b>seven languages</b> and a
-          built-in <b>token-savings counter</b> so you can prove the win to finance.
+          with <b>18 symbol-aware tools</b> — including <b>graph-aware navigation</b>
+          (call paths, callers, callees, blast-radius) across <b>seven languages</b> and
+          <b>per-call measured token-savings</b> so you can prove the win to finance.
           <b>15–30× fewer tokens</b> on typical exploration, and your code never leaves your machine.
         </p>
         <div class="cta">
           <a class="btn primary" href="#install">Install recon <span class="arr">→</span></a>
-          <a class="btn ghost" href="#tools">Browse the 20 tools</a>
+          <a class="btn ghost" href="#tools">Browse the 18 tools</a>
         </div>
       </div>
 
@@ -471,16 +471,16 @@
           <span class="t">~/projects/acme &nbsp;·&nbsp; recon</span>
         </div>
         <div><span class="prompt">$ </span><span class="cmd">agent.mcp.connect <span class="hl">"recon"</span></span></div>
-        <div class="dim">  → handshake ok · 20 tools registered</div>
+        <div class="dim">  → handshake ok · 18 tools registered</div>
         <div class="dim">  → <span class="ok">ready</span> in <span class="hl">180 ms</span></div>
         <div>&nbsp;</div>
         <div><span class="prompt">→ </span><span class="cmd">code_path <span class="hl">"Handler"</span> <span class="hl">"User"</span></span></div>
         <div class="row"><span>  Handler → Session → User</span><span class="ok">4 ms</span></div>
         <div class="row"><span>  <span class="dim">3 hops · cross-file · saved 4 grep-walks</span></span></div>
         <div>&nbsp;</div>
-        <div><span class="prompt">→ </span><span class="cmd">code_savings</span></div>
+        <div><span class="prompt">$ </span><span class="cmd">recon savings show</span></div>
         <div class="row"><span>  this week · <span class="hl">312</span> tool calls</span></div>
-        <div class="row"><span>  saved <span class="hl">3.2M</span> tokens · <span class="ok">your rates, your math</span></span></div>
+        <div class="row"><span>  saved <span class="hl">3.2M</span> tokens · <span class="ok">measured per-call</span></span></div>
       </div>
     </div>
   </div>
@@ -643,11 +643,6 @@
         <div class="meta"><span class="replaces">—</span><span>varies</span></div>
       </div>
       <div class="card">
-        <div class="name">code_stats<span class="paren">()</span></div>
-        <div class="desc">Index health, top-N centrality (in/out degree), and the live token-savings block.</div>
-        <div class="meta"><span class="replaces">—</span><span>~10 ms</span></div>
-      </div>
-      <div class="card">
         <div class="name">code_path<span class="paren">(src, dst)</span></div>
         <div class="desc">Shortest call-graph path from <code>src</code> to <code>dst</code>. Bidirectional BFS, capped at 8 hops.</div>
         <div class="meta"><span class="replaces">↳ chained refs</span><span>&lt;5 ms</span></div>
@@ -682,12 +677,14 @@
         <div class="desc">Drill into one subsystem from <code>code_subsystems</code>. Skeleton-style summary within a token budget.</div>
         <div class="meta"><span class="replaces">—</span><span>&lt;10 ms</span></div>
       </div>
-      <div class="card">
-        <div class="name">code_savings<span class="paren">()</span></div>
-        <div class="desc">Per-tool counter: calls, response tokens, baseline tokens avoided, tokens saved, avg latency. Model-agnostic — convert against your provider's rates. Persists across restarts.</div>
-        <div class="meta"><span class="replaces">—</span><span>&lt;5 ms</span></div>
-      </div>
     </div>
+    <p style="margin-top:18px;font-size:13px;color:var(--ink-3);max-width:72ch">
+      Token-savings telemetry runs alongside every call — per-call <b>measured</b> against
+      the in-process Read/grep equivalent for the 8 direct file/grep tools, conservative
+      <b>static</b> estimates for the 10 graph/ranking tools. Operator surfaces:
+      <code>recon stats</code> and <code>recon savings show</code> in the CLI; daily rollups
+      on the dashboard.
+    </p>
   </div>
 </section>
 
@@ -764,13 +761,13 @@
 <span class="h">code_list</span>("crates/**/*.rs")
 <span class="c">→ 312 files, symbol counts per file  ·  ~680 tokens</span>
 
-<span class="h">code_stats</span>()
-<span class="c">→ index health, centrality, telemetry  ·  ~150 tokens</span>
+<span class="h">code_context</span>("render_map", budget=<span class="h">2000</span>)
+<span class="c">→ signature + body + callers + tests  ·  ~1,300 tokens</span>
 
-<span class="c">subtotal</span> <span class="h">≈ 5,060 tokens</span></pre>
+<span class="c">subtotal</span> <span class="h">≈ 6,210 tokens</span></pre>
         <div class="meter">
-          <div class="lab"><span>tokens burned</span><span>5,060  ·  ~23× less</span></div>
-          <div class="bar"><div class="fill" style="width:4.35%"></div></div>
+          <div class="lab"><span>tokens burned</span><span>6,210  ·  ~19× less</span></div>
+          <div class="bar"><div class="fill" style="width:5.34%"></div></div>
         </div>
       </div>
     </div>
