@@ -180,6 +180,15 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        # `Update latest.json` below needs every tag in the repo so it
+        # can `sort -V | tail -1` to decide whether this run is the
+        # highest tag. Default fetch-depth=1 only brings the tag's
+        # commit; the follow-up `git fetch --tags` then exhibits the
+        # silent-fail-with-set-e mode we hit in v0.3.3 release run
+        # 25097548024. fetch-depth=0 makes every tag available locally
+        # so no second fetch is needed.
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -257,6 +266,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
+          set -euo pipefail
           VERSION="${{ github.ref_name }}"
           # Race guard: when multiple tags are pushed simultaneously
           # (e.g. v0.3.0 + v0.3.1 + v0.3.2 in one `git push`), each
@@ -265,13 +275,21 @@ jobs:
           # and has bitten us once already (v0.3.0 finished after
           # v0.3.2, so latest.json got pinned to the lower version).
           #
-          # Fix: each run fetches every tag from the repo, sorts by
+          # Fix: each run reads every tag from the repo, sorts by
           # semver, and only the highest tag's run is allowed to
           # write latest.json. Lower-versioned simultaneous releases
           # become no-ops here, leaving the manifest pointing at the
           # genuinely-latest version regardless of finish order.
-          git fetch --tags --quiet
+          #
+          # The checkout above pins `fetch-depth: 0` so all tag refs
+          # are already local — no second `git fetch --tags` is needed
+          # (that fetch silently failed in v0.3.3 release run
+          # 25097548024 under default depth=1, which made `set -e`
+          # kill the script with no diagnostic).
+          echo "── tags available locally ──"
+          git tag -l 'v*' | sort -V
           HIGHEST=$(git tag -l 'v*' | sort -V | tail -1)
+          echo "── this tag: $VERSION  ·  highest tag: $HIGHEST ──"
           if [ "$VERSION" != "$HIGHEST" ]; then
             echo "Skipping latest.json update: $VERSION is not the highest tag ($HIGHEST)."
             exit 0

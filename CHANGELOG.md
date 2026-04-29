@@ -88,6 +88,31 @@ pathological-case ceiling.
 - All 491 prior workspace tests still pass; cargo fmt clean; clippy
   `-D warnings` clean.
 
+### Fixed — release pipeline `latest.json` step (regression from v0.3.3)
+
+The v0.3.3 release run (run 25097548024, "Update latest.json (only if
+this is the highest tag)" step) failed silently with exit 1 in 600 ms,
+no captured diagnostic. Root cause: the `Publish to R2` job's
+`actions/checkout@v4` was at default `fetch-depth: 1`, so the
+follow-up `git fetch --tags --quiet` had to fetch every tag from
+scratch — and `--quiet` swallowed whatever transient error the fetch
+hit, leaving `set -e` to kill the script with no message.
+
+The release binaries themselves uploaded successfully (the failing
+step ran *after* `Upload binaries + sums + signatures to R2`), but
+`latest.json` on R2 stayed pinned to v0.3.2 — meaning
+`recon update --check` would still see v0.3.2 as the latest released
+version even after v0.3.3 was tagged.
+
+Fix: pin the publish job's checkout to `fetch-depth: 0` so all tag
+refs are already local. Drop the redundant `git fetch --tags`. Add
+`set -euo pipefail` and an `echo` of the resolved tag list so any
+future failure has a paper trail.
+
+The v0.3.4 release run (this commit's tag) will retake `latest.json`
+to v0.3.4 because v0.3.4 sorts higher than every previously-released
+tag — so the v0.3.3 hangover heals itself the moment v0.3.4 ships.
+
 ### Migration notes
 
 - **CLI**: rebuild + reinstall. The Fix #2 self-heal and Fix #3
@@ -98,6 +123,10 @@ pathological-case ceiling.
   drift.)
 - **Worker / D1 / dashboard**: no changes in v0.3.4 — no migration,
   no `wrangler deploy` needed. Schema is untouched from v0.3.3.
+- **`recon update`**: previously read `latest.json` and got v0.3.2
+  even after v0.3.3 was published. The v0.3.4 release fixes the
+  pipeline AND overrides the manifest in the same run, so users on
+  v0.3.2 / v0.3.3 will see v0.3.4 as the next available version.
 
 [0.3.4]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.4
 
