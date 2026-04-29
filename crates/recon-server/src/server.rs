@@ -102,7 +102,24 @@ pub struct ReconServer {
     /// callers that bypass `recon serve`. The stdio `Command::Serve` path
     /// always populates this via [`ReconServer::set_license`].
     license: Arc<ArcSwap<Option<crate::license::ValidatedLicense>>>,
+    /// Cache of measured-baseline token counts keyed by absolute path,
+    /// valued by `(mtime_secs, tokens)`. The mtime in the value is what
+    /// makes the cache self-invalidating: every lookup compares the
+    /// current file mtime against the stored one; a mismatch is treated
+    /// as a miss and the slot is overwritten. No explicit watcher hook
+    /// is needed.
+    ///
+    /// Bounded at [`MAX_BASELINE_CACHE_ENTRIES`] to keep memory flat on
+    /// long-running servers; on overflow we drop ~25 % of entries to
+    /// retain warm files.
+    measured_baseline_cache: Arc<dashmap::DashMap<PathBuf, (i64, u64)>>,
 }
+
+/// Bound on [`ReconServer::measured_baseline_cache`]. Sized to match
+/// FffBackend's `MAX_CACHE_ENTRIES` so the two file-keyed caches scale
+/// together — a hot file in one is overwhelmingly likely to be hot in
+/// the other.
+const MAX_BASELINE_CACHE_ENTRIES: usize = 2048;
 
 fn redact_response(response: String) -> String {
     redact::redact_secrets(&response).unwrap_or(response)
@@ -403,6 +420,9 @@ impl ReconServer {
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             watcher_handle: Arc::new(Mutex::new(None)),
             license: Arc::new(ArcSwap::new(Arc::new(None))),
+            measured_baseline_cache: Arc::new(dashmap::DashMap::with_capacity(
+                MAX_BASELINE_CACHE_ENTRIES,
+            )),
             embed_service: Arc::new(parking_lot::RwLock::new(None)),
             vec_read_pool: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             vec_writer: Arc::new(Mutex::new(None)),
@@ -654,14 +674,51 @@ impl ReconServer {
     /// those are cases where reporting a number would be misleading.
     /// The caller passes this straight through to
     /// [`Self::instrumented_measured`].
+    ///
+    /// Cached via [`ReconServer::measured_baseline_cache`] keyed by
+    /// `(path, mtime_secs)`. A typical session calls `code_outline`
+    /// then `code_read_symbol` (and often `code_context`) on the
+    /// same file — without the cache that's three full reads of
+    /// identical bytes just to recompute the baseline. The cache is
+    /// self-invalidating: an mtime mismatch is treated as a miss and
+    /// the slot is overwritten.
     async fn measure_read_baseline(&self, abs_path: &Path) -> Option<u64> {
-        match tokio::fs::metadata(abs_path).await {
-            Ok(m) if m.len() > MAX_READ_FILE_SIZE => return None,
-            Err(_) => return None,
-            _ => {}
+        let meta = tokio::fs::metadata(abs_path).await.ok()?;
+        if meta.len() > MAX_READ_FILE_SIZE {
+            return None;
         }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        if let Some(entry) = self.measured_baseline_cache.get(abs_path) {
+            let (cached_mtime, cached_tokens) = *entry;
+            if cached_mtime == mtime {
+                return Some(cached_tokens);
+            }
+        }
+
         let content = tokio::fs::read_to_string(abs_path).await.ok()?;
-        Some(recon_search::tokens::estimate_tokens(&content) as u64)
+        let tokens = recon_search::tokens::estimate_tokens(&content) as u64;
+
+        // Bound growth: drop ~25 % on overflow to retain warm entries.
+        if self.measured_baseline_cache.len() >= MAX_BASELINE_CACHE_ENTRIES {
+            let to_remove: Vec<PathBuf> = self
+                .measured_baseline_cache
+                .iter()
+                .take(MAX_BASELINE_CACHE_ENTRIES / 4)
+                .map(|e| e.key().clone())
+                .collect();
+            for key in to_remove {
+                self.measured_baseline_cache.remove(&key);
+            }
+        }
+        self.measured_baseline_cache
+            .insert(abs_path.to_path_buf(), (mtime, tokens));
+        Some(tokens)
     }
 
     /// Spawn an async task to persist lifetime telemetry. Hot-path
@@ -5241,6 +5298,35 @@ mod tests {
             .find(|(n, _)| *n == name)
             .map(|(_, s)| s)
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn measured_baseline_caches_by_path_and_mtime() {
+        let (server, _tmp) = make_indexed_server().await;
+        let abs = server.repo_root().join("src/math.rs");
+        // First call populates the cache.
+        let first = server.measure_read_baseline(&abs).await.unwrap();
+        assert!(first > 0);
+        assert_eq!(server.measured_baseline_cache.len(), 1);
+        let cached = server
+            .measured_baseline_cache
+            .get(&abs)
+            .map(|e| *e)
+            .unwrap();
+        // Second call hits the cache — same answer, no new entries.
+        let second = server.measure_read_baseline(&abs).await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(server.measured_baseline_cache.len(), 1);
+        // Forge a stale mtime in the cache; next call must invalidate
+        // and re-read (returning the same value computed from real bytes).
+        server
+            .measured_baseline_cache
+            .insert(abs.clone(), (cached.0 - 1, cached.1 + 999));
+        let third = server.measure_read_baseline(&abs).await.unwrap();
+        assert_eq!(
+            first, third,
+            "stale-mtime entry must be replaced, not served"
+        );
     }
 
     #[tokio::test]

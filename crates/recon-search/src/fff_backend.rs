@@ -51,11 +51,7 @@ impl FffBackend {
     /// content-immutable for the lifetime of the cache entry, so caching
     /// the index alongside the mmap is safe — both are evicted together
     /// in [`Self::refresh`].
-    fn get_line_index(
-        &self,
-        path: &std::path::Path,
-        data: &[u8],
-    ) -> Arc<Vec<usize>> {
+    fn get_line_index(&self, path: &std::path::Path, data: &[u8]) -> Arc<Vec<usize>> {
         if let Some(idx) = self.line_index_cache.get(path) {
             return Arc::clone(&idx);
         }
