@@ -4158,6 +4158,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "recon-embed-client"
+version = "0.3.4"
+dependencies = [
+ "recon-server",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "recon-indexer"
 version = "0.4.1"
 dependencies = [
