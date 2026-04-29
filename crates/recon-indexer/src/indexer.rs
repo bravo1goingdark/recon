@@ -662,12 +662,15 @@ fn index_diff(
         shared_writer.or(local_writer.as_mut());
     let mut stats = IndexStats::default();
 
-    // Delete removed files — convert to relative paths for store
-    for abs_path in deleted {
-        let rel_path = abs_path.strip_prefix(repo_root).unwrap_or(abs_path);
-        if let Err(e) = store.delete_file_cascade(rel_path) {
-            warn!(?rel_path, "delete cascade error: {e}");
-            stats.errors += 1;
+    // Delete removed files in one transaction (BEGIN/COMMIT once instead of N).
+    if !deleted.is_empty() {
+        let rel_paths: Vec<&Path> = deleted
+            .iter()
+            .map(|p| p.strip_prefix(repo_root).unwrap_or(p))
+            .collect();
+        if let Err(e) = store.delete_files_cascade(&rel_paths) {
+            warn!(count = rel_paths.len(), "delete cascade error: {e}");
+            stats.errors += rel_paths.len();
         }
     }
 

@@ -122,19 +122,44 @@ impl Store {
     ///
     /// Single transaction: delete refs (explicit), then file (FK cascades to symbols).
     pub fn delete_file_cascade(&self, path: &Path) -> Result<(), Error> {
-        let path_str = path_key(path);
+        let path_ref: &Path = path;
+        self.delete_files_cascade(std::slice::from_ref(&path_ref))
+    }
+
+    /// Delete many files in a single transaction with prepared statements.
+    ///
+    /// Branch switches and bulk refactors can drop hundreds of files at once;
+    /// the per-file `delete_file_cascade` paid one BEGIN/COMMIT (and one WAL
+    /// fsync) per call, which dominates wall time. This variant amortizes
+    /// both: one transaction, two prepared statements reused for every path.
+    pub fn delete_files_cascade(&self, paths: &[&Path]) -> Result<(), Error> {
+        if paths.is_empty() {
+            return Ok(());
+        }
         let tx = self
             .conn
             .unchecked_transaction()
             .map_err(|e| Error::Storage(e.to_string()))?;
-        tx.execute(
-            "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
-            params![path_str],
-        )
-        .map_err(|e| Error::Storage(e.to_string()))?;
-        // FK cascade from files -> symbols handles symbol cleanup
-        tx.execute("DELETE FROM files WHERE path = ?1", params![path_str])
-            .map_err(|e| Error::Storage(e.to_string()))?;
+        {
+            let mut del_refs = tx
+                .prepare_cached(
+                    "DELETE FROM refs WHERE src_symbol_id IN (SELECT id FROM symbols WHERE path = ?1)",
+                )
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            // FK cascade from files -> symbols handles symbol cleanup.
+            let mut del_file = tx
+                .prepare_cached("DELETE FROM files WHERE path = ?1")
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            for path in paths {
+                let path_str = path_key(path);
+                del_refs
+                    .execute(params![path_str])
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                del_file
+                    .execute(params![path_str])
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+            }
+        }
         tx.commit().map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
@@ -1383,6 +1408,46 @@ mod tests {
             .unwrap();
         assert_eq!(store.symbol_count().unwrap(), 0);
         assert_eq!(store.refs_for_ident("baz").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn delete_files_cascade_multi_file() {
+        let store = Store::open_memory().unwrap();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            let path = format!("src/{name}");
+            let meta = make_file_meta(&path);
+            let mut sym = make_symbol(
+                &format!("fn_{name}"),
+                &format!("mod::fn_{name}"),
+                SymbolKind::Function,
+            );
+            sym.path = Arc::new(PathBuf::from(&path));
+            let refs = vec![Ref {
+                src_path: Arc::new(PathBuf::from(&path)),
+                src_symbol_id: 1,
+                ident: CompactString::new(format!("ref_{name}")),
+                dst_symbol_id: None,
+                weight: 1.0,
+            }];
+            store.batch_index_file(&meta, &[sym], &refs).unwrap();
+        }
+        assert_eq!(store.symbol_count().unwrap(), 3);
+
+        // Delete two of three in one transaction.
+        let p1 = std::path::PathBuf::from("src/a.rs");
+        let p2 = std::path::PathBuf::from("src/c.rs");
+        store
+            .delete_files_cascade(&[p1.as_path(), p2.as_path()])
+            .unwrap();
+
+        assert_eq!(store.symbol_count().unwrap(), 1);
+        assert!(store.refs_for_ident("ref_a.rs").unwrap().is_empty());
+        assert_eq!(store.refs_for_ident("ref_b.rs").unwrap().len(), 1);
+        assert!(store.refs_for_ident("ref_c.rs").unwrap().is_empty());
+
+        // Empty slice is a no-op.
+        store.delete_files_cascade(&[]).unwrap();
+        assert_eq!(store.symbol_count().unwrap(), 1);
     }
 
     #[test]

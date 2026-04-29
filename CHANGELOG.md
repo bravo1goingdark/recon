@@ -4,6 +4,151 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.3.3] — 2026-04-29
+
+CLI + MCP correctness sweep. Watcher → query loop now async-refresh.
+
+### Fixed — `recon savings` couldn't find the local DB
+
+`recon savings push` and `recon savings show` looked for `.recon/recon.db`,
+but `recon init` / `recon serve` / `recon doctor` all write `.recon/index.db`.
+Every push immediately after `recon init` failed with the misleading
+"run `recon init` or `recon serve` here first" message. Aligned the resolver,
+doc comments, and error message in `crates/recon-cli/src/savings.rs` on
+`index.db`. The doc strings in `main.rs` and `bench-real.rs` follow.
+No reindex required after rebuild.
+
+### Fixed — 8 of 20 MCP tools were unreachable via `recon query`
+
+`server.rs::dispatch_tool` (the hand-written switch table that backs the
+`recon query <tool>` CLI shim) listed only 12 of the 20 `#[tool(...)]`
+exports. `code_path`, `code_callers`, `code_callees`, `code_context`,
+`code_impact`, `code_subsystems`, `code_subsystem`, and `code_savings`
+returned `unknown tool`. They worked over the rmcp `tool_router` (so
+Claude Code / Cursor / Windsurf / opencode were unaffected); only the
+CLI debug surface was missing them. All 20 are now wired.
+
+### Fixed — `recon search` exact-mode lexical hits reported `line: 0`
+
+The `code_search` exact-mode path emitted Tantivy hits without a line
+number because `StructuredHit` carries `symbol_id` but no line. The
+hardcoded `0` made every exact-mode result indistinguishable from
+"line unknown". Now batch-resolved through
+`ReadPool::symbol_locations_by_ids` (one query per response, not per hit)
+and propagated. Regex and hybrid modes were already correct.
+
+### Fixed — `recon strings -k literal` and `-k comment` returned identical results
+
+The `kind` parameter on `code_find_strings` was echoed in the response
+but never used to filter — `-k literal "API key"` returned `///` doc
+comments, `-k comment` returned them too, and both matched `-k both`.
+Added `classify_string_hit` (line-local heuristic over comment markers
+and quote balance) and applied it as a hit-level filter; the response
+`kind` field now reports the actual classification, not the requested
+one. Edge cases acknowledged in the function doc: multi-line `/* */`
+blocks and escape sequences inside strings can still misclassify; this
+is a heuristic, not a lexer.
+
+### Fixed — `recon multi` always emitted raw JSON
+
+`recon multi 'fn x' impl` printed pretty-printed JSON regardless of the
+`--json` flag, and the response shape diverged: a single pattern
+produced `{hits, pattern}`, multiple patterns produced
+`[{hits, pattern}, ...]`. Added `print_multi_group` to `pretty.rs` so
+the default form is human-readable per pattern; `--json` keeps the
+array shape for scripting.
+
+### Fixed — `--json` silently ignored on four CLI handlers
+
+`recon version --json`, `recon license --json`, `recon repos list --json`,
+and `recon stats --json` all emitted the human-readable text branch
+regardless. Each handler now branches on `cli.json` and emits a single
+parseable JSON document. `stats --json` no longer appends the
+`Indexed repos (global): N` trailer so consumers can pipe into `jq`
+without filtering.
+
+### Fixed — pre-existing FK panic in `storage_bench`
+
+`crates/recon-storage/benches/storage_bench.rs::setup_store` inserted only
+`src/lib.rs` while `make_symbol` referenced `src/file_*.rs`. The bench
+panicked on the first `find_symbols_exact` iteration with
+`FOREIGN KEY constraint failed`. Routed every `setup_store` caller
+through `setup_store_multi_file` (which seeds one file row per
+distinct path).
+
+### Performance — watcher → query loop
+
+End-to-end fix for the cold-cache stall on every save. Storage benches
+on this branch:
+
+| Path | Before | After | Why |
+|---|---|---|---|
+| `delete_cascade_loop/100_files` | **76.0 ms** | one BEGIN/COMMIT | N transactions → 1 |
+| `all_symbols/80k_across_1780_files` | 161.9 ms | unchanged sync cost | now off the read path |
+| `all_refs/300k_across_1780_files` | 185.9 ms | unchanged sync cost | now off the read path |
+| Watcher save → next read tool | **~350 ms** cold-load | µs delta + async refresh | reads serve previous snapshot |
+
+Three changes, each defensible on its own:
+
+- **`Store::delete_files_cascade(&[&Path])`** — one transaction with
+  prepared statements amortized across the whole slice. The old
+  per-file `delete_file_cascade` now delegates. `index_diff` and the
+  watcher delete branch swap from the per-file loop. ~10–50× faster on
+  branch switches and mass-delete refactors; same correctness.
+- **Watcher Phase 2 parses in parallel.** The save-batch parse loop
+  in `start_watcher` switched from `to_parse.iter().filter_map(...)`
+  to `par_iter`, and `LanguagePools` is sized to
+  `rayon::current_num_threads().max(4)` to match the rest of the
+  indexer. Multi-file save bursts (rebase, format-on-save, mass touch)
+  parallelize across cores instead of single-threading.
+- **Async cache refresh — reads serve previous snapshot.** Watcher
+  batches no longer clear `cached_paths` / `cached_symbols` /
+  `cached_refs` synchronously. The next read tool used to pay
+  `~350 ms` of cold `all_symbols` + `all_refs`; now an edge-triggered,
+  coalesced background worker (`kick_async_refresh`) re-snapshots on a
+  separate thread and arc-swap-in atomically. Reads see briefly-stale
+  but warm caches during the refresh window — strictly better than
+  the empty-cache cold reload. Coalescing pattern caps concurrent
+  refresh threads at one even under rapid save bursts; a kick that
+  arrives mid-snapshot retriggers exactly one extra iteration.
+
+### Worker — production D1 was missing migration 0009
+
+`GET /v1/dashboard/savings` was 500-ing for every dashboard load
+because `usage_rollups` had never been applied to `recon-production`
+on the Cloudflare side, even though `0009_usage_rollups.sql` shipped
+with v0.3.2. Applied via
+`wrangler d1 migrations apply recon-production --remote`. The table,
+its primary-key auto-index, and the `(day)` covering index are now
+live. The savings tab on the dashboard renders again — Free tier sees
+the upsell card, Pro/Team see the empty-state placeholder until the
+first push lands.
+
+### Tests
+
+- New `delete_files_cascade_multi_file` unit test in
+  `recon-storage::store::tests` — covers multi-file delete +
+  empty-slice no-op.
+- New `bench_delete_cascade_loop` and `bench_delete_cascade_batched`
+  criterion benches at sizes 100 and 500, plus the FK fix on the
+  pre-existing `setup_store` helper.
+- New `bench-watcher` binary
+  (`crates/recon-cli/src/bin/bench-watcher.rs`) for save→query latency
+  and 50-file burst measurement. Useful for verifying the async-refresh
+  Phase 3 win on a real workload.
+- All 491 workspace tests pass: storage 31, server 138, parser 30,
+  search 96, indexer 45, embed 10, core 56, cli 85.
+
+### Migration notes
+
+This is a patch release — no schema or config changes on the recon side.
+The `index.db` filename has always been the canonical name; only the
+savings subcommand had drifted to `recon.db` as the lookup target. After
+upgrading the binary, `recon savings push/show` work without any
+re-init.
+
+[0.3.3]: https://github.com/bravo1goingdark/recon/releases/tag/v0.3.3
+
 ## [0.3.2] — 2026-04-29
 
 The savings dashboard. Pro/Team only.

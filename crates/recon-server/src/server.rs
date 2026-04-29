@@ -125,6 +125,84 @@ fn text_hit_json(
 /// Prevents OOM on accidentally large files (e.g. minified bundles, lock files).
 const MAX_READ_FILE_SIZE: u64 = 2 * 1024 * 1024;
 
+/// Coalesces concurrent refresh requests into a single worker thread.
+/// `dirty` is the edge: kick sets it; the worker drains it.
+struct RefreshGate {
+    in_flight: AtomicBool,
+    dirty: AtomicBool,
+}
+
+static REFRESH_GATE: RefreshGate = RefreshGate {
+    in_flight: AtomicBool::new(false),
+    dirty: AtomicBool::new(false),
+};
+
+/// Spawn (or coalesce into) a background snapshot refresh.
+///
+/// On the watcher hot path we used to clear all caches synchronously. The
+/// next read tool then paid `~350 ms` of cold `all_symbols + all_refs`. This
+/// kicks the same refresh on a worker thread instead — reads keep serving
+/// the previous (briefly stale) snapshot until the new one atomically lands.
+///
+/// Multiple kicks during an in-flight refresh collapse to one extra run, so
+/// rapid save bursts produce at most two refreshes total.
+fn kick_async_refresh(
+    read_pool: &Arc<ReadPool>,
+    cached_paths: &Arc<ArcSwap<Vec<PathBuf>>>,
+    cached_file_count: &Arc<AtomicU64>,
+    cached_symbols: &Arc<ArcSwap<Vec<recon_core::symbol::Symbol>>>,
+    cached_refs: &Arc<ArcSwap<Vec<recon_core::symbol::Ref>>>,
+    cached_call_graph: &Arc<arc_swap::ArcSwapOption<recon_search::graph::CallGraph>>,
+) {
+    REFRESH_GATE.dirty.store(true, Ordering::Release);
+    if REFRESH_GATE
+        .in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // Another worker is already running; it will see the `dirty` flag
+        // and re-run after its current snapshot lands.
+        return;
+    }
+    let read_pool = read_pool.clone();
+    let cached_paths = cached_paths.clone();
+    let cached_file_count = cached_file_count.clone();
+    let cached_symbols = cached_symbols.clone();
+    let cached_refs = cached_refs.clone();
+    let cached_call_graph = cached_call_graph.clone();
+    std::thread::spawn(move || {
+        loop {
+            // Edge-triggered: clear `dirty` before the snapshot so a kick
+            // that arrives mid-snapshot retriggers another iteration.
+            REFRESH_GATE.dirty.store(false, Ordering::Release);
+            match read_pool.snapshot_all_for_caches() {
+                Ok((paths, symbols, refs)) => {
+                    cached_file_count.store(paths.len() as u64, Ordering::Relaxed);
+                    cached_paths.store(Arc::new(paths));
+                    cached_symbols.store(Arc::new(symbols));
+                    cached_refs.store(Arc::new(refs));
+                    cached_call_graph.store(None);
+                }
+                Err(e) => warn!("async cache refresh failed: {e}"),
+            }
+            // Release first, then recheck `dirty`. If a kick arrives in this
+            // gap and claims `in_flight` before us, we lose the re-claim and
+            // exit — its thread will pick up the work.
+            REFRESH_GATE.in_flight.store(false, Ordering::Release);
+            if !REFRESH_GATE.dirty.load(Ordering::Acquire) {
+                break;
+            }
+            if REFRESH_GATE
+                .in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+}
+
 /// Per-request deadline. Queries longer than this return `ToolOutput::Error`
 /// with `ReconErrorCode::Timeout` rather than hanging the client.
 /// Override with `RECON_REQUEST_TIMEOUT_SECS`.
@@ -814,6 +892,38 @@ impl ReconServer {
                 Ok(p) => self.code_stats(Parameters(p)).await,
                 Err(e) => tool_error_invalid_args(&e),
             },
+            "code_path" => match serde_json::from_str::<PathParams>(args_json) {
+                Ok(p) => self.code_path(Parameters(p)).await,
+                Err(e) => tool_error_invalid_args(&e),
+            },
+            "code_callers" => match serde_json::from_str::<CallersParams>(args_json) {
+                Ok(p) => self.code_callers(Parameters(p)).await,
+                Err(e) => tool_error_invalid_args(&e),
+            },
+            "code_callees" => match serde_json::from_str::<CallersParams>(args_json) {
+                Ok(p) => self.code_callees(Parameters(p)).await,
+                Err(e) => tool_error_invalid_args(&e),
+            },
+            "code_context" => match serde_json::from_str::<ContextParams>(args_json) {
+                Ok(p) => self.code_context(Parameters(p)).await,
+                Err(e) => tool_error_invalid_args(&e),
+            },
+            "code_impact" => match serde_json::from_str::<ImpactParams>(args_json) {
+                Ok(p) => self.code_impact(Parameters(p)).await,
+                Err(e) => tool_error_invalid_args(&e),
+            },
+            "code_subsystems" => match serde_json::from_str::<SubsystemsParams>(args_json) {
+                Ok(p) => self.code_subsystems(Parameters(p)).await,
+                Err(e) => tool_error_invalid_args(&e),
+            },
+            "code_subsystem" => match serde_json::from_str::<SubsystemParams>(args_json) {
+                Ok(p) => self.code_subsystem(Parameters(p)).await,
+                Err(e) => tool_error_invalid_args(&e),
+            },
+            "code_savings" => match serde_json::from_str::<SavingsParams>(args_json) {
+                Ok(p) => self.code_savings(Parameters(p)).await,
+                Err(e) => tool_error_invalid_args(&e),
+            },
             other => tool_error(
                 ReconErrorCode::NotFound,
                 format!("unknown tool: {other}"),
@@ -858,7 +968,10 @@ impl ReconServer {
             };
             info!("file watcher started");
 
-            let pools = LanguagePools::new(1);
+            // Size pools to all worker cores so multi-file batches (rebase,
+            // format-on-save sweep) parse in parallel; per-language pools are
+            // cheap and the watcher thread sleeps between bursts.
+            let pools = LanguagePools::new(rayon::current_num_threads().max(4));
 
             // ── One-time catch-up: embed any symbols not yet in the vector store ──
             // Runs before the event loop so the watcher thread owns vec_writer exclusively.
@@ -1031,18 +1144,20 @@ impl ReconServer {
                             }
                         }
 
-                        // SQLite cascade — drops file + symbols + refs.
+                        // SQLite cascade — drops file + symbols + refs in one transaction.
                         {
+                            let rel_paths: Vec<&std::path::Path> = deleted_paths
+                                .iter()
+                                .map(|abs| abs.strip_prefix(&repo_root).unwrap_or(abs))
+                                .collect();
+                            debug!(count = rel_paths.len(), "watcher: cascading delete");
                             let store = write_store.lock();
-                            for abs_path in &deleted_paths {
-                                let rel_path =
-                                    abs_path.strip_prefix(&repo_root).unwrap_or(abs_path);
-                                debug!(?rel_path, "watcher: cascading delete");
-                                if let Err(e) = store.delete_file_cascade(rel_path) {
-                                    warn!(?rel_path, "watcher: delete_file_cascade: {e}");
-                                } else {
-                                    did_delete = true;
-                                }
+                            match store.delete_files_cascade(&rel_paths) {
+                                Ok(()) => did_delete = true,
+                                Err(e) => warn!(
+                                    count = rel_paths.len(),
+                                    "watcher: delete_files_cascade: {e}"
+                                ),
                             }
                         }
 
@@ -1102,19 +1217,26 @@ impl ReconServer {
 
                     if to_parse.is_empty() {
                         // Even with no parse work, deletes invalidate caches.
+                        // Kick async refresh; keep serving prev snapshot until it lands.
                         if did_delete {
-                            cached_paths.store(Arc::new(Vec::new()));
-                            cached_file_count.store(0, std::sync::atomic::Ordering::Relaxed);
-                            cached_symbols.store(Arc::new(Vec::new()));
-                            cached_refs.store(Arc::new(Vec::new()));
-                            cached_call_graph.store(None);
+                            kick_async_refresh(
+                                &read_pool,
+                                &cached_paths,
+                                &cached_file_count,
+                                &cached_symbols,
+                                &cached_refs,
+                                &cached_call_graph,
+                            );
                         }
                         return;
                     }
 
-                    // Phase 2: Parse all files (NO locks held — pure CPU work)
+                    // Phase 2: Parse all files in parallel (NO locks held —
+                    // pure CPU work). `parse_file_with_content` is pure;
+                    // `LanguagePools` is `Arc`-cloned internally per parser.
+                    use rayon::prelude::*;
                     let parsed: Vec<indexer::ParsedFile> = to_parse
-                        .iter()
+                        .par_iter()
                         .filter_map(|(path, content)| {
                             let content_hash = recon_storage::hash::blake3_bytes(content);
                             let mtime = indexer::mtime_of(path);
@@ -1257,12 +1379,19 @@ impl ReconServer {
 
                     debug!(files = parsed.len(), "watcher batch indexed");
 
-                    // Invalidate all caches — new files/symbols may have been added or changed.
-                    cached_paths.store(Arc::new(Vec::new()));
-                    cached_file_count.store(0, std::sync::atomic::Ordering::Relaxed);
-                    cached_symbols.store(Arc::new(Vec::new()));
-                    cached_refs.store(Arc::new(Vec::new()));
-                    cached_call_graph.store(None);
+                    // Refresh caches asynchronously. Reads continue serving the
+                    // previous snapshot (briefly stale) until the new one lands —
+                    // strictly better than the old behavior, which cleared the
+                    // caches and forced the next read to pay ~350 ms of cold
+                    // `all_symbols` + `all_refs` synchronously.
+                    kick_async_refresh(
+                        &read_pool,
+                        &cached_paths,
+                        &cached_file_count,
+                        &cached_symbols,
+                        &cached_refs,
+                        &cached_call_graph,
+                    );
                 }));
 
                 if result.is_err() {
@@ -2670,12 +2799,22 @@ impl ReconServer {
         // Exact mode: try Tantivy first (sub-ms), fall back to grep only if empty
         let tantivy_hits = self.tantivy_search(params.0.query.clone(), 30).await;
         if !tantivy_hits.is_empty() {
+            // Tantivy hits carry symbol_id but no line number; resolve symbol
+            // line_start in one batched query so callers see real line numbers.
+            // Falls back to 0 only when the symbol row vanished mid-query.
+            let ids: Vec<u64> = tantivy_hits.iter().map(|h| h.symbol_id).collect();
+            let lines: AHashMap<u64, u32> = self
+                .read_pool
+                .symbol_locations_by_ids(&ids)
+                .map(|rows| rows.into_iter().map(|(id, _, line)| (id, line)).collect())
+                .unwrap_or_default();
             let entries: Vec<serde_json::Value> = tantivy_hits
                 .iter()
                 .map(|hit| {
+                    let line = lines.get(&hit.symbol_id).copied().unwrap_or(0);
                     text_hit_json(
                         hit.path.as_str(),
-                        0,
+                        line,
                         None,
                         hit.signature.as_deref().unwrap_or(hit.name.as_str()),
                     )
@@ -2878,29 +3017,50 @@ impl ReconServer {
     )]
     async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
         self.instrumented("code_find_strings", async move {
-        let paths = self.cached_file_paths();
+            let paths = self.cached_file_paths();
 
-        let abs_paths = self
-            .resolve_search_scope_async(&paths, params.0.filter.as_deref())
-            .await;
-        let q = TextQuery {
-            pattern: params.0.pattern.clone(),
-            is_regex: false,
-            max_results: 30,
-            scope: abs_paths,
-        };
-        let hits = self.text_searcher.search(&q).unwrap_or_default();
+            let abs_paths = self
+                .resolve_search_scope_async(&paths, params.0.filter.as_deref())
+                .await;
+            let q = TextQuery {
+                pattern: params.0.pattern.clone(),
+                is_regex: false,
+                max_results: 30,
+                scope: abs_paths,
+            };
+            let hits = self.text_searcher.search(&q).unwrap_or_default();
 
-        let entries: Vec<serde_json::Value> = hits
-            .iter()
-            .map(|h| {
-                let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
-                serde_json::json!({ "path": rel.to_string_lossy(), "line": h.line, "text": h.line_text, "kind": params.0.kind })
-            })
-            .collect();
+            // Pull the requested kind once so per-hit classification can filter.
+            // "both" (default) keeps every hit; "literal" / "comment" filter to
+            // hits whose match position on its line falls inside that context.
+            let want = params.0.kind.as_str();
+            let entries: Vec<serde_json::Value> = hits
+                .iter()
+                .filter_map(|h| {
+                    let classified = classify_string_hit(&h.line_text, &params.0.pattern);
+                    let keep = match want {
+                        "literal" => classified == StringHitKind::Literal,
+                        "comment" => classified == StringHitKind::Comment,
+                        _ => true, // "both" or anything else → no filter
+                    };
+                    if !keep {
+                        return None;
+                    }
+                    let rel = h.path.strip_prefix(&self.repo_root).unwrap_or(&h.path);
+                    Some(serde_json::json!({
+                        "path": rel.to_string_lossy(),
+                        "line": h.line,
+                        "text": h.line_text,
+                        "kind": classified.as_str(),
+                    }))
+                })
+                .collect();
 
-        redact_response(serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")))
-            }).await
+            redact_response(
+                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
+            )
+        })
+        .await
     }
 
     #[tool(
@@ -3219,6 +3379,70 @@ impl ServerHandler for ReconServer {
                 .to_string(),
         )
     }
+}
+
+/// Classification used by `code_find_strings` to filter hits between
+/// `literal` (inside a string) and `comment` (after a comment marker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StringHitKind {
+    Literal,
+    Comment,
+    Neither,
+}
+
+impl StringHitKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Literal => "literal",
+            Self::Comment => "comment",
+            Self::Neither => "neither",
+        }
+    }
+}
+
+/// Per-line classification of a hit by lexical context. Heuristic — not a
+/// full lexer — but distinguishes `// foo`, `/// foo`, `# foo`, `-- foo`,
+/// and ` * foo` from string literals on the same line. For inline comments
+/// (`fn x() // note`) we balance double-quote count before `//` so a `//`
+/// inside a string isn't mistaken for a comment opener.
+fn classify_string_hit(line: &str, pattern: &str) -> StringHitKind {
+    let Some(match_idx) = line.find(pattern) else {
+        return StringHitKind::Neither;
+    };
+    let prefix = &line[..match_idx];
+    let trimmed = prefix.trim_start();
+
+    // Whole-line comment markers: //, ///, /// , /*, *, #, --
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with("--")
+    {
+        return StringHitKind::Comment;
+    }
+    // `#` is a comment in Python/Bash/Ruby/TOML but `#[derive(...)]` in Rust
+    // is an attribute — exclude `#[`.
+    if trimmed.starts_with('#') && !trimmed.starts_with("#[") && !trimmed.starts_with("#!") {
+        return StringHitKind::Comment;
+    }
+
+    // Inline `//` after code: only counts as comment if it isn't inside a string.
+    if let Some(slash_idx) = prefix.find("//") {
+        let dq = prefix[..slash_idx].chars().filter(|&c| c == '"').count();
+        if dq % 2 == 0 {
+            return StringHitKind::Comment;
+        }
+    }
+
+    // Literal detection: odd quote count before the match means we're inside one.
+    let dq = prefix.chars().filter(|&c| c == '"').count();
+    let sq = prefix.chars().filter(|&c| c == '\'').count();
+    let bq = prefix.chars().filter(|&c| c == '`').count();
+    if dq % 2 == 1 || sq % 2 == 1 || bq % 2 == 1 {
+        return StringHitKind::Literal;
+    }
+
+    StringHitKind::Neither
 }
 
 /// Extract documentation comment from source code immediately before a symbol.

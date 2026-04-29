@@ -116,12 +116,57 @@ pub fn print_output(raw: &str, json: bool) {
         Value::Object(obj) if obj.contains_key("status") && obj.contains_key("files_indexed") => {
             print_reindex(obj, c)
         }
+        // Multi-find single-pattern result: {hits, pattern}
+        Value::Object(obj) if obj.contains_key("hits") && obj.contains_key("pattern") => {
+            print_multi_group(obj, c)
+        }
+        // Multi-find multi-pattern result: [{hits, pattern}, ...]
+        Value::Array(arr)
+            if arr
+                .first()
+                .and_then(Value::as_object)
+                .is_some_and(|o| o.contains_key("hits") && o.contains_key("pattern")) =>
+        {
+            for (i, item) in arr.iter().enumerate() {
+                if let Some(obj) = item.as_object() {
+                    if i > 0 {
+                        println!();
+                    }
+                    print_multi_group(obj, c);
+                }
+            }
+        }
         // Array of results (find, search, list, etc.)
         Value::Array(arr) => print_array(arr, c),
         _ => println!(
             "{}",
             serde_json::to_string_pretty(&val).unwrap_or(raw.to_string())
         ),
+    }
+}
+
+fn print_multi_group(obj: &serde_json::Map<String, Value>, c: &Colors) {
+    let pattern = obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+    let hits = obj.get("hits").and_then(|v| v.as_array());
+    let count = hits.map(|h| h.len()).unwrap_or(0);
+    println!(
+        "{bold}{pattern}{reset}  {green}{count}{reset} hit{}",
+        if count != 1 { "s" } else { "" },
+        bold = c.bold,
+        green = c.green,
+        reset = c.reset
+    );
+    if let Some(hits) = hits {
+        for h in hits {
+            let path = h.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let line = h.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+            let text = h.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+            println!(
+                "  {dim}{path}:{line}{reset}  {text}",
+                dim = c.dim,
+                reset = c.reset
+            );
+        }
     }
 }
 

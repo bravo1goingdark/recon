@@ -290,7 +290,7 @@ enum Command {
     },
     /// Push token-savings rollups to the dashboard (Pro/Team feature)
     ///
-    /// Reads the local telemetry counters in `.recon/recon.db` (populated
+    /// Reads the local telemetry counters in `.recon/index.db` (populated
     /// by every MCP tool call) and POSTs today's snapshot to the worker.
     /// Free tier returns a clear upgrade message rather than an error.
     /// Idempotent — re-running on the same day MAX-merges, never
@@ -369,11 +369,11 @@ enum ReposAction {
 enum SavingsAction {
     /// Push today's local telemetry rollup to the dashboard
     ///
-    /// Aggregates the per-tool counters in `.recon/recon.db` into one
+    /// Aggregates the per-tool counters in `.recon/index.db` into one
     /// daily row and POSTs to the recon worker. Repeated runs on the
     /// same day are idempotent (MAX-merged). Pro/Team only.
     Push {
-        /// Repository whose `.recon/recon.db` to read.
+        /// Repository whose `.recon/index.db` to read.
         /// Defaults to the current directory.
         #[arg(long)]
         repo: Option<std::path::PathBuf>,
@@ -383,7 +383,7 @@ enum SavingsAction {
     /// Reads the same data the agent would see via `code_savings`,
     /// without spinning up the MCP server.
     Show {
-        /// Repository whose `.recon/recon.db` to read.
+        /// Repository whose `.recon/index.db` to read.
         #[arg(long)]
         repo: Option<std::path::PathBuf>,
     },
@@ -1138,18 +1138,31 @@ async fn main() -> Result<()> {
             let license = recon_server::license::validate_license(None, &config_dir)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let limits = license.tier.limits();
-            eprintln!("Tier:      {}", license.tier.name());
-            eprintln!("Source:    {}", license.source);
-            eprintln!("Max repos: {}", limits.max_repos);
-            eprintln!("Max files: {}", limits.max_files);
-            eprintln!("Max LOC:   {}K", limits.max_loc / 1_000);
-            if license.expires_at > 0 {
-                eprintln!("Expires:   {} (unix)", license.expires_at);
+            if raw_json {
+                let json = serde_json::json!({
+                    "tier": license.tier.name(),
+                    "source": license.source.to_string(),
+                    "max_repos": limits.max_repos,
+                    "max_files": limits.max_files,
+                    "max_loc": limits.max_loc,
+                    "expires_at": license.expires_at,
+                    "message": license.message,
+                });
+                println!("{json}");
             } else {
-                eprintln!("Expires:   never");
-            }
-            if !license.message.is_empty() {
-                eprintln!("{}", license.message);
+                eprintln!("Tier:      {}", license.tier.name());
+                eprintln!("Source:    {}", license.source);
+                eprintln!("Max repos: {}", limits.max_repos);
+                eprintln!("Max files: {}", limits.max_files);
+                eprintln!("Max LOC:   {}K", limits.max_loc / 1_000);
+                if license.expires_at > 0 {
+                    eprintln!("Expires:   {} (unix)", license.expires_at);
+                } else {
+                    eprintln!("Expires:   never");
+                }
+                if !license.message.is_empty() {
+                    eprintln!("{}", license.message);
+                }
             }
             Ok(())
         }
@@ -1691,10 +1704,13 @@ async fn main() -> Result<()> {
         Command::Stats => {
             let server = read_server(repo)?;
             out(&server.query_tool("code_stats", "{}").await);
-            // Append global repo count (best-effort; no license required).
-            let config_dir = recon_server::license::global_config_dir();
-            if let Ok(repos) = recon_server::repos::load_repos(&config_dir) {
-                eprintln!("Indexed repos (global): {}", repos.len());
+            // Append global repo count for the human-readable view; suppress
+            // on --json so the output is pure parseable JSON.
+            if !raw_json {
+                let config_dir = recon_server::license::global_config_dir();
+                if let Ok(repos) = recon_server::repos::load_repos(&config_dir) {
+                    eprintln!("Indexed repos (global): {}", repos.len());
+                }
             }
             Ok(())
         }
@@ -1760,23 +1776,37 @@ async fn main() -> Result<()> {
                     })?;
                 let resp = recon_server::account::list_repos(&api_key)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                println!(
-                    "{} repo(s) registered ({}/{} on {})",
-                    resp.repos.len(),
-                    resp.repos.len(),
-                    resp.limit,
-                    resp.tier
-                );
-                for r in &resp.repos {
+                if raw_json {
+                    let json = serde_json::json!({
+                        "tier": resp.tier,
+                        "limit": resp.limit,
+                        "count": resp.repos.len(),
+                        "repos": resp.repos.iter().map(|r| serde_json::json!({
+                            "fingerprint": r.fingerprint,
+                            "first_seen_at": r.first_seen_at,
+                            "last_seen_at": r.last_seen_at,
+                        })).collect::<Vec<_>>(),
+                    });
+                    println!("{json}");
+                } else {
                     println!(
-                        "  {}  first_seen={}  last_seen={}",
-                        &r.fingerprint[..16],
-                        r.first_seen_at,
-                        r.last_seen_at
+                        "{} repo(s) registered ({}/{} on {})",
+                        resp.repos.len(),
+                        resp.repos.len(),
+                        resp.limit,
+                        resp.tier
                     );
-                }
-                if resp.repos.is_empty() {
-                    println!("(Tip: `recon init` in a project will register that repo here.)");
+                    for r in &resp.repos {
+                        println!(
+                            "  {}  first_seen={}  last_seen={}",
+                            &r.fingerprint[..16],
+                            r.first_seen_at,
+                            r.last_seen_at
+                        );
+                    }
+                    if resp.repos.is_empty() {
+                        println!("(Tip: `recon init` in a project will register that repo here.)");
+                    }
                 }
                 Ok(())
             }
@@ -1830,7 +1860,15 @@ async fn main() -> Result<()> {
         },
         Command::Doctor { json } => doctor::run(&repo, json),
         Command::Version => {
-            println!("recon {}", env!("CARGO_PKG_VERSION"));
+            if raw_json {
+                let json = serde_json::json!({
+                    "name": "recon",
+                    "version": env!("CARGO_PKG_VERSION"),
+                });
+                println!("{json}");
+            } else {
+                println!("recon {}", env!("CARGO_PKG_VERSION"));
+            }
             Ok(())
         }
         Command::Update { check, force } => update::run(check, force),

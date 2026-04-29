@@ -37,31 +37,15 @@ fn make_ref(i: u64) -> Ref {
     }
 }
 
-fn setup_store(n: u64) -> Store {
-    let store = Store::open_memory().unwrap();
-    let meta = FileMeta {
-        path: PathBuf::from("src/lib.rs"),
-        lang: Language::Rust,
-        size_bytes: 1000,
-        content_hash: [0u8; 32],
-        mtime: 0,
-        indexed_at: 0,
-    };
-    store.upsert_file(&meta).unwrap();
-    let symbols: Vec<Symbol> = (0..n).map(make_symbol).collect();
-    store.insert_symbols_batch(&symbols).unwrap();
-    store
-}
-
 fn bench_symbol_exact_lookup(c: &mut Criterion) {
-    let store = setup_store(10_000);
+    let store = setup_store_multi_file(10_000);
     c.bench_function("find_symbols_exact/10k", |b| {
         b.iter(|| store.find_symbols_exact("sym_5000", 10).unwrap())
     });
 }
 
 fn bench_symbol_fuzzy_search(c: &mut Criterion) {
-    let store = setup_store(10_000);
+    let store = setup_store_multi_file(10_000);
     c.bench_function("search_symbols_fuzzy/10k", |b| {
         b.iter(|| store.search_symbols_fuzzy("sym_50", 20).unwrap())
     });
@@ -72,15 +56,18 @@ fn bench_batch_insert(c: &mut Criterion) {
     c.bench_function("insert_symbols_batch/1k", |b| {
         b.iter(|| {
             let store = Store::open_memory().unwrap();
-            let meta = FileMeta {
-                path: PathBuf::from("src/lib.rs"),
-                lang: Language::Rust,
-                size_bytes: 1000,
-                content_hash: [0u8; 32],
-                mtime: 0,
-                indexed_at: 0,
-            };
-            store.upsert_file(&meta).unwrap();
+            let n_files = 1000u64.div_ceil(45);
+            for file_idx in 0..n_files {
+                let meta = FileMeta {
+                    path: PathBuf::from(format!("src/file_{file_idx}.rs")),
+                    lang: Language::Rust,
+                    size_bytes: 1000,
+                    content_hash: [0u8; 32],
+                    mtime: 0,
+                    indexed_at: 0,
+                };
+                store.upsert_file(&meta).unwrap();
+            }
             store.insert_symbols_batch(&symbols).unwrap();
         })
     });
@@ -102,6 +89,57 @@ fn bench_all_refs_300k(c: &mut Criterion) {
     c.bench_function("all_refs/300k_across_1780_files", |b| {
         b.iter(|| store.all_refs().unwrap())
     });
+}
+
+/// Loop-of-`delete_file_cascade` baseline. Mirrors the pre-batching shape:
+/// one transaction per file. Kept around as a regression guard.
+fn bench_delete_cascade_loop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("delete_cascade_loop");
+    for &n_files in &[100u64, 500u64] {
+        group.bench_function(format!("{n_files}_files"), |b| {
+            b.iter_batched(
+                || {
+                    let store = setup_store_with_refs(n_files * 45);
+                    let paths: Vec<PathBuf> = (0..n_files)
+                        .map(|i| PathBuf::from(format!("src/file_{i}.rs")))
+                        .collect();
+                    (store, paths)
+                },
+                |(store, paths)| {
+                    for p in &paths {
+                        store.delete_file_cascade(p).unwrap();
+                    }
+                },
+                criterion::BatchSize::SmallInput,
+            )
+        });
+    }
+    group.finish();
+}
+
+/// Batched `delete_files_cascade` — one transaction for N files.
+/// Compare against `bench_delete_cascade_loop`.
+fn bench_delete_cascade_batched(c: &mut Criterion) {
+    let mut group = c.benchmark_group("delete_cascade_batched");
+    for &n_files in &[100u64, 500u64] {
+        group.bench_function(format!("{n_files}_files"), |b| {
+            b.iter_batched(
+                || {
+                    let store = setup_store_with_refs(n_files * 45);
+                    let paths: Vec<PathBuf> = (0..n_files)
+                        .map(|i| PathBuf::from(format!("src/file_{i}.rs")))
+                        .collect();
+                    (store, paths)
+                },
+                |(store, paths)| {
+                    let refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+                    store.delete_files_cascade(&refs).unwrap();
+                },
+                criterion::BatchSize::SmallInput,
+            )
+        });
+    }
+    group.finish();
 }
 
 fn setup_store_multi_file(n: u64) -> Store {
@@ -138,5 +176,7 @@ criterion_group!(
     bench_batch_insert,
     bench_all_symbols_80k,
     bench_all_refs_300k,
+    bench_delete_cascade_loop,
+    bench_delete_cascade_batched,
 );
 criterion_main!(benches);

@@ -55,7 +55,7 @@ fn make_server(root: &Path) -> ReconServer {
     let recon_dir = root.join(".recon");
     fs::create_dir_all(&recon_dir).unwrap();
 
-    let db_path = recon_dir.join("recon.db");
+    let db_path = recon_dir.join("index.db");
     let store = Store::open(&db_path).unwrap();
 
     let tantivy_dir = recon_dir.join("tantivy");
@@ -269,7 +269,7 @@ async fn main() {
     // ── Phase 6: Index size ────────────────────────────────────────
     println!("── Phase 6: Disk usage ─────────────────────────────────");
     if recon_dir.exists() {
-        let db_size = fs::metadata(recon_dir.join("recon.db"))
+        let db_size = fs::metadata(recon_dir.join("index.db"))
             .map(|m| m.len())
             .unwrap_or(0);
         let tantivy_size = dir_size(&recon_dir.join("tantivy"));

@@ -1,7 +1,7 @@
 //! `recon savings` — push and inspect local token-savings telemetry.
 //!
 //! The MCP server tracks per-tool counters (calls, response_tokens,
-//! baseline_tokens, latency_micros) in `.recon/recon.db` under the
+//! baseline_tokens, latency_micros) in `.recon/index.db` under the
 //! `meta` table with `tel:tool:*` keys. This subcommand reads them,
 //! aggregates today's snapshot, and POSTs to the dashboard worker.
 //!
@@ -63,7 +63,7 @@ struct UpsellResponse {
     message: String,
 }
 
-/// Per-tool counter snapshot loaded from `.recon/recon.db`. Mirrors
+/// Per-tool counter snapshot loaded from `.recon/index.db`. Mirrors
 /// `recon_server::telemetry::CounterSnapshot` so a future shape change
 /// in either side is a compile error rather than a silent skew.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -132,17 +132,17 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// Locate `.recon/recon.db` for the requested repo (or the current
+/// Locate `.recon/index.db` for the requested repo (or the current
 /// directory when no override is supplied).
 fn resolve_db_path(repo: Option<PathBuf>) -> Result<PathBuf> {
     let root = match repo {
         Some(p) => p,
         None => std::env::current_dir().context("could not get current directory")?,
     };
-    let db = root.join(".recon").join("recon.db");
+    let db = root.join(".recon").join("index.db");
     if !db.exists() {
         return Err(anyhow!(
-            "no .recon/recon.db at {} — run `recon init` or `recon serve` here first",
+            "no .recon/index.db at {} — run `recon init` or `recon serve` here first",
             root.display()
         ));
     }
