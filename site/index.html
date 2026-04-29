@@ -193,6 +193,17 @@
     font-weight:300;letter-spacing:-0.01em;
   }
   .lede b{color:var(--ink);font-weight:500}
+  .lede-points{
+    margin-top:18px;max-width:560px;list-style:none;
+    display:flex;flex-direction:column;gap:8px;
+    font-size:15px;line-height:1.45;color:var(--ink-2);
+  }
+  .lede-points li{padding-left:18px;position:relative}
+  .lede-points li::before{
+    content:"";position:absolute;left:0;top:9px;
+    width:6px;height:6px;border-radius:50%;background:var(--clay);
+  }
+  .lede-points b{color:var(--ink);font-weight:500}
 
   .cta{display:flex;gap:10px;margin-top:36px;flex-wrap:wrap}
   .btn{
@@ -453,14 +464,14 @@
         <p class="lede">
           <b>recon</b> is a local-first code intelligence <b>MCP server</b> for AI coding agents.
           A <b>small Rust binary</b> that replaces <i>Read</i>, <i>Grep</i>, and <i>Glob</i>
-          with <b>20 symbol-aware tools</b> — including <b>graph-aware navigation</b>
-          (call paths, callers, callees, blast-radius), <b>multi-repo activation</b>,
-          across <b>seven languages</b>, with
-          <b>per-call measured token-savings</b> so you can prove the win to finance.
-          <b>15–30× fewer tokens</b> on typical exploration. Source files stay local;
-          only chunk text (tens of tokens, no logs, no storage on our side) travels for
-          embedding. Air-gapped users can rebuild with <code>--features local-embed</code> for offline inference.
+          with <b>20 symbol-aware tools</b>. <b>15–30× fewer tokens</b> on typical exploration.
         </p>
+        <ul class="lede-points">
+          <li><b>Graph-aware navigation</b> — call paths, callers, callees, blast-radius. Across <b>seven languages</b>.</li>
+          <li><b>Multi-repo activation</b> — switch repos at runtime via <code>code_activate_repo</code>; <code>code_list_repos</code> shows what's loaded. Sessions persist across restarts.</li>
+          <li><b>Measured token-savings</b> — per-call against the Read+Grep alternative, so you can prove the win to finance.</li>
+          <li><b>Privacy-first</b> — source stays local. Only chunk text (no logs, no storage) travels for embedding; rebuild with <code>--features local-embed</code> for offline inference.</li>
+        </ul>
         <div class="cta">
           <a class="btn primary" href="#install">Install recon <span class="arr">→</span></a>
           <a class="btn ghost" href="#tools">Browse the 20 tools</a>
