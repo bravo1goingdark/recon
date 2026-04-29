@@ -418,10 +418,22 @@ async fn shutdown_with_timeout(server: &recon_server::server::ReconServer) {
 /// Pure side-effect, never blocks shutdown. All failures are logged
 /// to stderr so an operator running `recon serve --log debug` sees
 /// them, but the process exit code remains whatever `serve` produced.
-/// Free-tier users see the upsell text once per session, then nothing
-/// until they upgrade — fine because the env var is opt-in.
+///
+/// Default-on as of v0.5.0 — most paid users never set the env var so
+/// the dashboard would show empty / upsell state forever despite live
+/// telemetry sitting in `.recon/index.db`. Privacy framing: the push
+/// only sends the aggregated counters (calls, response_tokens,
+/// baseline_tokens, latency_micros_total) keyed by tool name plus the
+/// licensed user's API key — no source, no paths, no logs (already the
+/// case before this flip; see crates/recon-cli/src/savings.rs).
+///
+/// Opt out by setting `RECON_AUTO_PUSH_SAVINGS=0` (or `false` / `no`
+/// / `off`). Anything else (including unset) is treated as on.
 fn maybe_auto_push_savings(repo: &Path) {
-    if std::env::var("RECON_AUTO_PUSH_SAVINGS").ok().as_deref() != Some("1") {
+    let raw = std::env::var("RECON_AUTO_PUSH_SAVINGS").unwrap_or_default();
+    let trimmed = raw.trim().to_ascii_lowercase();
+    let opted_out = matches!(trimmed.as_str(), "0" | "false" | "no" | "off");
+    if opted_out {
         return;
     }
     let repo_buf = repo.to_path_buf();
