@@ -753,15 +753,12 @@ redact_secrets = <span class="h">true</span>
 allow_sensitive = <span class="h">false</span></pre>
 
     <h3>Environment variables</h3>
+    <p>Two supported user-facing knobs. Other <code>RECON_*</code> variables exist in the source as internal escape hatches for tests and operations — they're not part of the public API and may be renamed or removed without a deprecation cycle.</p>
     <table>
       <thead><tr><th>Variable</th><th>What it controls</th></tr></thead>
       <tbody>
-        <tr><td><code>RECON_API_URL</code></td><td>Worker base URL (defaults to the production endpoint).</td></tr>
-        <tr><td><code>RECON_CONFIG_DIR</code></td><td>Override the global config dir (defaults to <code>~/.config/recon/</code>).</td></tr>
-        <tr><td><code>RECON_REQUEST_TIMEOUT_SECS</code></td><td>Per-request deadline for tool calls (default 30, range 1–600).</td></tr>
-        <tr><td><code>RECON_LICENSE_REVALIDATE_SECS</code></td><td>How often <code>recon serve</code> re-validates its license against the worker (default 900, range 60–86400). On a worker rejection (revoked key, deleted account, sub expiry) the running server shuts down within one tick. <span class="badge">v0.3.2+</span></td></tr>
         <tr><td><code>RECON_AUTO_PUSH_SAVINGS</code></td><td>Set to <code>1</code> to auto-push the local token-savings rollup to the dashboard when each <code>recon serve</code> session ends. Pro/Team only. <span class="badge">v0.3.2+</span></td></tr>
-        <tr><td><code>RECON_WINDSURF_CONFIG_PATH</code></td><td>Override Windsurf's global MCP config path (test-only).</td></tr>
+        <tr><td><code>RECON_LOG_FORMAT</code></td><td>Set to <code>json</code> to emit structured logs on stderr (one JSON object per event). Default is human-readable text. Useful when piping into a log aggregator.</td></tr>
       </tbody>
     </table>
 
