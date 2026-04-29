@@ -24,6 +24,11 @@ export default defineWorkersConfig({
         wrangler: { configPath: "./wrangler.toml" },
         miniflare: {
           d1Databases: ["RECON_DB"],
+          // EMBED_CACHE is the chunk-vector cache used by /v1/embed. Tests
+          // that don't touch embed run unaffected; the embed test suite
+          // pre-populates entries via env.EMBED_CACHE.put before issuing
+          // requests, then asserts cache-hit behavior.
+          kvNamespaces: ["EMBED_CACHE"],
           compatibilityDate: "2025-04-01",
           compatibilityFlags: ["nodejs_compat"],
           bindings: {
@@ -42,6 +47,12 @@ export default defineWorkersConfig({
             // Must match the CLI build's RECON_LICENSE_HMAC_KEY in integration;
             // tests just need any non-empty string for the Rust signing path.
             LICENSE_HMAC_SECRET: "test-license-hmac-secret",
+            // /v1/embed forwards uncached batches here. Tests use a sentinel
+            // host that triggers the route's network-error path (503) unless
+            // they install a fetch mock first. The MODAL_AUTH_TOKEN is the
+            // shape the route expects in the outbound Authorization header.
+            MODAL_EMBED_URL: "https://modal.test/embed",
+            MODAL_AUTH_TOKEN: "test-modal-bearer",
           },
         },
       },

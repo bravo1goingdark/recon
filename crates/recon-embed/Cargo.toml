@@ -8,11 +8,9 @@ description = "Local ONNX embeddings and vector search for recon"
 
 [dependencies]
 recon-core = { workspace = true }
-fastembed = { workspace = true }
 rusqlite = { workspace = true }
 sqlite-vec = { workspace = true }
 crossbeam-queue = { workspace = true }
-crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
@@ -20,6 +18,22 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ahash = { workspace = true }
 bytemuck = { workspace = true }
+
+# Local ONNX inference path. Pulled in only when `local-inference`
+# is enabled — keeps the default `recon-cli` binary lean and the
+# aarch64 cross-compile happy. The hosted-embed path (default)
+# skips fastembed (→ ort-sys → openssl-sys) and the channel-driven
+# embedder thread; only the vector store and read pool remain.
+fastembed = { workspace = true, optional = true }
+crossbeam-channel = { workspace = true, optional = true }
+
+[features]
+default = []
+# Compile the local fastembed-backed `Embedder` and the channel-based
+# `EmbedService`. When disabled, only `VectorStore` and `VecReadPool`
+# are exposed; callers (hosted-embed) generate vectors externally and
+# feed them into the store.
+local-inference = ["dep:fastembed", "dep:crossbeam-channel"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

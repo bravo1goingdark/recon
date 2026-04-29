@@ -1,0 +1,4 @@
+# Python bytecode cache emitted by `modal deploy` when it
+# introspects the app file locally.
+__pycache__/
+*.pyc

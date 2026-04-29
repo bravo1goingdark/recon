@@ -24,11 +24,12 @@ crossbeam-queue = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-recon-embed = { workspace = true, optional = true }
-
-[features]
-default = []
-embed = ["dep:recon-embed"]
+# recon-embed is unconditionally linked because the vector-store /
+# read-pool layer is always available (no fastembed / ONNX). When
+# `local-inference` is wanted, the consuming crate (recon-server)
+# enables `recon-embed/local-inference` directly via its own
+# `local-embed` feature.
+recon-embed = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -2,6 +2,7 @@
 #![deny(missing_docs)]
 
 pub mod config;
+pub mod embed;
 pub mod error;
 pub mod lang;
 pub mod redact;

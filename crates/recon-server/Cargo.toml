@@ -38,11 +38,29 @@ ulid = { workspace = true }
 # the unstable `windows_by_handle` feature; this crate wraps the
 # Win32 GetFileInformationByHandle API on stable.
 file-id = "0.2"
-recon-embed = { workspace = true, optional = true }
+
+# Hosted-embed default: ureq+rustls HTTP client for /v1/embed.
+# Tiny dependency (no ONNX, no openssl-sys), always linked.
+recon-embed-client = { workspace = true }
+
+# Vector store + read pool (sqlite-vec, no ONNX) are always linked.
+# Local fastembed inference is opt-in via the `local-embed` feature
+# below, which forwards to `recon-embed/local-inference`.
+recon-embed = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 
 [features]
 default = []
-embed = ["dep:recon-embed", "recon-indexer/embed"]
+# Enable offline ONNX inference. Replaces the hosted endpoint with
+# fastembed's local Jina v2-base-code model. ~50 MB binary inflation;
+# breaks aarch64 cross-compile without openssl sysroot. Use this for
+# regulated / air-gapped environments where chunk text must never
+# leave the machine. The hosted client (`recon-embed-client`) is
+# still linked but unused on this code path.
+local-embed = ["recon-embed/local-inference"]
+# Compatibility alias for downstream callers who used the old
+# `embed` feature name. `local-embed` is the real flag going
+# forward; this alias may go away in a future minor.
+embed = ["local-embed"]

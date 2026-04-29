@@ -32,6 +32,15 @@ pub enum Error {
     /// Configuration error.
     #[error("config error: {0}")]
     Config(String),
+
+    /// Embedding service failure (local model or hosted endpoint).
+    #[error("embed error: {0}")]
+    Embed(String),
+
+    /// Hosted embedding service unavailable — caller can fail-closed
+    /// to lexical-only search and surface a non-fatal warning.
+    #[error("embed service unavailable")]
+    EmbedUnavailable,
 }
 
 /// Stable numeric codes returned on tool-error responses.
@@ -112,6 +121,7 @@ impl Error {
             Error::Protocol(_) => ReconErrorCode::Internal,
             Error::PathTraversal(_) => ReconErrorCode::PathTraversal,
             Error::Config(_) => ReconErrorCode::Internal,
+            Error::Embed(_) | Error::EmbedUnavailable => ReconErrorCode::Internal,
         }
     }
 }

@@ -62,16 +62,25 @@ pub struct ReconServer {
     /// `meta` table every `FLUSH_THRESHOLD` calls + on shutdown so
     /// lifetime totals survive restarts.
     telemetry: Arc<crate::telemetry::Telemetry>,
-    /// Lock-free embedding service — set once in `init_embed`, read on every
-    /// embed-backed tool call. `ArcSwapOption` gives true lock-free reads.
-    #[cfg(feature = "embed")]
-    embed_service: Arc<arc_swap::ArcSwapOption<recon_embed::EmbedService>>,
-    /// Lock-free read pool for vector similarity search. Same set-once-read-many
-    /// pattern as `embed_service`.
-    #[cfg(feature = "embed")]
+    /// Embedding service — set once in `init_embed`, read on every
+    /// embed-backed tool call. Holds a trait object so the same struct
+    /// works whether the binary was built with the hosted client
+    /// (default) or the local fastembed backend (`--features
+    /// local-embed`). `None` until `init_embed` resolves credentials /
+    /// loads the model.
+    ///
+    /// Stored under `RwLock` rather than `arc_swap::ArcSwapOption`
+    /// because the latter does not accept `?Sized` trait objects in
+    /// the version we ship. Reads happen on the slow path (semantic
+    /// search, watcher catch-up) so RwLock contention is in noise vs
+    /// the inference round-trip itself.
+    embed_service: Arc<parking_lot::RwLock<Option<Arc<dyn recon_core::embed::EmbedService>>>>,
+    /// Lock-free read pool for vector similarity search. Always linked
+    /// (sqlite-vec only, no ONNX); the storage layer is identical for
+    /// hosted vs local — only the *generator* (the embed service)
+    /// changes.
     vec_read_pool: Arc<arc_swap::ArcSwapOption<recon_embed::VecReadPool>>,
     /// Write handle — taken by `start_watcher`, None afterwards.
-    #[cfg(feature = "embed")]
     vec_writer: Arc<Mutex<Option<recon_embed::VectorStore>>>,
     /// Cooperative shutdown flag — watcher loop polls this between batches.
     shutdown_flag: Arc<AtomicBool>,
@@ -362,11 +371,8 @@ impl ReconServer {
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             watcher_handle: Arc::new(Mutex::new(None)),
             license: Arc::new(ArcSwap::new(Arc::new(None))),
-            #[cfg(feature = "embed")]
-            embed_service: Arc::new(arc_swap::ArcSwapOption::const_empty()),
-            #[cfg(feature = "embed")]
+            embed_service: Arc::new(parking_lot::RwLock::new(None)),
             vec_read_pool: Arc::new(arc_swap::ArcSwapOption::const_empty()),
-            #[cfg(feature = "embed")]
             vec_writer: Arc::new(Mutex::new(None)),
         })
     }
@@ -700,17 +706,63 @@ impl ReconServer {
         redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
-    /// Initialize the embedding engine (model download on first run).
+    /// Initialize the embedding engine + open the vector store.
     ///
-    /// Spawns the embed worker thread and opens the vector store. After this
-    /// returns, [`start_watcher`] must be called to hand the write handle to
-    /// the watcher — `vec_writer` is intentionally `None` until then.
+    /// Two backends, switched at compile time:
     ///
-    /// [`start_watcher`]: ReconServer::start_watcher
-    #[cfg(feature = "embed")]
+    /// - **Default** (no extra features): hosted client via
+    ///   [`recon_embed_client::HostedEmbedService`]. Reads the API key
+    ///   from the credentials file (`recon login` must have run);
+    ///   returns successfully with no embed service if credentials are
+    ///   missing or `RECON_NO_EMBED=1` is set, so `recon serve` still
+    ///   starts and lexical-only tools keep working.
+    /// - **`--features local-embed`**: spawns a fastembed/ONNX worker
+    ///   thread and stores the resulting `recon_embed::EmbedService`
+    ///   adapted to the trait.
+    ///
+    /// Vector storage opens unconditionally — the storage layer is
+    /// identical whether the generator is local or hosted.
     pub async fn init_embed(&self) -> Result<(), recon_core::error::Error> {
         let vec_dir = self.repo_root.join(".recon").join("vectors");
 
+        let svc = self.build_embed_service()?;
+        let vs = recon_embed::VectorStore::open(&vec_dir)
+            .map_err(|e| recon_core::error::Error::Search(format!("vector store open: {e}")))?;
+        let pool = Arc::new(
+            recon_embed::VecReadPool::new(&vec_dir, 4)
+                .map_err(|e| recon_core::error::Error::Search(format!("vec read pool: {e}")))?,
+        );
+        if let Some(svc) = svc {
+            *self.embed_service.write() = Some(svc);
+            info!("embed service initialized");
+        } else {
+            warn!(
+                "embed service unavailable (no credentials or RECON_NO_EMBED=1) — \
+                 semantic search will fail closed; lexical search is unaffected"
+            );
+        }
+        self.vec_read_pool.store(Some(pool));
+        *self.vec_writer.lock() = Some(vs);
+        Ok(())
+    }
+
+    /// Default backend: hosted client. Credentials missing → `None`,
+    /// not an error: server still starts.
+    #[cfg(not(feature = "local-embed"))]
+    fn build_embed_service(
+        &self,
+    ) -> Result<Option<Arc<dyn recon_core::embed::EmbedService>>, recon_core::error::Error> {
+        Ok(recon_embed_client::HostedEmbedService::from_env()
+            .map(|s| Arc::new(s) as Arc<dyn recon_core::embed::EmbedService>))
+    }
+
+    /// Local fastembed backend. Reads from `RECON_EMBED_DIR` if set,
+    /// otherwise downloads the default Jina v2-base-code model on
+    /// first run.
+    #[cfg(feature = "local-embed")]
+    fn build_embed_service(
+        &self,
+    ) -> Result<Option<Arc<dyn recon_core::embed::EmbedService>>, recon_core::error::Error> {
         let embedder = if let Ok(dir) = std::env::var("RECON_EMBED_DIR") {
             let model_dir = std::path::Path::new(&dir);
             info!(dir = %dir, "using local embedding model");
@@ -724,17 +776,7 @@ impl ReconServer {
             Arc::new(recon_embed::EmbedService::spawn(embedder).map_err(|e| {
                 recon_core::error::Error::Search(format!("embed thread spawn: {e}"))
             })?);
-        let vs = recon_embed::VectorStore::open(&vec_dir)
-            .map_err(|e| recon_core::error::Error::Search(format!("vector store open: {e}")))?;
-        let pool = Arc::new(
-            recon_embed::VecReadPool::new(&vec_dir, 4)
-                .map_err(|e| recon_core::error::Error::Search(format!("vec read pool: {e}")))?,
-        );
-        self.embed_service.store(Some(svc));
-        self.vec_read_pool.store(Some(pool));
-        *self.vec_writer.lock() = Some(vs);
-        info!("embedding engine initialized");
-        Ok(())
+        Ok(Some(svc as Arc<dyn recon_core::embed::EmbedService>))
     }
 
     /// Run initial indexing of the repo (SQLite + Tantivy).
@@ -1048,12 +1090,12 @@ impl ReconServer {
         // the check below short-circuits, and we keep v0.3.3 behavior.
         let initial_db_inode: Option<file_id::FileId> = file_id(&repo_root.join(".recon/index.db"));
         // Snapshot the Arc handles once; the hot path inside the loop needs no locks.
-        #[cfg(feature = "embed")]
-        let embed_svc: Option<Arc<recon_embed::EmbedService>> = self.embed_service.load_full();
-        #[cfg(feature = "embed")]
+        // Trait-object handle works for both the hosted client and the local
+        // fastembed backend.
+        let embed_svc: Option<Arc<dyn recon_core::embed::EmbedService>> =
+            self.embed_service.read().clone();
         let vec_pool: Option<Arc<recon_embed::VecReadPool>> = self.vec_read_pool.load_full();
         // Take the write handle — watcher owns it exclusively from here.
-        #[cfg(feature = "embed")]
         let vec_writer: Option<recon_embed::VectorStore> = self.vec_writer.lock().take();
 
         let handle = tokio::task::spawn_blocking(move || {
@@ -1073,7 +1115,9 @@ impl ReconServer {
 
             // ── One-time catch-up: embed any symbols not yet in the vector store ──
             // Runs before the event loop so the watcher thread owns vec_writer exclusively.
-            #[cfg(feature = "embed")]
+            // Skipped when `embed_svc` is None (no credentials, RECON_NO_EMBED=1, or
+            // hosted endpoint unreachable at startup) — semantic search degrades to
+            // no-op, lexical-only paths keep working.
             if let (Some(ref svc), Some(ref pool), Some(ref writer)) =
                 (&embed_svc, &vec_pool, &vec_writer)
             {
@@ -1157,7 +1201,7 @@ impl ReconServer {
                                                     .get(s.byte_range.clone())
                                                     .and_then(|b| std::str::from_utf8(b).ok())
                                                     .unwrap_or("");
-                                                recon_embed::Embedder::format_symbol(s, body)
+                                                recon_embed::format_symbol(s, body)
                                             })
                                             .collect();
                                         let vecs = match svc.embed_batch(texts) {
@@ -1252,9 +1296,7 @@ impl ReconServer {
                     if !deleted_paths.is_empty() {
                         // Snapshot symbol IDs BEFORE the SQLite cascade — embeddings
                         // live in a separate db and must be cleaned up by ID.
-                        #[cfg(feature = "embed")]
                         let mut deleted_symbol_ids: Vec<u64> = Vec::new();
-                        #[cfg(feature = "embed")]
                         if vec_writer.is_some() {
                             for abs_path in &deleted_paths {
                                 let rel_path =
@@ -1306,7 +1348,6 @@ impl ReconServer {
                         // Note: orphan embeddings from deletes that happened before
                         // this fix shipped are not cleaned up here; force-reindex
                         // remains the recovery path for those.
-                        #[cfg(feature = "embed")]
                         if let Some(ref writer) = vec_writer {
                             if !deleted_symbol_ids.is_empty() {
                                 if let Err(e) = writer.delete_by_symbol_ids(&deleted_symbol_ids) {
@@ -1409,7 +1450,8 @@ impl ReconServer {
                     // Phase 5: Update vector embeddings — fully lock-free.
                     // embed_svc, vec_pool are Arcs cloned before the loop.
                     // vec_writer is owned exclusively by this thread.
-                    #[cfg(feature = "embed")]
+                    // No-op when embed_svc is None (no credentials, RECON_NO_EMBED=1,
+                    // or hosted endpoint unreachable at startup).
                     if let (Some(ref svc), Some(ref pool), Some(ref writer)) =
                         (&embed_svc, &vec_pool, &vec_writer)
                     {
@@ -1469,11 +1511,12 @@ impl ReconServer {
                                                 .and_then(|b| b.get(s.byte_range.clone()))
                                                 .and_then(|b| std::str::from_utf8(b).ok())
                                                 .unwrap_or("");
-                                            recon_embed::Embedder::format_symbol(s, body)
+                                            recon_embed::format_symbol(s, body)
                                         })
                                         .collect();
 
-                                    // Channel send — no lock, blocks only for ONNX inference
+                                    // Channel send (local) or HTTP round-trip (hosted) —
+                                    // no lock either way; the trait abstracts both.
                                     let vecs = match svc.embed_batch(texts) {
                                         Ok(v) => v,
                                         Err(e) => {
@@ -2156,12 +2199,12 @@ impl ReconServer {
                     .collect();
             }
 
-            // Tier 3: Semantic embedding fallback (feature-gated)
-            #[allow(unused_mut)]
+            // Tier 3: Semantic embedding fallback. Always linked, but
+            // a no-op when no embed service is initialised (no credentials,
+            // RECON_NO_EMBED=1, hosted endpoint failed at startup).
             let mut from_embedding = false;
-            #[cfg(feature = "embed")]
             if results.is_empty() {
-                let svc = self.embed_service.load_full();
+                let svc = self.embed_service.read().clone();
                 let pool = self.vec_read_pool.load_full();
                 if let (Some(svc), Some(pool)) = (svc, pool) {
                     let query = params.0.name.clone();
@@ -2915,17 +2958,19 @@ impl ReconServer {
                 .resolve_search_scope_async(&paths, params.0.filter.as_deref())
                 .await;
 
-            // Semantic mode — fully lock-free via EmbedService channel + VecReadPool.
+            // Semantic mode — embed the query and search the local vector store.
             // No measured baseline: there's no plain grep alternative for vector
             // search, so the call doesn't accrue savings credit on either side.
-            #[cfg(feature = "embed")]
+            // Backend (hosted vs local) is selected at compile time by the
+            // `local-embed` feature flag; this code path is identical either way.
             if params.0.mode == "semantic" {
-                let svc = self.embed_service.load_full();
+                let svc = self.embed_service.read().clone();
                 let pool = self.vec_read_pool.load_full();
                 match (svc, pool) {
                     (Some(svc), Some(pool)) => {
-                        // embed_one blocks the caller waiting on the ONNX worker thread;
-                        // use spawn_blocking so we don't stall the tokio executor.
+                        // embed_one is sync and may block on HTTP (hosted) or
+                        // ONNX (local); spawn_blocking so the tokio executor
+                        // stays responsive either way.
                         let query = params.0.query.clone();
                         let query_vec = match tokio::task::spawn_blocking(move || {
                             svc.embed_one(&query)
@@ -2955,18 +3000,12 @@ impl ReconServer {
                         );
                     }
                     _ => return (
-                        "semantic search requires embed feature to be initialized (run init_embed)"
+                        "semantic search requires the embed service — run `recon login <key>`, \
+                         or set `RECON_NO_EMBED=1` to disable this mode and fall back to lexical."
                             .into(),
                         None,
                     ),
                 }
-            }
-            #[cfg(not(feature = "embed"))]
-            if params.0.mode == "semantic" {
-                return (
-                    "semantic search requires the 'embed' feature flag".into(),
-                    None,
-                );
             }
 
             if params.0.mode == "hybrid" {

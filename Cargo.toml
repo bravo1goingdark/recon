@@ -16,6 +16,7 @@ recon-parser = { path = "crates/recon-parser" }
 recon-storage = { path = "crates/recon-storage" }
 recon-search = { path = "crates/recon-search" }
 recon-embed = { path = "crates/recon-embed" }
+recon-embed-client = { path = "crates/recon-embed-client" }
 recon-indexer = { path = "crates/recon-indexer" }
 recon-server = { path = "crates/recon-server" }
 
