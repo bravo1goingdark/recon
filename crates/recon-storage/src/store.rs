@@ -63,6 +63,12 @@ impl Store {
         )
         .map_err(|e| Error::Storage(e.to_string()))?;
 
+        // Writer hot path uses ~30 distinct prepare_cached() statements
+        // (batch_index_files chunks, refs upsert, FTS sync, meta IO …).
+        // Default LRU is 16; raise to 128 so the bulk-insert path doesn't
+        // re-prepare every chunk.
+        conn.set_prepared_statement_cache_capacity(128);
+
         // Forward-compat guard: if the DB was written by a newer recon
         // (stamped meta.schema_version > what this binary knows), fail with
         // a clear, actionable message instead of letting rusqlite_migration

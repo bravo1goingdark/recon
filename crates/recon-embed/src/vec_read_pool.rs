@@ -188,5 +188,6 @@ fn open_read_conn(db_path: &Path) -> Result<Connection, EmbedError> {
          PRAGMA query_only=ON;",
     )
     .map_err(|e| EmbedError::Store(format!("vec read pool pragmas: {e}")))?;
+    conn.set_prepared_statement_cache_capacity(64);
     Ok(conn)
 }

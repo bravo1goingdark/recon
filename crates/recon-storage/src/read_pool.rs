@@ -75,6 +75,13 @@ impl ReadPool {
         )
         .map_err(|e| Error::Storage(format!("read pool pragmas: {e}")))?;
 
+        // The hot read path issues ~25 distinct prepare_cached() statements
+        // (refs_for_ident, find_symbols_exact, symbols_for_path, all_symbols,
+        // FTS, …). Rusqlite's default LRU is 16 — which thrashes under a
+        // normal tool-call mix. 128 stays well above the working set and
+        // costs only a per-statement byte buffer.
+        conn.set_prepared_statement_cache_capacity(128);
+
         Ok(conn)
     }
 
