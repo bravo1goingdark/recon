@@ -58,6 +58,15 @@ pub struct ReconServer {
     /// `cached_refs`). Built lazily on first graph-tool call after each
     /// reindex; invalidated alongside `cached_symbols` / `cached_refs`.
     cached_call_graph: Arc<arc_swap::ArcSwapOption<recon_search::graph::CallGraph>>,
+    /// Single-flight gate for [`Self::cached_call_graph`] (the getter).
+    /// Concurrent miss-path callers serialise on this `Mutex`, so a single
+    /// build is shared across all waiters instead of every caller racing
+    /// to rebuild the graph and overwriting each other's `store()` (a
+    /// 50–200 ms wasted rebuild per concurrent miss on a 300K-symbol
+    /// repo). The lock is contended only during the cold build itself —
+    /// once the result lands in `cached_call_graph` the fast path
+    /// (`load_full() = Some`) bypasses the lock entirely.
+    call_graph_build_lock: Arc<parking_lot::Mutex<()>>,
     /// Token-savings telemetry. Lock-free hot path; persisted to the
     /// `meta` table every `FLUSH_THRESHOLD` calls + on shutdown so
     /// lifetime totals survive restarts.
@@ -415,6 +424,7 @@ impl ReconServer {
             cached_symbols: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             cached_refs: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             cached_call_graph: Arc::new(arc_swap::ArcSwapOption::const_empty()),
+            call_graph_build_lock: Arc::new(parking_lot::Mutex::new(())),
             telemetry,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -505,7 +515,22 @@ impl ReconServer {
 
     /// Get the cached call graph, building it lazily from cached_symbols ×
     /// cached_refs on first access after each cache invalidation.
+    ///
+    /// Single-flight: concurrent miss-path callers serialise on
+    /// `call_graph_build_lock` so exactly one builder runs per cold-cache
+    /// window. Without the gate, two parallel `code_path / code_callers /
+    /// code_callees / code_impact` calls on a fresh invalidation would
+    /// each rebuild the graph (~50–200 ms on a 300K-symbol repo) and the
+    /// later `store()` would simply overwrite the earlier one. The lock
+    /// is hot only during the cold build itself; once the result lands,
+    /// the `load_full() = Some` fast path bypasses the lock entirely.
     fn cached_call_graph(&self) -> Arc<recon_search::graph::CallGraph> {
+        if let Some(g) = self.cached_call_graph.load_full() {
+            return g;
+        }
+        let _build_guard = self.call_graph_build_lock.lock();
+        // Double-check: another caller may have built it while we were
+        // waiting for the gate.
         if let Some(g) = self.cached_call_graph.load_full() {
             return g;
         }
