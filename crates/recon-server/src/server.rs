@@ -1007,39 +1007,55 @@ impl ReconServer {
         // Phase C: pre-warm caches (no locks held).
         self.refresh_caches();
 
-        // Phase D: pre-warm the repo_map cache via a short write-lock for the meta upsert.
-        let store = self.write_store.lock();
-
-        // Pre-warm the repo_map cache so the first user call is instant.
-        // Uses cached symbols/refs from refresh_caches() above.
+        // Phase D: pre-warm the repo_map cache for an instant first call.
+        //
+        // Spawned into a blocking task instead of inlined: PageRank on 500K+
+        // symbols can take 30–60 s, which would block this `index_repo()`
+        // await in `Command::Serve`, which blocks the rmcp transport from
+        // reading `initialize`. IDEs (Claude Code, Cursor, Windsurf, …) time
+        // out the MCP handshake well before that, so a synchronous pre-warm
+        // makes recon literally unusable on large repos. The cache key is
+        // keyed on `last_indexed_at`, so a `code_repo_map` call that lands
+        // before this finishes computes the answer itself — same result, no
+        // startup wedge. Errors here are logged-only: the worst case is the
+        // first `code_repo_map` is slow instead of instant.
         if stats.total_symbols > 0 {
-            let all_symbols = self.cached_all_symbols();
-            let all_refs = self.cached_all_refs();
-            let last_idx = self.read_pool.max_indexed_at().unwrap_or(0);
-            let budget = 2000;
-            let cache_key = format!("map_cache:{last_idx}:{budget}");
+            let server = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let started = std::time::Instant::now();
+                let all_symbols = server.cached_all_symbols();
+                let all_refs = server.cached_all_refs();
+                let last_idx = server.read_pool.max_indexed_at().unwrap_or(0);
+                let budget = 2000;
+                let cache_key = format!("map_cache:{last_idx}:{budget}");
 
-            let ranked = pagerank::pagerank(
-                &all_symbols,
-                &all_refs,
-                &[],
-                0.85,
-                pagerank::DEFAULT_MAX_ITERATIONS,
-            );
-            let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
-            let token_est = recon_search::tokens::estimate_tokens(&content);
-            let view = ToolOutput::Skeleton(SkeletonView {
-                path: None,
-                content,
-                token_estimate: token_est,
+                let ranked = pagerank::pagerank(
+                    &all_symbols,
+                    &all_refs,
+                    &[],
+                    0.85,
+                    pagerank::DEFAULT_MAX_ITERATIONS,
+                );
+                let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
+                let token_est = recon_search::tokens::estimate_tokens(&content);
+                let view = ToolOutput::Skeleton(SkeletonView {
+                    path: None,
+                    content,
+                    token_estimate: token_est,
+                });
+                let result = redact_response(
+                    serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+                );
+
+                let store = server.write_store.lock();
+                let _ = store.delete_meta_prefix("map_cache:");
+                let _ = store.set_meta(&cache_key, &result);
+                info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    symbols = all_symbols.len(),
+                    "repo_map cache pre-warmed"
+                );
             });
-            let result = redact_response(
-                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
-            );
-
-            let _ = store.delete_meta_prefix("map_cache:");
-            let _ = store.set_meta(&cache_key, &result);
-            info!("repo_map cache pre-warmed");
         }
 
         Ok(())
@@ -4224,6 +4240,57 @@ mod tests {
         assert!(
             result.is_ok(),
             "Server::new should succeed for a valid setup"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_repo_does_not_block_on_repo_map_prewarm() {
+        // Regression: `index_repo()` used to compute the PageRank-based
+        // repo_map cache pre-warm inline. On a 500K-symbol corpus that
+        // took 30–60 s, blocking the rmcp stdio handshake long enough
+        // for the IDE to time out and disconnect (v0.5.1 release was
+        // unusable on the recon repo itself for this reason). Phase D
+        // is now spawned via tokio::task::spawn_blocking, so
+        // `index_repo()` must return promptly regardless of the corpus.
+        //
+        // We seed a synthetic repo with enough source files that an
+        // inline pre-warm on the resulting symbols would be measurable
+        // (well above the 1 s ceiling we assert). 200 files × 8 funcs
+        // = 1600 symbols. With Phase D async, total wall time is
+        // dominated by tree-sitter parsing + Tantivy commit (~hundreds
+        // of ms in debug, low tens in release). 5 s is generous and
+        // robust on a slow CI worker.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for f in 0..200 {
+            let mut body = String::with_capacity(1024);
+            for k in 0..8 {
+                use std::fmt::Write as _;
+                writeln!(
+                    &mut body,
+                    "pub fn fixture_func_{f}_{k}(x: i32) -> i32 {{ x + {k} }}"
+                )
+                .unwrap();
+            }
+            fs_write(root.join(format!("src/m{f}.rs")), &body);
+        }
+
+        let db_path = root.join(".recon").join("recon.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let store = Store::open(&db_path).unwrap();
+        let tantivy_dir = root.join(".recon").join("tantivy");
+        std::fs::create_dir_all(&tantivy_dir).unwrap();
+        let tantivy = TantivyBackend::open(&tantivy_dir).unwrap();
+        let server = ReconServer::new(root.to_path_buf(), store, tantivy).unwrap();
+
+        let started = std::time::Instant::now();
+        server.index_repo().await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "index_repo() must return promptly (Phase D async); took {:?}",
+            elapsed
         );
     }
 
