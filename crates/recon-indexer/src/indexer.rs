@@ -366,17 +366,15 @@ pub fn index_repo(
     let writer_ref = shared_writer.or(local_writer.as_mut());
 
     if let (Some(tb), Some(writer)) = (tantivy, writer_ref) {
-        let mut docs_since_commit = 0usize;
+        // Single commit at the end. Tantivy's writer heap (50 MB above)
+        // already flushes internal segments when full; an explicit
+        // interim commit only adds visible segments to the index, and
+        // every extra segment costs query latency at search time. One
+        // commit at the end produces ~1–2 segments for a 300K-symbol
+        // cold index instead of ~15 with interim commits every 20K docs.
         for r in &all_results {
             if let Some(ref pf) = r.parsed {
                 let _ = tb.index_symbols(writer, &pf.meta.path, &pf.symbols);
-                docs_since_commit += pf.symbols.len();
-                if docs_since_commit >= 20_000 {
-                    if let Err(e) = tb.commit(writer) {
-                        warn!("tantivy interim commit error: {e}");
-                    }
-                    docs_since_commit = 0;
-                }
             }
         }
         if let Err(e) = tb.commit(writer) {
