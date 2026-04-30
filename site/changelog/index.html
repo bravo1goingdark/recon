@@ -78,6 +78,18 @@
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
   </div>
 
+  <article class="release" id="v0-5-1">
+    <header>
+      <h2>v0.5.1</h2>
+      <span class="when">2026-04-30</span>
+    </header>
+    <span class="tag fix">Honest savings — kill the per-call double-count</span>
+    <p>The <code>tokens_saved</code> headline was a per-call upper bound — every tool call credited the full Read+Grep alternative even when the agent had already seen the file or run the query in the same conversation. On hot sessions that drove a ~3.5× over-statement (one user reported 2.83M saved across 160 calls; the honest figure was around 800K).</p>
+    <p>v0.5.1 adds process-scoped baseline dedupe (closes #25). The first call against a <code>(tool, dedup_key)</code> pair credits the full Read+Grep alternative; subsequent calls credit 0 (call counts and latency still accrue). Per-tool keys: file path for <code>code_outline</code> / <code>code_skeleton</code> / <code>code_read_symbol</code>; symbol identifier for <code>code_find_symbol</code> / <code>find_refs</code> / <code>callers</code> / <code>callees</code> / <code>impact</code> / <code>context</code>; <code>mode|query</code> for <code>code_search</code>; <code>kind|pattern</code> for <code>code_find_strings</code>; sorted patterns for <code>code_multi_find</code>; <code>(src, dst)</code> for <code>code_path</code>; focus-files set for <code>code_repo_map</code>; subsystem id for <code>code_subsystem</code>; singleton for <code>code_subsystems</code>.</p>
+    <p><b>Process-scoped is the v0.5.1 simplification.</b> For stdio MCP transport (Claude Code, Cursor, Windsurf, OpenCode all spawn one <code>recon serve</code> per conversation) this is identical to session-scoped. Streamable HTTP multiplexes many sessions through one process and will under-count until v0.5.2 plumbs the rmcp <code>RequestContext</code> session id through.</p>
+    <p>Schema unchanged. Past rollups stay at the v0.5.0 calculation; only fresh pushes use deduped values. <b>Numbers will visibly shrink after upgrade — that's the honesty pass.</b> <code>recon savings show</code> gains a footer note clarifying the dedupe window and that provider prompt-cache absorption (Anthropic / OpenAI / Gemini / vLLM) shaves more on top at billing time.</p>
+  </article>
+
   <article class="release" id="v0-5-0">
     <header>
       <h2>v0.5.0</h2>

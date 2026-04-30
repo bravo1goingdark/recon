@@ -398,6 +398,21 @@ pub fn show(repo: Option<PathBuf>) -> Result<()> {
         "# total\t{}\t{}\t{}\t{}\t-\t{}",
         totals.calls, totals.response_tokens, totals_baseline, saved_total, total_time_saved_ms,
     );
+    // v0.5.1+ honesty footer (closes #25). Surfaces the dedup window so
+    // a thoughtful user doing mental math doesn't conclude the headline
+    // is inflated. Process-scoped is the v0.5.1 simplification — for
+    // stdio MCP transport (the dominant case) this is identical to
+    // per-conversation. Streamable HTTP shares one process across many
+    // sessions and will under-count until v0.5.2 plumbs the rmcp
+    // RequestContext session id through.
+    println!(
+        "#\n# tokens_saved is deduped per (tool, file/query/symbol) per\n\
+         # `recon serve` process. Repeats against the same key inside one\n\
+         # session credit 0 — the agent would have referenced its existing\n\
+         # context, not Read again. Provider prompt-cache absorption\n\
+         # (Anthropic / OpenAI / Gemini / vLLM) shaves more on top of this\n\
+         # at billing time; recon reports tokens, not dollars."
+    );
     Ok(())
 }
 
