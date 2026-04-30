@@ -648,12 +648,12 @@ impl ReconServer {
     }
 
     /// Variant of [`Self::instrumented`] for handlers that can supply a
-    /// per-call measured baseline (the 9 bucket-1 tools). The future
-    /// resolves to `(response, measured_baseline)`; when
-    /// `measure_baselines` is off the handler should pass `None` and
-    /// behave identically to the non-measured wrapper. Centralising
-    /// the convention here keeps the call site shape uniform across
-    /// handlers and makes the flag-off code path trivially auditable.
+    /// per-call measured baseline. Kept for symmetry with
+    /// [`Self::instrumented`] — every measured handler now uses the
+    /// deduped variant ([`Self::instrumented_measured_deduped`]) per #25,
+    /// but a future tool that genuinely doesn't want dedupe (e.g. an
+    /// auditing tool) can still reach for this one.
+    #[allow(dead_code)]
     async fn instrumented_measured<Fut>(&self, tool: &'static str, fut: Fut) -> String
     where
         Fut: std::future::Future<Output = (String, Option<u64>)>,
@@ -661,6 +661,65 @@ impl ReconServer {
         let started_at = std::time::Instant::now();
         let (result, measured) = fut.await;
         self.record_call(tool, started_at, &result, measured);
+        result
+    }
+
+    /// Deduped variant of [`Self::instrumented`] for static-baseline tools.
+    /// Closes #25 — the first call against `(tool, dedup_key)` this process
+    /// credits the full `BASELINES[tool]` figure; subsequent calls credit
+    /// 0 (call counts and latency still accrue normally).
+    ///
+    /// The dedupe is process-scoped, which is identical to session-scoped
+    /// for stdio MCP transport (one `recon serve` = one rmcp session).
+    /// Streamable HTTP under-counts when many sessions multiplex through
+    /// one process; v0.5.2 will plumb the rmcp `RequestContext` session
+    /// id through to fix that — until then, agents on HTTP should restart
+    /// `recon serve` between conversations for exact accounting.
+    async fn instrumented_deduped<Fut>(
+        &self,
+        tool: &'static str,
+        dedup_key: &str,
+        fut: Fut,
+    ) -> String
+    where
+        Fut: std::future::Future<Output = String>,
+    {
+        let started_at = std::time::Instant::now();
+        let result = fut.await;
+        // First sight: pass `None` so `record()` accrues the static
+        // BASELINES[tool] figure. Repeat: pass `Some(0)` so neither static
+        // nor measured accrues this call (call/latency still do).
+        let measured = if self.telemetry.should_credit_baseline(tool, dedup_key) {
+            None
+        } else {
+            Some(0)
+        };
+        self.record_call(tool, started_at, &result, measured);
+        result
+    }
+
+    /// Deduped variant of [`Self::instrumented_measured`]. First sight of
+    /// `(tool, dedup_key)` lets the handler's measured value through;
+    /// repeats override to `Some(0)` so the measured counter doesn't
+    /// accrue. Closes #25 for the bucket-1 tools that compute their own
+    /// per-call baseline.
+    async fn instrumented_measured_deduped<Fut>(
+        &self,
+        tool: &'static str,
+        dedup_key: &str,
+        fut: Fut,
+    ) -> String
+    where
+        Fut: std::future::Future<Output = (String, Option<u64>)>,
+    {
+        let started_at = std::time::Instant::now();
+        let (result, measured) = fut.await;
+        let final_measured = if self.telemetry.should_credit_baseline(tool, dedup_key) {
+            measured
+        } else {
+            Some(0)
+        };
+        self.record_call(tool, started_at, &result, final_measured);
         result
     }
 
@@ -1889,7 +1948,10 @@ impl ReconServer {
         description = "Show one-line-per-symbol outline of a file. Returns symbol kinds, names, and line numbers in a tree structure. Use instead of Read when you need to understand a file's structure without reading its full content. Typical output: 300-500 tokens for a 500-line file."
     )]
     pub async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
-        self.instrumented_measured("code_outline", async move {
+        // Dedup key (#25): file path. Reading the same file twice in one
+        // session would only have cost the agent one Read alternative.
+        let key = params.0.path.clone();
+        self.instrumented_measured_deduped("code_outline", &key, async move {
             // Validate path doesn't escape repo root. Capture the canonical
             // path so the measured-baseline read at the end can reuse it
             // (no second `resolve_path` round-trip on the success path).
@@ -2010,7 +2072,9 @@ impl ReconServer {
         description = "Show signatures and docstrings with bodies elided as '...'. 10x compression vs full file read. Use instead of Read when you need to understand APIs and structure. Output: ~300 tokens per 3000-token file."
     )]
     pub async fn code_skeleton(&self, params: Parameters<SkeletonParams>) -> String {
-        self.instrumented_measured("code_skeleton", async move {
+        // Dedup key (#25): file path. Same file twice = one Read alternative.
+        let key = params.0.path.clone();
+        self.instrumented_measured_deduped("code_skeleton", &key, async move {
             let rel_path = PathBuf::from(&params.0.path);
             let symbols = self
                 .read_pool
@@ -2150,7 +2214,10 @@ impl ReconServer {
         description = "Read the full source of one symbol plus its parent chain and caller/callee references. Use instead of Read when you need one specific function or type. Output: ~200-800 tokens."
     )]
     pub async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
-        self.instrumented_measured("code_read_symbol", async move {
+        // Dedup key (#25): file path. Reading 39 symbols out of one file
+        // is still one Read alternative, not 39.
+        let key = params.0.path.clone();
+        self.instrumented_measured_deduped("code_read_symbol", &key, async move {
             let abs_path = match self.resolve_path(&params.0.path) {
                 Ok(p) => p,
                 Err((code, msg)) => {
@@ -2331,7 +2398,10 @@ impl ReconServer {
         description = "Find symbols by name across the codebase. Tiered: exact SQLite match -> Tantivy BM25 -> FTS5 trigram + nucleo fuzzy. Use instead of Grep when searching for functions, types, or classes."
     )]
     pub async fn code_find_symbol(&self, params: Parameters<FindSymbolParams>) -> String {
-        self.instrumented("code_find_symbol", async move {
+        // Dedup key (#25): symbol name. Same name re-queried = same grep,
+        // already cached in the agent's context.
+        let key = params.0.name.clone();
+        self.instrumented_deduped("code_find_symbol", &key, async move {
             // All reads go through lock-free ReadPool
             // Tier 0: exact match via SQLite index
             let mut results = self
@@ -2447,7 +2517,9 @@ impl ReconServer {
         description = "Find all references to a symbol. Returns a count and top-k call sites as path:line triples. Use instead of Grep for finding usages of a function or type."
     )]
     pub async fn code_find_refs(&self, params: Parameters<FindRefsParams>) -> String {
-        self.instrumented("code_find_refs", async move {
+        // Dedup key (#25): symbol identifier. Same symbol's refs are stable.
+        let key = params.0.symbol.clone();
+        self.instrumented_deduped("code_find_refs", &key, async move {
             let refs = self
                 .read_pool
                 .refs_for_ident(&params.0.symbol)
@@ -2519,7 +2591,9 @@ impl ReconServer {
         description = "Shortest call-graph path from `src` to `dst`. Use to answer 'how does X reach Y?' \u{2014} replaces a chain of code_find_refs calls. Both arguments accept a bare name or a fully qualified name (preferred \u{2014} disambiguates). Returns an ordered hop sequence with file:line per hop. When unreachable within `max_hops` (default 8, max 16) returns an Error with kind 'not_found'/'unreachable' plus an `unresolved_hint` when the BFS hit a likely dyn-dispatch / FFI boundary. When src or dst is ambiguous (multiple symbols share the name) the BFS spans the cross-product and returns the shortest match. Bidirectional BFS over the cached reference graph; total-visit cap 50 000 nodes. Output uses ReferenceDigest with the `path` field populated."
     )]
     pub async fn code_path(&self, params: Parameters<PathParams>) -> String {
-        self.instrumented("code_path", async move {
+        // Dedup key (#25): (src, dst) pair. Same path query = same answer.
+        let key = format!("{}|{}", params.0.src, params.0.dst);
+        self.instrumented_deduped("code_path", &key, async move {
             let max_hops = params.0.max_hops.min(recon_search::graph::MAX_ALLOWED_HOPS);
             if max_hops == 0 {
                 return tool_error(ReconErrorCode::InvalidParams, "max_hops must be >= 1", None);
@@ -2600,7 +2674,9 @@ impl ReconServer {
         description = "Transitive callers of `symbol` up to `depth` rings (default 1, max 6). Replaces depth-many chained code_find_refs calls. Returns one tier per ring with the symbols at that depth. Cycle-safe (each symbol emitted at its minimum depth only). Per-tier fan-out is capped at 50 to bound god-node responses; total-visit cap 50 000 nodes. When either cap fires `truncated: true` is set. Returns symbol identities (qname + path + line of definition), not call-site lines \u{2014} use code_find_refs for the lexical call-site digest. `symbol` accepts bare or fully qualified names; ambiguous bare names traverse from all matches. Output uses ReferenceDigest with the `tiers` field populated."
     )]
     pub async fn code_callers(&self, params: Parameters<CallersParams>) -> String {
-        self.instrumented("code_callers", async move {
+        // Dedup key (#25): symbol identifier.
+        let key = params.0.symbol.clone();
+        self.instrumented_deduped("code_callers", &key, async move {
             self.callers_or_callees_inner(params, true).await
         })
         .await
@@ -2611,7 +2687,9 @@ impl ReconServer {
         description = "Transitive callees of `symbol` up to `depth` rings (default 1, max 6). Mirror of code_callers \u{2014} what does this symbol call (directly and transitively)? Cycle-safe, per-tier fan-out capped at 50, total-visit cap 50 000. `truncated: true` when caps fire. Returns symbol identities (qname + path + line of definition), not call-site lines. Use this to understand what changing X *requires* you to also understand (callees) versus what changing X *risks breaking* (callers). Output uses ReferenceDigest with the `tiers` field populated."
     )]
     pub async fn code_callees(&self, params: Parameters<CallersParams>) -> String {
-        self.instrumented("code_callees", async move {
+        // Dedup key (#25): symbol identifier.
+        let key = params.0.symbol.clone();
+        self.instrumented_deduped("code_callees", &key, async move {
             self.callers_or_callees_inner(params, false).await
         })
         .await
@@ -2622,7 +2700,11 @@ impl ReconServer {
         description = "One-shot bundle of everything an agent needs to reason about a symbol \u{2014} replaces the canonical 4-call understand-X loop (find_symbol \u{2192} read_symbol \u{2192} find_refs \u{2192} search-for-tests). Returns: (1) the target symbol's signature + doc + first ~20 body lines, (2) up to 5 immediate callers, (3) up to 5 immediate callees, (4) up to 3 referenced types, (5) up to 3 tests that exercise it. Honors `token_budget` (default 2000); drops sections under pressure in this order: tests \u{2192} callees \u{2192} types \u{2192} callers (skeleton+body always kept). Accepts a bare name or a fully qualified name. When ambiguous (multiple symbols share the bare name) returns an Error with kind 'invalid_params' listing up to 5 candidates; reissue with a qualified name. Output uses SymbolCard with the `context` envelope populated. Test detection in v0.3 is Rust-only (tests::* qname patterns and test_* / Test* function names); cross-language coverage is on the v0.4 roadmap."
     )]
     pub async fn code_context(&self, params: Parameters<ContextParams>) -> String {
-        self.instrumented_measured("code_context", async move {
+        // Dedup key (#25): symbol identifier. Multiple `code_context`
+        // calls on the same symbol resolve to the same target file —
+        // one Read alternative.
+        let key = params.0.symbol.clone();
+        self.instrumented_measured_deduped("code_context", &key, async move {
             let symbols = self.cached_all_symbols();
             let matches = Self::resolve_symbol_to_indices(&symbols, &params.0.symbol);
             match matches.len() {
@@ -2886,7 +2968,9 @@ impl ReconServer {
         description = "Blast radius of changing `symbol` \u{2014} transitive callers up to `depth` rings (default 4, max 6) plus tests that exercise it. Returns one tier per ring (production callers), a separate `tests` array for transitively-reaching test functions (Rust-only Phase-1 detector: tests::* qnames + test_* / Test* names), and `truncated: true` when fan-out caps fire. Use to answer 'what might break if I change X?' before refactoring. Per-tier fan-out cap 50, total-visit cap 50 000 \u{2014} a god-node query terminates with a marker rather than blowing up. Output uses ReferenceDigest with the `tiers` and `tests` fields populated."
     )]
     pub async fn code_impact(&self, params: Parameters<ImpactParams>) -> String {
-        self.instrumented("code_impact", async move {
+        // Dedup key (#25): symbol identifier.
+        let key = params.0.symbol.clone();
+        self.instrumented_deduped("code_impact", &key, async move {
             let depth = params.0.depth;
             if depth == 0 {
                 return tool_error(ReconErrorCode::InvalidParams, "depth must be >= 1", None);
@@ -2954,7 +3038,10 @@ impl ReconServer {
         description = "List the natural subsystems of the repo \u{2014} weakly-connected components of the reference graph. Each subsystem has an id (use with code_subsystem), the qualified-name of its highest-degree symbol (the 'hub'), the dominant directory, and a symbol count. Use to orient yourself before drilling in: subsystems separate cleanly along architectural lines (e.g. recon-search vs recon-storage) without you having to know the directory structure. Sorted by symbol count descending. `limit` caps the number returned (default 50). Output uses Skeleton with subsystems rendered as one line each. Phase 2 v0.3.x: connected components only. Future v0.4.x adds Leiden modularity-optimized clustering."
     )]
     pub async fn code_subsystems(&self, params: Parameters<SubsystemsParams>) -> String {
-        self.instrumented("code_subsystems", async move {
+        // Dedup key (#25): empty (singleton). The repo's subsystem
+        // structure is stable; one alternative cost per session covers
+        // all calls.
+        self.instrumented_deduped("code_subsystems", "", async move {
             let symbols = self.cached_all_symbols();
             let graph = self.cached_call_graph();
             let comps = graph.connected_components();
@@ -3011,7 +3098,9 @@ impl ReconServer {
         description = "Detailed view of one subsystem (from code_subsystems). Returns a skeleton-style summary of all symbols in the component \u{2014} qname, kind, file:line \u{2014} within `token_budget` tokens (default 1500). Use after code_subsystems to drill into a specific cluster without reading every file in the directory. Output uses Skeleton."
     )]
     pub async fn code_subsystem(&self, params: Parameters<SubsystemParams>) -> String {
-        self.instrumented("code_subsystem", async move {
+        // Dedup key (#25): subsystem id.
+        let key = params.0.id.to_string();
+        self.instrumented_deduped("code_subsystem", &key, async move {
             let symbols = self.cached_all_symbols();
             let graph = self.cached_call_graph();
             let comps = graph.connected_components();
@@ -3121,7 +3210,11 @@ impl ReconServer {
         description = "Search for text patterns. Modes: exact (default), regex, hybrid (BM25 + text fused via reciprocal rank fusion). Use instead of Grep for code search."
     )]
     pub async fn code_search(&self, params: Parameters<SearchParams>) -> String {
-        self.instrumented_measured("code_search", async move {
+        // Dedup key (#25): mode + query. Same query in different modes
+        // (exact / regex / hybrid / semantic) is genuinely different work,
+        // so include mode in the key.
+        let key = format!("{}|{}", params.0.mode, params.0.query);
+        self.instrumented_measured_deduped("code_search", &key, async move {
             let paths = self.cached_file_paths();
 
             let abs_paths = self
@@ -3336,7 +3429,15 @@ impl ReconServer {
         description = "List indexed source files with language, line count, and top symbols. Use instead of Glob when you need structured file listings. Supports language filter."
     )]
     pub async fn code_list(&self, params: Parameters<ListParams>) -> String {
-        self.instrumented_measured("code_list", async move {
+        // Dedup key (#25): glob + lang + filter triple. Different filters
+        // genuinely return different sets; identical filters are cached.
+        let key = format!(
+            "{}|{}|{}",
+            params.0.glob.as_deref().unwrap_or(""),
+            params.0.lang.as_deref().unwrap_or(""),
+            params.0.filter.as_deref().unwrap_or(""),
+        );
+        self.instrumented_measured_deduped("code_list", &key, async move {
             // Single query for all files + symbol counts + top symbols
             let summaries = self.read_pool.file_symbol_summaries().unwrap_or_default();
 
@@ -3434,7 +3535,19 @@ impl ReconServer {
         description = "Generate a ranked overview of the most important symbols in the repo. Uses personalized PageRank over the reference graph with Aider-style edge weights. Output fits within a token budget (default 2000). Best first tool to call for orientation."
     )]
     pub async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
-        self.instrumented("code_repo_map", async move {
+        // Dedup key (#25): focus_files set. Unfocused (focus_files=None)
+        // is a singleton; focused calls dedupe per-focus-set.
+        let key = params
+            .0
+            .focus_files
+            .as_ref()
+            .map(|fs| {
+                let mut sorted = fs.clone();
+                sorted.sort();
+                sorted.join(",")
+            })
+            .unwrap_or_default();
+        self.instrumented_deduped("code_repo_map", &key, async move {
             let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
             let budget = params.0.token_budget;
 
@@ -3528,7 +3641,9 @@ impl ReconServer {
         description = "Search for patterns in string literals and comments. Finds SQL fragments, i18n keys, log messages that structural search misses."
     )]
     pub async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
-        self.instrumented_measured("code_find_strings", async move {
+        // Dedup key (#25): pattern + kind (literal / comment / both).
+        let key = format!("{}|{}", params.0.kind, params.0.pattern);
+        self.instrumented_measured_deduped("code_find_strings", &key, async move {
             let paths = self.cached_file_paths();
 
             let abs_paths = self
@@ -3585,7 +3700,14 @@ impl ReconServer {
         description = "Search for multiple patterns at once. More efficient than multiple code_search calls. Returns results grouped by pattern."
     )]
     pub async fn code_multi_find(&self, params: Parameters<MultiFindParams>) -> String {
-        self.instrumented_measured("code_multi_find", async move {
+        // Dedup key (#25): sorted joined patterns. Same set of patterns
+        // in any order = same scan, one alternative cost.
+        let key = {
+            let mut sorted = params.0.patterns.clone();
+            sorted.sort();
+            sorted.join(",")
+        };
+        self.instrumented_measured_deduped("code_multi_find", &key, async move {
         let paths = self.cached_file_paths();
 
         let abs_paths = self

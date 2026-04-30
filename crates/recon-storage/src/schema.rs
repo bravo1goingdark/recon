@@ -2,6 +2,15 @@
 
 use rusqlite_migration::{Migrations, M};
 
+/// Highest schema version this binary knows how to read or write.
+///
+/// Bump this together with the matching `M::up(...)` entry in `migrations()`
+/// and the `UPDATE meta SET value = '<N>' WHERE key = 'schema_version'`
+/// inside the new migration's SQL. `Store::open` rejects on-disk databases
+/// stamped at a version higher than this so a downgrade fails loudly instead
+/// of silently corrupting a future schema.
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+
 /// Build the migration set.
 pub fn migrations() -> Migrations<'static> {
     Migrations::new(vec![

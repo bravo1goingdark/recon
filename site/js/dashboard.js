@@ -165,6 +165,353 @@ async function loadSavings() {
 }
 
 /**
+ * Per-model input-token rates in USD per 1M input tokens. Curated table
+ * sourced from each provider's published list rate as of 2026-04-30.
+ * The "self-hosted / not sure" row sets `input_per_1m` to null so the
+ * UI hides the dollar figure entirely — we don't pretend there's a
+ * number when there isn't one. Closes #21.
+ *
+ * Grouped by provider in the dropdown so users can scan to their family
+ * fast: Anthropic → OpenAI → Google → DeepSeek → Mistral → Together
+ * (Llama / Qwen) → Cohere → fallback. Refresh values by opening a PR
+ * when providers change pricing; v0.5.2 will replace this with a
+ * top-N curated set + search modal against the full litellm catalog
+ * for the long tail.
+ */
+var MODEL_PRICES = [
+  // Anthropic
+  { id: "claude-opus-4-7",       label: "Claude Opus 4.7",       input_per_1m: 15.0 },
+  { id: "claude-opus-4-6",       label: "Claude Opus 4.6",       input_per_1m: 15.0 },
+  { id: "claude-sonnet-4-6",     label: "Claude Sonnet 4.6",     input_per_1m: 3.0 },
+  { id: "claude-sonnet-4-5",     label: "Claude Sonnet 4.5",     input_per_1m: 3.0 },
+  { id: "claude-haiku-4-5",      label: "Claude Haiku 4.5",      input_per_1m: 0.8 },
+  // OpenAI
+  { id: "gpt-5",                 label: "GPT-5",                 input_per_1m: 5.0 },
+  { id: "gpt-5-mini",            label: "GPT-5 mini",            input_per_1m: 0.5 },
+  { id: "gpt-4o",                label: "GPT-4o",                input_per_1m: 2.5 },
+  { id: "gpt-4-turbo",           label: "GPT-4 Turbo",           input_per_1m: 10.0 },
+  { id: "gpt-3-5-turbo",         label: "GPT-3.5 Turbo",         input_per_1m: 0.5 },
+  // Google
+  { id: "gemini-2-5-pro",        label: "Gemini 2.5 Pro",        input_per_1m: 1.25 },
+  { id: "gemini-2-5-flash",      label: "Gemini 2.5 Flash",      input_per_1m: 0.1 },
+  // DeepSeek
+  { id: "deepseek-v3",           label: "DeepSeek V3",           input_per_1m: 0.27 },
+  { id: "deepseek-r1",           label: "DeepSeek R1",           input_per_1m: 0.55 },
+  // Mistral
+  { id: "mistral-large-2",       label: "Mistral Large 2",       input_per_1m: 2.0 },
+  { id: "codestral",             label: "Codestral",             input_per_1m: 0.3 },
+  // Together / Bedrock-hosted Llama and Qwen
+  { id: "llama-3-3-70b",         label: "Llama 3.3 70B",         input_per_1m: 0.88 },
+  { id: "qwen-2-5-coder-32b",    label: "Qwen 2.5 Coder 32B",    input_per_1m: 0.18 },
+  // Cohere
+  { id: "command-r-plus",        label: "Cohere Command R+",     input_per_1m: 2.5 },
+  // Fallback
+  { id: "self-hosted",           label: "Self-hosted / not sure", input_per_1m: null }
+];
+
+/**
+ * Read the user's saved model choice from localStorage, defaulting to
+ * Claude Sonnet 4.5 (the modal 2026 pick). Falls back to the first
+ * row if the stored id no longer exists in the table — handles the
+ * case where a price-table refresh removed an old model.
+ */
+function getSelectedModel() {
+  var saved = null;
+  try { saved = localStorage.getItem("recon-savings-model"); } catch (_) {}
+  for (var i = 0; i < MODEL_PRICES.length; i++) {
+    if (MODEL_PRICES[i].id === saved) return MODEL_PRICES[i];
+  }
+  // Catalog pick: id was set from the modal but isn't in MODEL_PRICES.
+  // The modal cached the rate + label alongside the id; rehydrate from there
+  // so the dollar tile renders the correct rate and label across reloads.
+  if (saved) {
+    var rate = null;
+    var label = saved;
+    try {
+      var rateStr = localStorage.getItem("recon-savings-model-rate");
+      if (rateStr != null && rateStr !== "") rate = parseFloat(rateStr);
+      var l = localStorage.getItem("recon-savings-model-label");
+      if (l) label = l;
+    } catch (_) {}
+    if (rate != null && isFinite(rate)) {
+      return { id: saved, label: label, input_per_1m: rate };
+    }
+  }
+  return MODEL_PRICES[0];
+}
+
+function setSelectedModel(model) {
+  // Accept either a string id (curated pick) or a full {id,label,input_per_1m}
+  // object (catalog pick from the modal).
+  var id = typeof model === "string" ? model : (model && model.id);
+  if (!id) return;
+  try {
+    localStorage.setItem("recon-savings-model", id);
+    if (typeof model === "object" && model) {
+      localStorage.setItem(
+        "recon-savings-model-rate",
+        model.input_per_1m == null ? "" : String(model.input_per_1m)
+      );
+      localStorage.setItem("recon-savings-model-label", model.label || id);
+    } else {
+      // Curated pick — clear any stale catalog metadata so the curated
+      // table is the source of truth.
+      localStorage.removeItem("recon-savings-model-rate");
+      localStorage.removeItem("recon-savings-model-label");
+    }
+  } catch (_) {}
+}
+
+/**
+ * Convert a token count to a USD figure for the selected model. Returns
+ * null when the model has no rate (self-hosted) — the UI then hides the
+ * dollar tile rather than render "$0".
+ */
+function dollarsFor(tokensSaved, model) {
+  if (!model || model.input_per_1m == null || tokensSaved <= 0) return null;
+  return (tokensSaved / 1000000) * model.input_per_1m;
+}
+
+/**
+ * Format USD without trailing zeros for sub-dollar amounts ("$0.94"),
+ * comma thousand-separators above $1000 ("$1,247"), and a "<$0.01"
+ * floor for amounts that would round to zero. Avoids rendering "$0.00"
+ * which reads as "didn't save anything" when the tokens-saved figure
+ * is non-zero but small.
+ */
+function fmtUSD(amount) {
+  if (amount == null) return "—";
+  if (amount < 0.01) return "<$0.01";
+  if (amount < 1000) return "$" + amount.toFixed(2);
+  return "$" + amount.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+/**
+ * Render the model-picker `<select>` element. Bound to the
+ * recon-savings-model key in localStorage; on change it re-runs
+ * loadSavings() to refresh the dollar figure.
+ *
+ * If the currently-selected model is from the full litellm catalog
+ * (not in MODEL_PRICES), prepend a "(custom)" option so the user
+ * sees their actual pick reflected in the dropdown — otherwise the
+ * select would silently render the first row as selected.
+ */
+function renderModelPicker(currentId) {
+  var inCurated = MODEL_PRICES.some(function (m) { return m.id === currentId; });
+  var customOpt = "";
+  if (!inCurated && currentId) {
+    customOpt =
+      '<option value="' + escapeHtml(currentId) + '" selected>' +
+      escapeHtml(currentId) + " (custom)</option>";
+  }
+  var options = MODEL_PRICES.map(function (m) {
+    var sel = m.id === currentId ? " selected" : "";
+    return '<option value="' + escapeHtml(m.id) + '"' + sel + '>' +
+      escapeHtml(m.label) + "</option>";
+  }).join("");
+  return (
+    '<select id="recon-model-picker" ' +
+      'style="font-family:var(--mono);font-size:11px;padding:4px 8px;' +
+      'border:1px solid var(--rule);border-radius:2px;background:none;' +
+      'color:var(--ink-2);cursor:pointer;letter-spacing:.04em">' +
+      customOpt +
+      options +
+    "</select>" +
+    ' <button type="button" id="recon-model-browse-all" ' +
+      'style="font-family:var(--mono);font-size:11px;padding:4px 8px;' +
+      'border:1px solid var(--rule);border-radius:2px;background:none;' +
+      'color:var(--clay);cursor:pointer;letter-spacing:.04em">' +
+      "Browse all 1,945 models →</button>"
+  );
+}
+
+/**
+ * Lazy-loaded full litellm catalog. Cached after the first fetch so
+ * subsequent modal opens are instant.
+ */
+var _litellmCatalog = null;
+async function loadLitellmCatalog() {
+  if (_litellmCatalog) return _litellmCatalog;
+  try {
+    var resp = await fetch("/js/model-prices.json");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    _litellmCatalog = await resp.json();
+    return _litellmCatalog;
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Look up the full label / rate for an id that may live in either the
+ * curated MODEL_PRICES table or the lazy litellm catalog. Used by
+ * `getSelectedModel()` so a user who picked "anthropic/claude-3-5-sonnet"
+ * from the modal still gets the right rate on subsequent dashboard loads.
+ */
+async function resolveModelById(id) {
+  if (!id) return null;
+  for (var i = 0; i < MODEL_PRICES.length; i++) {
+    if (MODEL_PRICES[i].id === id) return MODEL_PRICES[i];
+  }
+  var catalog = await loadLitellmCatalog();
+  for (var j = 0; j < catalog.length; j++) {
+    if (catalog[j].id === id) {
+      return {
+        id: catalog[j].id,
+        label: catalog[j].id,
+        input_per_1m: catalog[j].input_per_1m,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Open the full-catalog search modal. Lazy-loads model-prices.json on
+ * first open. Filter is a substring match against the model id; matches
+ * paginated to the first 200 rows so a slow client doesn't paint 1,945
+ * <li>s on every keystroke.
+ */
+async function openModelBrowseModal() {
+  var existing = document.getElementById("recon-model-modal");
+  if (existing) return;
+
+  var catalog = await loadLitellmCatalog();
+  if (!catalog.length) {
+    alert("Could not load the model catalog. Pick from the curated list.");
+    return;
+  }
+
+  var modal = document.createElement("div");
+  modal.id = "recon-model-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.style.cssText =
+    "position:fixed;inset:0;background:rgba(0,0,0,0.5);" +
+    "display:flex;align-items:center;justify-content:center;z-index:1000";
+
+  var inner = document.createElement("div");
+  inner.style.cssText =
+    "background:var(--paper);border:1px solid var(--rule);border-radius:4px;" +
+    "width:min(640px,90vw);max-height:80vh;display:flex;flex-direction:column;" +
+    "padding:24px;gap:14px";
+
+  inner.innerHTML =
+    '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px">' +
+      '<h2 style="font-family:var(--serif);font-size:22px;letter-spacing:-.02em;margin:0">' +
+        "Browse all <em style=\"color:var(--clay)\">1,945</em> models</h2>" +
+      '<button type="button" id="recon-modal-close" ' +
+        'style="font-family:var(--mono);font-size:12px;padding:4px 10px;' +
+        'border:1px solid var(--rule);background:none;cursor:pointer;border-radius:2px">' +
+        "Close ✕</button>" +
+    "</div>" +
+    '<input type="search" id="recon-model-search" ' +
+      'placeholder="Type a model id — claude, gpt, gemini, llama, deepseek..." ' +
+      'autocomplete="off" autofocus ' +
+      'style="font-family:var(--mono);font-size:13px;padding:10px 12px;' +
+      'border:1px solid var(--rule);border-radius:2px;width:100%;background:none;' +
+      'color:var(--ink)">' +
+    '<div style="font-family:var(--mono);font-size:11px;color:var(--ink-3);' +
+      'letter-spacing:.04em" id="recon-model-results-meta">' +
+      escapeHtml(String(catalog.length)) + " models · sourced from litellm 2026-04-30" +
+    "</div>" +
+    '<div id="recon-model-results" style="overflow-y:auto;flex:1;border:1px solid var(--rule-soft);' +
+      'border-radius:2px;padding:4px"></div>';
+
+  modal.appendChild(inner);
+  document.body.appendChild(modal);
+
+  function renderResults(filter) {
+    var q = (filter || "").toLowerCase();
+    var matches = q
+      ? catalog.filter(function (m) { return m.id.toLowerCase().indexOf(q) !== -1; })
+      : catalog;
+    var meta = document.getElementById("recon-model-results-meta");
+    if (meta) {
+      meta.textContent =
+        matches.length === catalog.length
+          ? catalog.length + " models · sourced from litellm 2026-04-30"
+          : matches.length + " of " + catalog.length + " match";
+    }
+    var capped = matches.slice(0, 200);
+    var rows = capped
+      .map(function (m) {
+        return (
+          '<button type="button" data-model-id="' + escapeHtml(m.id) + '" ' +
+            'class="recon-model-row" ' +
+            'style="display:flex;align-items:baseline;justify-content:space-between;' +
+            'gap:12px;width:100%;padding:8px 12px;border:none;background:none;' +
+            'text-align:left;cursor:pointer;font-family:var(--mono);font-size:12px;' +
+            'color:var(--ink-2);border-bottom:1px solid var(--rule-soft)">' +
+            '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+              escapeHtml(m.id) + "</span>" +
+            '<span style="color:var(--clay);flex-shrink:0">$' +
+              m.input_per_1m + "/M</span>" +
+          "</button>"
+        );
+      })
+      .join("");
+    var truncated =
+      matches.length > 200
+        ? '<div style="padding:10px 12px;font-family:var(--mono);font-size:11px;' +
+          'color:var(--ink-3);text-align:center">' +
+          "showing first 200 of " + matches.length + " — narrow your search" +
+          "</div>"
+        : "";
+    document.getElementById("recon-model-results").innerHTML = rows + truncated;
+  }
+  renderResults("");
+
+  // Search input filters on every keystroke; substring match is fast on 2K rows.
+  document
+    .getElementById("recon-model-search")
+    .addEventListener("input", function (e) {
+      renderResults(e.target.value);
+    });
+
+  // Click any row to pick the model and close the modal.
+  document
+    .getElementById("recon-model-results")
+    .addEventListener("click", function (e) {
+      var btn = e.target.closest(".recon-model-row");
+      if (!btn) return;
+      var id = btn.getAttribute("data-model-id");
+      // Pull the full row out of the catalog so we can persist the rate
+      // alongside the id — getSelectedModel() reads this back on reload.
+      var picked = null;
+      for (var k = 0; k < catalog.length; k++) {
+        if (catalog[k].id === id) { picked = catalog[k]; break; }
+      }
+      setSelectedModel(
+        picked
+          ? { id: picked.id, label: picked.id, input_per_1m: picked.input_per_1m }
+          : id
+      );
+      closeModelBrowseModal();
+      loadSavings();
+    });
+
+  // Close on backdrop click, ESC key, or the close button.
+  document
+    .getElementById("recon-modal-close")
+    .addEventListener("click", closeModelBrowseModal);
+  modal.addEventListener("click", function (e) {
+    if (e.target === modal) closeModelBrowseModal();
+  });
+  document.addEventListener("keydown", _modalEscHandler);
+}
+
+function closeModelBrowseModal() {
+  var m = document.getElementById("recon-model-modal");
+  if (m && m.parentNode) m.parentNode.removeChild(m);
+  document.removeEventListener("keydown", _modalEscHandler);
+}
+
+function _modalEscHandler(e) {
+  if (e.key === "Escape") closeModelBrowseModal();
+}
+
+/**
  * Format an integer with thousands separators. Used for the headline
  * "tokens saved" number — a comma-separated 3,200,000 reads a lot
  * better than 3200000 at this size on the page.
@@ -543,11 +890,30 @@ function renderSavings(data) {
     })
     .join("");
 
+  // Model picker + dollar figure (#21). Read from localStorage; the
+  // "self-hosted / not sure" option intentionally returns null from
+  // dollarsFor() so the UI hides the dollar tile entirely rather than
+  // pretending there's a number.
+  var model = getSelectedModel();
+  var dollars = dollarsFor(saved, model);
+  var dollarTile = dollars != null
+    ? '<div style="font-size:24px;font-family:var(--serif);color:var(--clay);' +
+        'letter-spacing:-.02em" ' +
+        'title="Based on the ' + escapeHtml(model.label) + ' provider list rate ' +
+        '($' + model.input_per_1m + '/M input tokens, snapshotted 2026-04-30). ' +
+        'Your actual bill depends on provider, plan, and any cached-token discounts.">' +
+        escapeHtml(fmtUSD(dollars)) + " in " + escapeHtml(model.label) + " input" +
+      "</div>"
+    : "";
+
   box.innerHTML =
     '<div style="display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;margin-bottom:8px">' +
     '<div style="font-size:44px;font-family:var(--serif);letter-spacing:-.02em">' +
     fmtCompact(saved) +
     " tokens</div>" +
+    dollarTile +
+    "</div>" +
+    '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">' +
     '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
     escapeHtml(String(range)) +
     " days · " +
@@ -558,7 +924,11 @@ function renderSavings(data) {
         escapeHtml(formatDurationMicros(latencySavedMicros)) +
         " faster</span> than Read+Grep loop"
       : "") +
-    "</div></div>" +
+    "</div>" +
+    '<div style="font-family:var(--mono);font-size:11px;color:var(--ink-3);' +
+      'letter-spacing:.04em">show as: </div>' +
+    renderModelPicker(model.id) +
+    "</div>" +
     '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px;line-height:1.55">' +
     "Measured per-call against the in-process Read/grep equivalent for the 8 direct " +
     "file/grep tools (<code>code_outline</code>, <code>code_skeleton</code>, " +
@@ -581,6 +951,23 @@ function renderSavings(data) {
 
   // Wire the hover layer against the freshly-injected SVG.
   wireSparklineHover();
+
+  // Bind the model-picker change handler. CSP-safe (no inline onchange).
+  // Re-rendering via loadSavings() refetches and re-runs the whole pipeline,
+  // which is fine — the dollar figure is the only thing that changes.
+  var picker = document.getElementById("recon-model-picker");
+  if (picker) {
+    picker.addEventListener("change", function (e) {
+      setSelectedModel(e.target.value);
+      loadSavings();
+    });
+  }
+
+  // "Browse all 1,945 models" opens the catalog modal.
+  var browseBtn = document.getElementById("recon-model-browse-all");
+  if (browseBtn) {
+    browseBtn.addEventListener("click", openModelBrowseModal);
+  }
 }
 
 function renderProfile(user) {

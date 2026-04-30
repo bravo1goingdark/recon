@@ -72,11 +72,29 @@
 <main class="legal">
   <div class="eyebrow">Release notes</div>
   <h1>Change<em>log</em></h1>
-  <div class="meta">Newest first · binaries published at <a href="https://github.com/bravo1goingdark/intel/releases">github.com/bravo1goingdark/intel/releases</a></div>
+  <div class="meta">Newest first · binaries published at <a href="https://github.com/bravo1goingdark/recon/releases">github.com/bravo1goingdark/recon/releases</a></div>
 
   <div class="callout">
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
   </div>
+
+  <article class="release" id="v0-5-1">
+    <header>
+      <h2>v0.5.1</h2>
+      <span class="when">2026-04-30</span>
+    </header>
+    <span class="tag fix">Honest savings — kill the per-call double-count</span>
+    <p>The <code>tokens_saved</code> headline was a per-call upper bound — every tool call credited the full Read+Grep alternative even when the agent had already seen the file or run the query in the same conversation. On hot sessions that drove a ~3.5× over-statement (one user reported 2.83M saved across 160 calls; the honest figure was around 800K).</p>
+    <p>v0.5.1 adds process-scoped baseline dedupe (closes #25). The first call against a <code>(tool, dedup_key)</code> pair credits the full Read+Grep alternative; subsequent calls credit 0 (call counts and latency still accrue). Per-tool keys: file path for <code>code_outline</code> / <code>code_skeleton</code> / <code>code_read_symbol</code>; symbol identifier for <code>code_find_symbol</code> / <code>find_refs</code> / <code>callers</code> / <code>callees</code> / <code>impact</code> / <code>context</code>; <code>mode|query</code> for <code>code_search</code>; <code>kind|pattern</code> for <code>code_find_strings</code>; sorted patterns for <code>code_multi_find</code>; <code>(src, dst)</code> for <code>code_path</code>; focus-files set for <code>code_repo_map</code>; subsystem id for <code>code_subsystem</code>; singleton for <code>code_subsystems</code>.</p>
+    <p><b>Process-scoped is the v0.5.1 simplification.</b> For stdio MCP transport (Claude Code, Cursor, Windsurf, OpenCode all spawn one <code>recon serve</code> per conversation) this is identical to session-scoped. Streamable HTTP multiplexes many sessions through one process and will under-count until v0.5.2 plumbs the rmcp <code>RequestContext</code> session id through.</p>
+    <p>Schema unchanged. Past rollups stay at the v0.5.0 calculation; only fresh pushes use deduped values. <b>Numbers will visibly shrink after upgrade — that's the honesty pass.</b> <code>recon savings show</code> gains a footer note clarifying the dedupe window and that provider prompt-cache absorption (Anthropic / OpenAI / Gemini / vLLM) shaves more on top at billing time.</p>
+    <p><b>Dashboard dollar conversion</b> (closes #21). Pick your model on the Savings tab and the headline gains a clay-coloured <code>$X.XX in &lt;model&gt; input cost</code> tile alongside the tokens-saved figure. The picker ships a 20-row curated short list (Anthropic / OpenAI / Google / DeepSeek / Mistral / Together / Cohere) plus a "Browse all 1,945 models →" button that opens a search modal over the full litellm catalog (snapshot 2026-04-30, lazy-loaded as a 165 KB JSON, served from <code>/js/model-prices.json</code>). A "Self-hosted / not sure" option hides the dollar tile entirely — we don't pretend there's a number when there isn't one. Choice persists in <code>localStorage</code> (catalog picks cache id + label + rate so the rate survives reloads); tooltip discloses the exact rate used. recon stays model-agnostic on the backend — the conversion is pure dashboard JS, no provider-side state.</p>
+    <p><b>Forward-compat hardening, two of two from the v0.5.0 audit plan that hadn't shipped yet.</b></p>
+    <ul>
+      <li><b><code>RepoEntry</code> deserializes with missing fields.</b> Every field of the registry record (<code>~/.config/recon/repos.json</code>) is now <code>#[serde(default)]</code>. Future versions adding fields to the registry will hydrate older files cleanly instead of taking the whole multi-repo registry dark on a single missing key. Older binaries opening newer files just ignore unknown keys.</li>
+      <li><b>SQLite "schema is newer than this binary" check.</b> <code>Store::open</code> now peeks at <code>meta.schema_version</code> before calling <code>to_latest</code>; if the on-disk stamp exceeds <code>CURRENT_SCHEMA_VERSION</code> the open fails with <i>"recon database schema version 99 is newer than this binary supports (max 4). Upgrade recon to read this database, or delete the .recon/ directory to start fresh."</i> instead of letting <code>rusqlite_migration</code> surface a generic "migration defined after database" message — protects users who downgrade across a schema bump.</li>
+    </ul>
+  </article>
 
   <article class="release" id="v0-5-0">
     <header>
@@ -169,7 +187,7 @@
     <p><b>Measured per-call baselines.</b> Eight tools now compute their "what Read+grep would have cost" figure from real bytes touched on the call, not a hard-coded constant. The dashboard sums those measurements into the per-day rollup; <code>recon savings show</code> reflects the same numbers locally.</p>
     <ul>
       <li><b>Migrated to measured</b> — <code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code> (regex / grep paths only — tantivy and semantic modes pass <code>None</code>), <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>. Each handler reuses already-warm bytes — no extra I/O, no extra grep passes — so latency stays under the 100 ms p99 budget.</li>
-      <li><b>Worst-case mitigation</b> — the running-sum search path caps match-bytes scanned at 1 MiB per call, then extrapolates by the unscanned-file ratio. Bounded wall-time on regexes that match every line of a giant repo. <a href="https://github.com/bravo1goingdark/intel/blob/main/crates/recon-search/src/fff_backend.rs">[code]</a></li>
+      <li><b>Worst-case mitigation</b> — the running-sum search path caps match-bytes scanned at 1 MiB per call, then extrapolates by the unscanned-file ratio. Bounded wall-time on regexes that match every line of a giant repo. <a href="https://github.com/bravo1goingdark/recon/blob/main/crates/recon-search/src/fff_backend.rs">[code]</a></li>
       <li><b>Static-only, with rationale</b> — 10 tools keep documented static estimates because their alternative is fuzzy ranking, transitive call-graph traversal, or PageRank — none of which a single-pass grep replicates honestly. <code>code_find_symbol</code>, <code>code_find_refs</code>, <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>, <code>code_repo_map</code>, <code>code_reindex</code>.</li>
       <li><b>Calibration harness</b> — <code>cargo xtask measured-baselines-corpus --repo &lt;path&gt;</code> runs every migrated tool against a real repo, prints (static_estimate, measured, response, divergence) as TSV, and gates a PASS/FAIL on a 15 % divergence threshold. Will run in CI on PRs touching the measured handlers.</li>
     </ul>

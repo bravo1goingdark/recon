@@ -40,6 +40,8 @@
 //! callers convert against whatever rate sheet they price against.
 
 use ahash::AHashMap;
+use compact_str::CompactString;
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use recon_storage::store::Store;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -392,6 +394,23 @@ pub struct Telemetry {
     /// interleave their SQLite writes. The atomic counter on the hot path
     /// is unaffected.
     flush_guard: Mutex<()>,
+    /// Process-scoped baseline-credit dedupe (closes #25). The first call
+    /// against a `(tool, dedup_key)` pair credits the full Read+Grep
+    /// alternative cost; subsequent calls against the same pair credit 0.
+    /// This kills the per-call double-counting that drove ~3.5×
+    /// over-statement on hot sessions where the same file / query / symbol
+    /// got hit repeatedly.
+    ///
+    /// Process-scoped is the v0.5.1 simplification: for stdio MCP transport
+    /// (the dominant case) one `recon serve` process serves exactly one
+    /// rmcp session, so process-scoped is identical to session-scoped. For
+    /// Streamable HTTP a single process can multiplex many sessions; that
+    /// case under-counts (later sessions see the dedupe set populated by
+    /// earlier ones). v0.5.2 will plumb the rmcp `RequestContext` session
+    /// id through tool handlers to fix the HTTP case; until then, agents
+    /// querying via HTTP should restart `recon serve` between conversations
+    /// for exact accounting.
+    dedup: DashMap<(&'static str, CompactString), ()>,
 }
 
 impl Default for Telemetry {
@@ -412,7 +431,30 @@ impl Telemetry {
             session_started_at: now_unix_secs(),
             calls_since_flush: AtomicU64::new(0),
             flush_guard: Mutex::new(()),
+            dedup: DashMap::new(),
         }
+    }
+
+    /// Returns `true` if this is the first time this process has credited
+    /// a baseline for `(tool, key)`, `false` thereafter. Caller credits
+    /// the full baseline only on the first occurrence and zero baseline
+    /// on every repeat — see #25 for the per-tool key table.
+    ///
+    /// Atomic via `DashMap::insert` returning `None` only on first write.
+    /// No mutex; safe to call from concurrent tool handlers.
+    pub fn should_credit_baseline(&self, tool: &'static str, key: &str) -> bool {
+        self.dedup
+            .insert((tool, CompactString::new(key)), ())
+            .is_none()
+    }
+
+    /// Reset the dedupe set. Used by tests; not exposed to the hot path.
+    /// Production resets happen implicitly via process exit (every
+    /// `recon serve` start gets a fresh `Telemetry` and therefore a fresh
+    /// dedupe map).
+    #[cfg(test)]
+    pub fn reset_dedup(&self) {
+        self.dedup.clear();
     }
 
     /// Record one tool call. Lock-free hot path: 4 atomic adds + a
@@ -649,6 +691,47 @@ mod tests {
             }
         }
         assert_eq!(triggers, 1, "exactly one flush trigger expected");
+    }
+
+    /// First-sight of a (tool, key) pair returns true; every subsequent
+    /// call against the same key returns false. A different key on the
+    /// same tool counts as fresh. Closes #25 at the API surface.
+    #[test]
+    fn dedup_first_then_repeats_then_different_key() {
+        let t = Telemetry::new();
+        // First credit on (code_outline, "src/lib.rs") — true.
+        assert!(t.should_credit_baseline("code_outline", "src/lib.rs"));
+        // Repeat — false (don't credit baseline a second time).
+        assert!(!t.should_credit_baseline("code_outline", "src/lib.rs"));
+        assert!(!t.should_credit_baseline("code_outline", "src/lib.rs"));
+        // Different file under the same tool — credit again.
+        assert!(t.should_credit_baseline("code_outline", "src/main.rs"));
+        // Same file under a different tool — credit (different alternative
+        // would have happened: outline reads, find_symbol greps).
+        assert!(t.should_credit_baseline("code_skeleton", "src/lib.rs"));
+        // After reset, every key is fresh again.
+        t.reset_dedup();
+        assert!(t.should_credit_baseline("code_outline", "src/lib.rs"));
+    }
+
+    /// The dedup gate must not affect calls / response / latency counters —
+    /// only baseline accrual is suppressed on repeats.
+    #[test]
+    fn dedup_only_gates_baseline_not_calls() {
+        let t = Arc::new(Telemetry::new());
+        // First call: full static baseline (5000 for code_find_symbol) accrues.
+        assert!(t.should_credit_baseline("code_find_symbol", "Foo"));
+        let _ = t.record("code_find_symbol", Duration::from_millis(2), 400, None);
+        // Repeat: caller passes Some(0) to suppress baseline; call & response
+        // tokens still accrue.
+        assert!(!t.should_credit_baseline("code_find_symbol", "Foo"));
+        let _ = t.record("code_find_symbol", Duration::from_millis(2), 400, Some(0));
+        let agg = t.aggregate();
+        assert_eq!(agg.calls, 2, "both calls counted");
+        assert_eq!(agg.response_tokens, 800, "both response sums counted");
+        // Only the first call accrued the static baseline.
+        assert_eq!(agg.static_baseline_tokens, 5000);
+        assert_eq!(agg.measured_baseline_tokens, 0);
     }
 
     #[test]
