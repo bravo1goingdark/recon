@@ -72,7 +72,7 @@
 <main class="legal">
   <div class="eyebrow">Release notes</div>
   <h1>Change<em>log</em></h1>
-  <div class="meta">Newest first · binaries published at <a href="https://github.com/bravo1goingdark/intel/releases">github.com/bravo1goingdark/intel/releases</a></div>
+  <div class="meta">Newest first · binaries published at <a href="https://github.com/bravo1goingdark/recon/releases">github.com/bravo1goingdark/recon/releases</a></div>
 
   <div class="callout">
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
@@ -187,7 +187,7 @@
     <p><b>Measured per-call baselines.</b> Eight tools now compute their "what Read+grep would have cost" figure from real bytes touched on the call, not a hard-coded constant. The dashboard sums those measurements into the per-day rollup; <code>recon savings show</code> reflects the same numbers locally.</p>
     <ul>
       <li><b>Migrated to measured</b> — <code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code> (regex / grep paths only — tantivy and semantic modes pass <code>None</code>), <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>. Each handler reuses already-warm bytes — no extra I/O, no extra grep passes — so latency stays under the 100 ms p99 budget.</li>
-      <li><b>Worst-case mitigation</b> — the running-sum search path caps match-bytes scanned at 1 MiB per call, then extrapolates by the unscanned-file ratio. Bounded wall-time on regexes that match every line of a giant repo. <a href="https://github.com/bravo1goingdark/intel/blob/main/crates/recon-search/src/fff_backend.rs">[code]</a></li>
+      <li><b>Worst-case mitigation</b> — the running-sum search path caps match-bytes scanned at 1 MiB per call, then extrapolates by the unscanned-file ratio. Bounded wall-time on regexes that match every line of a giant repo. <a href="https://github.com/bravo1goingdark/recon/blob/main/crates/recon-search/src/fff_backend.rs">[code]</a></li>
       <li><b>Static-only, with rationale</b> — 10 tools keep documented static estimates because their alternative is fuzzy ranking, transitive call-graph traversal, or PageRank — none of which a single-pass grep replicates honestly. <code>code_find_symbol</code>, <code>code_find_refs</code>, <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>, <code>code_repo_map</code>, <code>code_reindex</code>.</li>
       <li><b>Calibration harness</b> — <code>cargo xtask measured-baselines-corpus --repo &lt;path&gt;</code> runs every migrated tool against a real repo, prints (static_estimate, measured, response, divergence) as TSV, and gates a PASS/FAIL on a 15 % divergence threshold. Will run in CI on PRs touching the measured handlers.</li>
     </ul>
