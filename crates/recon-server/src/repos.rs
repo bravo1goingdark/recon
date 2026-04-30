@@ -14,15 +14,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ── Data types ─────────────────────────────────────────────────────────────────
 
 /// A record of a single indexed repository.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Every field is `#[serde(default)]` so that adding new fields in future
+/// recon versions does not break older `repos.json` files: missing fields
+/// hydrate as zero/empty rather than failing the whole `load_repos()` call
+/// and tearing down the registry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoEntry {
     /// Canonicalized absolute path to the repository root.
+    #[serde(default)]
     pub path: String,
     /// Unix timestamp (seconds) of the last successful index.
+    #[serde(default)]
     pub indexed_at: u64,
     /// Number of source files indexed.
+    #[serde(default)]
     pub files: usize,
     /// Number of symbols indexed.
+    #[serde(default)]
     pub symbols: usize,
 }
 
@@ -139,6 +148,37 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("repos.json"), "not json {{").unwrap();
         assert!(load_repos(dir.path()).is_err());
+    }
+
+    #[test]
+    fn repo_entry_deserializes_with_missing_fields() {
+        // Forward-compat: if a future recon version adds fields to RepoEntry,
+        // older files on disk must still hydrate successfully (missing fields
+        // default to 0/""). The whole point is that the registry never goes
+        // dark just because the schema grew.
+        let only_path: RepoEntry = serde_json::from_str(r#"{"path":"/foo"}"#).unwrap();
+        assert_eq!(only_path.path, "/foo");
+        assert_eq!(only_path.indexed_at, 0);
+        assert_eq!(only_path.files, 0);
+        assert_eq!(only_path.symbols, 0);
+
+        let totally_empty: RepoEntry = serde_json::from_str("{}").unwrap();
+        assert_eq!(totally_empty, RepoEntry::default());
+    }
+
+    #[test]
+    fn load_repos_skips_unknown_keys_gracefully() {
+        // Future-version files may carry extra keys; serde's default mode
+        // ignores them. Existing recon binaries must keep working.
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("repos.json"),
+            r#"[{"path":"/a","indexed_at":1,"files":2,"symbols":3,"future_field":"ignored"}]"#,
+        )
+        .unwrap();
+        let repos = load_repos(dir.path()).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].path, "/a");
     }
 
     // ── save_repos / roundtrip ─────────────────────────────────────────────────
