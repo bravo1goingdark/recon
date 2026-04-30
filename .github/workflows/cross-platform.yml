@@ -2,7 +2,7 @@ name: Cross-platform + embed (nightly)
 
 # Heavy tests that don't gate every PR:
 #   - macos-latest, windows-latest full test suite
-#   - `--features embed` (fastembed + sqlite-vec + ort-sys prebuilt download)
+#   - `--features local-embed` (fastembed + sqlite-vec + ort-sys prebuilt download)
 #
 # Running these on every push was costing 40+ min per PR and blocking merges
 # on a flaky pyke.io CDN. Gating them here means:
@@ -62,8 +62,8 @@ jobs:
 
       - run: cargo test --workspace --exclude recon-embed
 
-  embed:
-    name: Test (embed feature)
+  local-embed:
+    name: Test (local-embed feature)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,10 +74,10 @@ jobs:
       # cdn.pyke.io. That CDN returns transient 5xx responses a few times
       # per week. Retry up to 3 times with a 30-second backoff — cheaper
       # than re-running the whole job and avoids false-negative alerts.
-      - name: Test with embed feature (retry on pyke.io flakes)
+      - name: Test with local-embed feature (retry on pyke.io flakes)
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 25
           max_attempts: 3
           retry_wait_seconds: 30
-          command: cargo test --workspace --features embed
+          command: cargo test --workspace --features local-embed

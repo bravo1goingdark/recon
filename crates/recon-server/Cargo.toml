@@ -58,9 +58,6 @@ default = []
 # breaks aarch64 cross-compile without openssl sysroot. Use this for
 # regulated / air-gapped environments where chunk text must never
 # leave the machine. The hosted client (`recon-embed-client`) is
-# still linked but unused on this code path.
+# still linked but unused on this code path. Default builds wire in
+# the hosted endpoint unconditionally via `init_embed`.
 local-embed = ["recon-embed/local-inference"]
-# Compatibility alias for downstream callers who used the old
-# `embed` feature name. `local-embed` is the real flag going
-# forward; this alias may go away in a future minor.
-embed = ["local-embed"]

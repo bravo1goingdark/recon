@@ -44,12 +44,12 @@ zip = { workspace = true }
 
 [features]
 default = []
-# Enable local ONNX inference for semantic search. Default builds use
-# the hosted endpoint via recon-embed-client; this flag swaps in the
-# offline fastembed path for air-gapped / regulated environments.
+# Enable local ONNX inference for semantic search. Default builds wire
+# in the hosted endpoint via recon-embed-client unconditionally — when
+# credentials are missing the server degrades to a clear "run
+# `recon login`" message. This flag swaps in the offline fastembed
+# path for air-gapped / regulated environments.
 local-embed = ["recon-server/local-embed"]
-# Backward-compatible alias.
-embed = ["local-embed"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
