@@ -84,7 +84,12 @@ impl Watcher {
     /// On notify overflow or generic errors, falls back to `gix status`
     /// to discover changed paths.
     pub fn new(root: &Path) -> Result<Self, notify::Error> {
-        let (tx, rx) = mpsc::channel();
+        // Bounded channel: a backed-up consumer (slow parser, paused
+        // debugger, etc.) blocks the debouncer's send rather than
+        // letting the queue grow unbounded. 64 batches is generous —
+        // each batch already coalesces 250 ms of edits, so 64 represents
+        // ~16 s of continuous churn before the debouncer thread parks.
+        let (tx, rx) = mpsc::sync_channel(64);
 
         let sender = tx.clone();
         let root_for_fallback = root.to_path_buf();
