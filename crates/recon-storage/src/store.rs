@@ -1238,7 +1238,7 @@ mod tests {
     fn open_memory_and_migrate() {
         let store = Store::open_memory().unwrap();
         let v = store.get_meta("schema_version").unwrap();
-        assert_eq!(v.as_deref(), Some("4"));
+        assert_eq!(v.as_deref(), Some("5"));
     }
 
     #[test]

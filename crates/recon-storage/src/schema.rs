@@ -9,7 +9,7 @@ use rusqlite_migration::{Migrations, M};
 /// inside the new migration's SQL. `Store::open` rejects on-disk databases
 /// stamped at a version higher than this so a downgrade fails loudly instead
 /// of silently corrupting a future schema.
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 /// Build the migration set.
 pub fn migrations() -> Migrations<'static> {
@@ -18,6 +18,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SCHEMA_V2),
         M::up(SCHEMA_V3),
         M::up(SCHEMA_V4),
+        M::up(SCHEMA_V5),
     ])
 }
 
@@ -160,4 +161,17 @@ CREATE TRIGGER symbols_au AFTER UPDATE ON symbols BEGIN
 END;
 
 UPDATE meta SET value = '4' WHERE key = 'schema_version';
+"#;
+
+/// V5: Compound index `(path, byte_start)` for ordered scans.
+///
+/// `symbols_for_path` issues `WHERE path = ?1 ORDER BY byte_start`. With
+/// only the single-column `symbols_path` (added in V1), the planner does
+/// an index seek + filesort. The compound index lets it walk rows in
+/// already-sorted order — no sort step, no temp B-tree. Affects every
+/// `code_outline` and `code_skeleton` call on large files.
+const SCHEMA_V5: &str = r#"
+CREATE INDEX IF NOT EXISTS symbols_path_byte ON symbols(path, byte_start);
+
+UPDATE meta SET value = '5' WHERE key = 'schema_version';
 "#;
