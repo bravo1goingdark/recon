@@ -165,28 +165,48 @@ async function loadSavings() {
 }
 
 /**
- * Per-model input-token rates in USD per 1M input tokens. Curated short
- * list — sourced from litellm's model_prices_and_context_window.json
- * snapshot 2026-04-30. Refresh by opening a PR with updated values when
- * the underlying providers change pricing. The "self-hosted / not sure"
- * row sets `input_per_1m` to null so the UI hides the dollar figure
- * entirely (closes #21).
+ * Per-model input-token rates in USD per 1M input tokens. Curated table
+ * sourced from each provider's published list rate as of 2026-04-30.
+ * The "self-hosted / not sure" row sets `input_per_1m` to null so the
+ * UI hides the dollar figure entirely — we don't pretend there's a
+ * number when there isn't one. Closes #21.
  *
- * Why a curated list over the full litellm catalog (~hundreds of
- * models): the modal user picks once and forgets. A dropdown of 8
- * recognizable models is easier to scan than a search box over 400
- * obscure names. If a user runs on something not in this list, they
- * pick "self-hosted / not sure" and the headline stays in tokens.
+ * Grouped by provider in the dropdown so users can scan to their family
+ * fast: Anthropic → OpenAI → Google → DeepSeek → Mistral → Together
+ * (Llama / Qwen) → Cohere → fallback. Refresh values by opening a PR
+ * when providers change pricing; v0.5.2 will replace this with a
+ * top-N curated set + search modal against the full litellm catalog
+ * for the long tail.
  */
 var MODEL_PRICES = [
-  { id: "claude-sonnet-4-5", label: "Claude Sonnet 4.5", input_per_1m: 3.0 },
-  { id: "claude-opus-4-7",   label: "Claude Opus 4.7",   input_per_1m: 15.0 },
-  { id: "claude-haiku-4-5",  label: "Claude Haiku 4.5",  input_per_1m: 0.8 },
-  { id: "gpt-4o",            label: "GPT-4o",            input_per_1m: 2.5 },
-  { id: "gpt-4-turbo",       label: "GPT-4 Turbo",       input_per_1m: 10.0 },
-  { id: "gemini-2-5-pro",    label: "Gemini 2.5 Pro",    input_per_1m: 1.25 },
-  { id: "gemini-2-5-flash",  label: "Gemini 2.5 Flash",  input_per_1m: 0.1 },
-  { id: "self-hosted",       label: "Self-hosted / not sure", input_per_1m: null }
+  // Anthropic
+  { id: "claude-opus-4-7",       label: "Claude Opus 4.7",       input_per_1m: 15.0 },
+  { id: "claude-opus-4-6",       label: "Claude Opus 4.6",       input_per_1m: 15.0 },
+  { id: "claude-sonnet-4-6",     label: "Claude Sonnet 4.6",     input_per_1m: 3.0 },
+  { id: "claude-sonnet-4-5",     label: "Claude Sonnet 4.5",     input_per_1m: 3.0 },
+  { id: "claude-haiku-4-5",      label: "Claude Haiku 4.5",      input_per_1m: 0.8 },
+  // OpenAI
+  { id: "gpt-5",                 label: "GPT-5",                 input_per_1m: 5.0 },
+  { id: "gpt-5-mini",            label: "GPT-5 mini",            input_per_1m: 0.5 },
+  { id: "gpt-4o",                label: "GPT-4o",                input_per_1m: 2.5 },
+  { id: "gpt-4-turbo",           label: "GPT-4 Turbo",           input_per_1m: 10.0 },
+  { id: "gpt-3-5-turbo",         label: "GPT-3.5 Turbo",         input_per_1m: 0.5 },
+  // Google
+  { id: "gemini-2-5-pro",        label: "Gemini 2.5 Pro",        input_per_1m: 1.25 },
+  { id: "gemini-2-5-flash",      label: "Gemini 2.5 Flash",      input_per_1m: 0.1 },
+  // DeepSeek
+  { id: "deepseek-v3",           label: "DeepSeek V3",           input_per_1m: 0.27 },
+  { id: "deepseek-r1",           label: "DeepSeek R1",           input_per_1m: 0.55 },
+  // Mistral
+  { id: "mistral-large-2",       label: "Mistral Large 2",       input_per_1m: 2.0 },
+  { id: "codestral",             label: "Codestral",             input_per_1m: 0.3 },
+  // Together / Bedrock-hosted Llama and Qwen
+  { id: "llama-3-3-70b",         label: "Llama 3.3 70B",         input_per_1m: 0.88 },
+  { id: "qwen-2-5-coder-32b",    label: "Qwen 2.5 Coder 32B",    input_per_1m: 0.18 },
+  // Cohere
+  { id: "command-r-plus",        label: "Cohere Command R+",     input_per_1m: 2.5 },
+  // Fallback
+  { id: "self-hosted",           label: "Self-hosted / not sure", input_per_1m: null }
 ];
 
 /**
@@ -641,9 +661,9 @@ function renderSavings(data) {
   var dollarTile = dollars != null
     ? '<div style="font-size:24px;font-family:var(--serif);color:var(--clay);' +
         'letter-spacing:-.02em" ' +
-        'title="Based on litellm\'s ' + escapeHtml(model.id) + ' input rate ($' +
-        model.input_per_1m + '/M, snapshotted 2026-04-30). Your actual bill ' +
-        'depends on provider, plan, and any cached-token discounts.">' +
+        'title="Based on the ' + escapeHtml(model.label) + ' provider list rate ' +
+        '($' + model.input_per_1m + '/M input tokens, snapshotted 2026-04-30). ' +
+        'Your actual bill depends on provider, plan, and any cached-token discounts.">' +
         escapeHtml(fmtUSD(dollars)) + " in " + escapeHtml(model.label) + " input" +
       "</div>"
     : "";
