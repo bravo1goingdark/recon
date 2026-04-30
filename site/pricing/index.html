@@ -25,7 +25,34 @@
   .price span{font-size:.85rem;font-weight:400;color:var(--ink-2)}
   .limits{display:flex;flex-direction:column;gap:8px;color:var(--ink-2);font-size:13px;font-family:var(--mono)}
   .limits strong{color:var(--ink);font-weight:500}
+  .features{display:flex;flex-direction:column;gap:7px;font-size:13px;color:var(--ink-2);line-height:1.4;border-top:1px solid var(--rule-soft);padding-top:16px}
+  .features li{list-style:none;padding-left:18px;position:relative}
+  .features li::before{content:"";position:absolute;left:2px;top:7px;width:5px;height:5px;border-radius:50%;background:var(--clay)}
+  .features b{color:var(--ink);font-weight:500}
   .card .btn{width:100%;justify-content:center;margin-top:auto}
+
+  /* "All plans include" universal feature strip above the cards. */
+  .universals{
+    max-width:900px;margin:0 auto 32px;padding:24px 28px;
+    border:1px solid var(--rule-soft);border-radius:4px;
+    background:var(--paper-2);
+  }
+  .universals h4{
+    font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--ink-3);margin-bottom:14px
+  }
+  .universals ul{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 24px;
+    list-style:none;
+  }
+  .universals li{
+    padding-left:18px;position:relative;font-size:13px;color:var(--ink-2);line-height:1.4
+  }
+  .universals li::before{
+    content:"";position:absolute;left:2px;top:7px;width:5px;height:5px;border-radius:50%;
+    background:var(--ink-3)
+  }
+  .universals b{color:var(--ink);font-weight:500}
 
   @media (max-width:720px){
     .hero{padding:48px 0 36px}
@@ -83,6 +110,22 @@
 </section>
 
 <section class="wrap">
+  <!-- Universal features — every tier (including Free) gets these. Listed
+       once above the cards so each card stays focused on the deltas. -->
+  <div class="universals">
+    <h4>Every plan includes</h4>
+    <ul>
+      <li><b>20 MCP tools</b> — outline, skeleton, find_symbol, find_refs, search, list, repo_map, callers, callees, path, impact, context, subsystems, multi_find, find_strings, reindex, plus the 2 multi-repo tools</li>
+      <li><b>7 languages</b> — Rust, Python, TypeScript / JavaScript / TSX, Go, Java, C / C++</li>
+      <li><b>Graph-aware navigation</b> — call paths, callers, callees, blast-radius, subsystems</li>
+      <li><b>Session-end savings receipt</b> — printed to stderr at every <code>recon serve</code> shutdown</li>
+      <li><b>Privacy-first</b> — source files stay local; only formatted chunk text travels for embeddings (no logs, no paths)</li>
+      <li><b>Offline embeddings</b> — opt-in via <code>--features local-embed</code> for fully air-gapped semantic search</li>
+      <li><b>Single signed Rust binary</b> — <code>cosign</code>-verifiable</li>
+      <li><b>Local <code>recon savings show</code></b> — TSV with tokens-saved + time-saved per tool</li>
+    </ul>
+  </div>
+
   <div class="cards">
 
     <div class="card">
@@ -92,9 +135,14 @@
         <div><strong>1</strong> repo</div>
         <div><strong>250</strong> files per repo</div>
         <div><strong>10K</strong> lines of code</div>
-        <div>Local <code>recon savings show</code></div>
-        <div>Community support</div>
       </div>
+      <ul class="features">
+        <li>All <b>20 tools</b> on a single repo</li>
+        <li><b>Multi-repo MCP tools</b> registered (<code>code_activate_repo</code>, <code>code_list_repos</code>) but limited to 1 active repo</li>
+        <li><b>Local semantic search</b> via <code>--features local-embed</code> — runs Jina v2-base-code on CPU, fully offline</li>
+        <li><b>Local CLI</b> only — no dashboard, no hosted embed</li>
+        <li>Community support</li>
+      </ul>
       <a href="/login" class="btn ghost" data-upgrade-tier="Free">Get started →</a>
     </div>
 
@@ -108,9 +156,15 @@
         <div><strong>10</strong> repos</div>
         <div><strong>5,000</strong> files per repo</div>
         <div><strong>200K</strong> lines of code</div>
-        <div><strong>30-day</strong> savings dashboard</div>
-        <div>Priority support</div>
       </div>
+      <ul class="features">
+        <li>Everything in <b>Starter</b></li>
+        <li><b>Hosted semantic search</b> — <code>jina-embeddings-v2-base-code</code> on a T4 GPU, KV-cached chunks. Fair-use rate limit: 1000 req/min burst</li>
+        <li><b>Multi-repo activation</b> — switch repos at runtime; sessions persist across restarts</li>
+        <li><b>30-day savings dashboard</b> — daily rollups with tokens-saved <i>and</i> time-saved (<code>~6m 12s faster</code>)</li>
+        <li><b>Auto-push savings</b> on by default; opt-out via <code>RECON_AUTO_PUSH_SAVINGS=0</code></li>
+        <li>Priority support</li>
+      </ul>
       <button class="btn primary" data-upgrade-tier="Pro">Subscribe to Pro →</button>
     </div>
 
@@ -121,13 +175,22 @@
         <div><strong>25</strong> repos</div>
         <div><strong>50,000</strong> files per repo</div>
         <div><strong>4M</strong> lines of code</div>
-        <div><strong>90-day</strong> savings dashboard</div>
-        <div>Priority support</div>
       </div>
+      <ul class="features">
+        <li>Everything in <b>Pro</b></li>
+        <li><b>Monorepo-scale limits</b> — 4M LOC, 50K files per repo</li>
+        <li><b>90-day savings dashboard</b> — quarter-over-quarter trends visible</li>
+        <li><b>Up to 25 active repos</b> — every checked-out repo on the laptop, plus shared monorepos</li>
+        <li>Priority support</li>
+      </ul>
       <button class="btn ghost" data-upgrade-tier="Team">Subscribe to Team →</button>
     </div>
 
   </div>
+
+  <p style="max-width:780px;margin:8px auto 64px;padding:0 28px;font-size:13px;color:var(--ink-3);text-align:center;line-height:1.55">
+    Need more than 25 repos, custom SLAs, or self-hosted? <a href="mailto:hello@mcprecon.dev?subject=Enterprise%20enquiry" style="color:var(--clay)">Talk to us</a> about Enterprise (1000 repos, unlimited LOC) or the uncapped self-hosted build.
+  </p>
 </section>
 
 <footer class="site">
