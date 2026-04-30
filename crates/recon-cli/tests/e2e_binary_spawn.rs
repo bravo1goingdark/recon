@@ -193,9 +193,22 @@ fn binary_spawn_initialize_call_tool_shutdown() {
         "tools/call result.content must be array: {resp}"
     );
     let text = content[0]["text"].as_str().expect("content text");
-    let entries: serde_json::Value = serde_json::from_str(text).expect("code_list body is JSON");
+    let body: serde_json::Value = serde_json::from_str(text).expect("code_list body is JSON");
+    // v0.5.0+: code_list wraps its rows in a `Hits(kind="file")` envelope
+    // instead of returning a bare array. The hits live under `body.hits`.
+    assert_eq!(
+        body["shape"].as_str(),
+        Some("Hits"),
+        "code_list response must be the canonical Hits envelope: {text}"
+    );
+    assert_eq!(
+        body["kind"].as_str(),
+        Some("file"),
+        "code_list Hits envelope must carry kind=\"file\": {text}"
+    );
+    let hits = body["hits"].as_array().expect("Hits.hits must be an array");
     assert!(
-        entries.as_array().is_some_and(|a| !a.is_empty()),
+        !hits.is_empty(),
         "code_list should return at least 1 indexed file on the test project: {text}"
     );
 
