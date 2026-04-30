@@ -81,7 +81,13 @@ impl Store {
             .to_latest(&mut conn)
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        Ok(Self { conn, db_path })
+        let store = Self { conn, db_path };
+        // Defensive: if a previous process died between `enter_indexing_mode`
+        // and `exit_indexing_mode`, the FTS triggers were dropped and never
+        // recreated. Detect and repair so subsequent searches don't return
+        // stale data.
+        store.repair_fts_state_if_needed()?;
+        Ok(store)
     }
 
     /// Peek at `meta.schema_version` before running migrations.
@@ -1047,36 +1053,102 @@ impl Store {
     }
 
     /// Enter high-throughput indexing mode: disable synchronous writes,
-    /// increase cache size, and defer WAL checkpoints.
+    /// increase cache size, defer WAL checkpoints, and drop FTS triggers
+    /// so the bulk insert path doesn't fire ~100–500 trigram-write
+    /// trigger invocations per symbol. The triggers are restored — and
+    /// the FTS index rebuilt in one batched pass — by `exit_indexing_mode`.
     ///
     /// Call `exit_indexing_mode()` after bulk indexing to restore safety.
     /// This can speed up bulk inserts by 2-3× at the cost of crash safety
-    /// during the indexing window.
+    /// during the indexing window. If the process dies between enter and
+    /// exit, the triggers will be missing on next open; `Self::init` runs
+    /// `repair_fts_state_if_needed` to detect and recover from that.
     pub fn enter_indexing_mode(&self) -> Result<(), Error> {
         self.conn
             .execute_batch(
                 "PRAGMA synchronous=OFF;
                  PRAGMA cache_size=-64000;
-                 PRAGMA wal_autocheckpoint=0;",
+                 PRAGMA wal_autocheckpoint=0;
+                 DROP TRIGGER IF EXISTS symbols_ai;
+                 DROP TRIGGER IF EXISTS symbols_ad;
+                 DROP TRIGGER IF EXISTS symbols_au;",
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
 
     /// Exit high-throughput indexing mode and restore safe defaults.
-    /// Also performs a WAL checkpoint to flush pending writes.
+    /// Rebuilds the FTS index in one batched pass (much faster than the
+    /// per-INSERT trigger path), recreates the FTS triggers so subsequent
+    /// incremental updates stay in sync, and performs a WAL checkpoint
+    /// to flush pending writes.
     pub fn exit_indexing_mode(&self) -> Result<(), Error> {
         self.conn
             .execute_batch(
                 "PRAGMA wal_autocheckpoint=1000;
                  PRAGMA synchronous=NORMAL;
                  PRAGMA cache_size=-32000;
-                 PRAGMA wal_checkpoint(TRUNCATE);",
+                 INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild');",
             )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        self.conn
+            .execute_batch(FTS_TRIGGERS_SQL)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Recover from a process death between `enter_indexing_mode` and
+    /// `exit_indexing_mode`: triggers missing → FTS is now stale relative
+    /// to ongoing updates. Rebuild the FTS index and recreate the triggers.
+    /// Cheap when triggers are intact (one sqlite_master query).
+    fn repair_fts_state_if_needed(&self) -> Result<(), Error> {
+        let triggers_present: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='trigger' AND name IN ('symbols_ai','symbols_ad','symbols_au')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        if triggers_present == 3 {
+            return Ok(());
+        }
+        // FTS triggers were dropped (likely by an aborted bulk-index run)
+        // and never re-created. Rebuild + recreate.
+        self.conn
+            .execute_batch("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild');")
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        self.conn
+            .execute_batch(FTS_TRIGGERS_SQL)
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
 }
+
+/// Idempotent FTS5 trigger definitions — kept in sync with the V4 migration
+/// in `schema.rs`. Bumping the FTS schema requires updating both this string
+/// and the migration; the `repair_fts_state_if_needed` recovery path uses
+/// this to rebuild after an aborted bulk-index run.
+const FTS_TRIGGERS_SQL: &str = "\
+CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN \
+    INSERT INTO symbols_fts(rowid, name, qualified_name, signature) \
+    VALUES (new.id, new.name, new.qualified_name, new.signature); \
+END; \
+CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN \
+    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified_name, signature) \
+    VALUES ('delete', old.id, old.name, old.qualified_name, old.signature); \
+END; \
+CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN \
+    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified_name, signature) \
+    VALUES ('delete', old.id, old.name, old.qualified_name, old.signature); \
+    INSERT INTO symbols_fts(rowid, name, qualified_name, signature) \
+    VALUES (new.id, new.name, new.qualified_name, new.signature); \
+END;\
+";
 
 impl Drop for Store {
     fn drop(&mut self) {
