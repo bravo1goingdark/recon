@@ -78,6 +78,16 @@
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
   </div>
 
+  <article class="release" id="v0-5-2">
+    <header>
+      <h2>v0.5.2</h2>
+      <span class="when">2026-04-30</span>
+    </header>
+    <span class="tag fix">Startup handshake fix — repo_map pre-warm no longer blocks the MCP <code>initialize</code></span>
+    <p>v0.5.1 was unusable on any repository large enough to take more than a few seconds to compute its repo_map: <code>ReconServer::index_repo()</code> ran the PageRank-based pre-warm of the repo_map cache <i>inline</i>, before the rmcp stdio transport opened. On a 511,561-symbol corpus that was a 55-second block — well past every IDE's MCP handshake timeout (Claude Code, Cursor, Windsurf, OpenCode all hung up after ~10–30 s). The server was alive and responsive once it finally got around to reading stdin; by then the IDE had marked the connection failed and stopped trying.</p>
+    <p>The pre-warm is now spawned via <code>tokio::task::spawn_blocking</code>. <code>index_repo()</code> returns within milliseconds of finishing tree-sitter parsing and the Tantivy commit, regardless of corpus size. The first <code>code_repo_map</code> call computes the answer cold-path if the spawn hasn't finished yet — same result, no startup wedge. New regression test (<code>index_repo_does_not_block_on_repo_map_prewarm</code>) seeds 1,600 synthetic symbols and asserts <code>index_repo()</code> returns in under 5 s, well below any inline-PageRank wall time on that corpus.</p>
+  </article>
+
   <article class="release" id="v0-5-1">
     <header>
       <h2>v0.5.1</h2>
