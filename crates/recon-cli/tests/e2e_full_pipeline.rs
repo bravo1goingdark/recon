@@ -10,6 +10,22 @@ use recon_search::tantivy_backend::TantivyBackend;
 use recon_server::server::ReconServer;
 use recon_storage::store::Store;
 
+/// Parse the hits array out of a row-oriented tool response. Accepts both
+/// the v0.5+ canonical `Hits` envelope (`{shape:"Hits", kind, count, hits}`)
+/// and a bare JSON array — useful while not every test fixture has been
+/// updated to the new wire shape yet.
+fn parse_hits(result: &str) -> Vec<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(result)
+        .unwrap_or_else(|e| panic!("response is not JSON: {e}\nbody: {result}"));
+    if let Some(arr) = v.as_array() {
+        return arr.clone();
+    }
+    if v.get("shape").and_then(|s| s.as_str()) == Some("Hits") {
+        return v["hits"].as_array().cloned().unwrap_or_default();
+    }
+    panic!("expected array or Hits envelope, got: {result}");
+}
+
 /// Write a file, creating parent directories as needed.
 fn fs_write(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
@@ -340,7 +356,7 @@ async fn e2e_rust_project_index_and_query() {
             r#"{"name": "Config", "kind": null, "lang": null}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(!entries.is_empty(), "should find Config symbol: {result}");
 
     // 3. code_outline: check src/config.rs structure
@@ -386,7 +402,7 @@ async fn e2e_rust_project_index_and_query() {
             r#"{"query": "HashMap", "mode": "exact", "filter": null}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         !entries.is_empty(),
         "should find HashMap references: {result}"
@@ -399,7 +415,7 @@ async fn e2e_rust_project_index_and_query() {
             r#"{"lang": "rust", "filter": null, "glob": null}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         entries.len() >= 3,
         "should list at least 3 Rust files, got {}",
@@ -458,7 +474,7 @@ async fn e2e_multi_language_project() {
             r#"{"name": "add", "kind": null, "lang": "rust"}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         !entries.is_empty(),
         "should find Rust 'add' function: {result}"
@@ -471,7 +487,7 @@ async fn e2e_multi_language_project() {
             r#"{"name": "find_files", "kind": null, "lang": "python"}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         !entries.is_empty(),
         "should find Python 'find_files' function: {result}"
@@ -484,7 +500,7 @@ async fn e2e_multi_language_project() {
             r#"{"name": "NewHandler", "kind": null, "lang": "go"}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         !entries.is_empty(),
         "should find Go 'NewHandler' function: {result}"
@@ -497,7 +513,7 @@ async fn e2e_multi_language_project() {
             r#"{"query": "fn\\s+\\w+", "mode": "regex", "filter": null}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         !entries.is_empty(),
         "regex search should find Rust functions: {result}"
@@ -510,7 +526,7 @@ async fn e2e_multi_language_project() {
             r#"{"patterns": ["fn add", "fn multiply"], "filter": null}"#,
         )
         .await;
-    let results: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let results = parse_hits(&result);
     assert!(
         !results.is_empty(),
         "multi_find should return results: {result}"
@@ -523,7 +539,7 @@ async fn e2e_multi_language_project() {
             r#"{"lang": "python", "filter": null, "glob": null}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         !entries.is_empty(),
         "should list at least 1 Python file: {result}"
@@ -569,7 +585,7 @@ async fn e2e_filter_dsl() {
             r#"{"lang": null, "filter": null, "glob": "config"}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         !entries.is_empty(),
         "glob filter should match config.rs: {result}"
@@ -618,7 +634,7 @@ pub struct NewStruct {
             r#"{"name": "brand_new_function", "kind": null, "lang": null}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&find_result).unwrap();
+    let entries = parse_hits(&find_result);
     assert!(
         !entries.is_empty(),
         "should find brand_new_function after incremental reindex: {find_result}"
@@ -684,7 +700,7 @@ async fn e2e_sensitive_file_redaction() {
             r#"{"lang": null, "filter": null, "glob": ".env"}"#,
         )
         .await;
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+    let entries = parse_hits(&result);
     assert!(
         entries.is_empty(),
         ".env file should not be indexed: {result}"
