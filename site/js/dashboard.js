@@ -221,11 +221,45 @@ function getSelectedModel() {
   for (var i = 0; i < MODEL_PRICES.length; i++) {
     if (MODEL_PRICES[i].id === saved) return MODEL_PRICES[i];
   }
+  // Catalog pick: id was set from the modal but isn't in MODEL_PRICES.
+  // The modal cached the rate + label alongside the id; rehydrate from there
+  // so the dollar tile renders the correct rate and label across reloads.
+  if (saved) {
+    var rate = null;
+    var label = saved;
+    try {
+      var rateStr = localStorage.getItem("recon-savings-model-rate");
+      if (rateStr != null && rateStr !== "") rate = parseFloat(rateStr);
+      var l = localStorage.getItem("recon-savings-model-label");
+      if (l) label = l;
+    } catch (_) {}
+    if (rate != null && isFinite(rate)) {
+      return { id: saved, label: label, input_per_1m: rate };
+    }
+  }
   return MODEL_PRICES[0];
 }
 
-function setSelectedModel(id) {
-  try { localStorage.setItem("recon-savings-model", id); } catch (_) {}
+function setSelectedModel(model) {
+  // Accept either a string id (curated pick) or a full {id,label,input_per_1m}
+  // object (catalog pick from the modal).
+  var id = typeof model === "string" ? model : (model && model.id);
+  if (!id) return;
+  try {
+    localStorage.setItem("recon-savings-model", id);
+    if (typeof model === "object" && model) {
+      localStorage.setItem(
+        "recon-savings-model-rate",
+        model.input_per_1m == null ? "" : String(model.input_per_1m)
+      );
+      localStorage.setItem("recon-savings-model-label", model.label || id);
+    } else {
+      // Curated pick — clear any stale catalog metadata so the curated
+      // table is the source of truth.
+      localStorage.removeItem("recon-savings-model-rate");
+      localStorage.removeItem("recon-savings-model-label");
+    }
+  } catch (_) {}
 }
 
 /**
@@ -256,8 +290,20 @@ function fmtUSD(amount) {
  * Render the model-picker `<select>` element. Bound to the
  * recon-savings-model key in localStorage; on change it re-runs
  * loadSavings() to refresh the dollar figure.
+ *
+ * If the currently-selected model is from the full litellm catalog
+ * (not in MODEL_PRICES), prepend a "(custom)" option so the user
+ * sees their actual pick reflected in the dropdown — otherwise the
+ * select would silently render the first row as selected.
  */
 function renderModelPicker(currentId) {
+  var inCurated = MODEL_PRICES.some(function (m) { return m.id === currentId; });
+  var customOpt = "";
+  if (!inCurated && currentId) {
+    customOpt =
+      '<option value="' + escapeHtml(currentId) + '" selected>' +
+      escapeHtml(currentId) + " (custom)</option>";
+  }
   var options = MODEL_PRICES.map(function (m) {
     var sel = m.id === currentId ? " selected" : "";
     return '<option value="' + escapeHtml(m.id) + '"' + sel + '>' +
@@ -268,9 +314,201 @@ function renderModelPicker(currentId) {
       'style="font-family:var(--mono);font-size:11px;padding:4px 8px;' +
       'border:1px solid var(--rule);border-radius:2px;background:none;' +
       'color:var(--ink-2);cursor:pointer;letter-spacing:.04em">' +
+      customOpt +
       options +
-    "</select>"
+    "</select>" +
+    ' <button type="button" id="recon-model-browse-all" ' +
+      'style="font-family:var(--mono);font-size:11px;padding:4px 8px;' +
+      'border:1px solid var(--rule);border-radius:2px;background:none;' +
+      'color:var(--clay);cursor:pointer;letter-spacing:.04em">' +
+      "Browse all 1,945 models →</button>"
   );
+}
+
+/**
+ * Lazy-loaded full litellm catalog. Cached after the first fetch so
+ * subsequent modal opens are instant.
+ */
+var _litellmCatalog = null;
+async function loadLitellmCatalog() {
+  if (_litellmCatalog) return _litellmCatalog;
+  try {
+    var resp = await fetch("/js/model-prices.json");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    _litellmCatalog = await resp.json();
+    return _litellmCatalog;
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Look up the full label / rate for an id that may live in either the
+ * curated MODEL_PRICES table or the lazy litellm catalog. Used by
+ * `getSelectedModel()` so a user who picked "anthropic/claude-3-5-sonnet"
+ * from the modal still gets the right rate on subsequent dashboard loads.
+ */
+async function resolveModelById(id) {
+  if (!id) return null;
+  for (var i = 0; i < MODEL_PRICES.length; i++) {
+    if (MODEL_PRICES[i].id === id) return MODEL_PRICES[i];
+  }
+  var catalog = await loadLitellmCatalog();
+  for (var j = 0; j < catalog.length; j++) {
+    if (catalog[j].id === id) {
+      return {
+        id: catalog[j].id,
+        label: catalog[j].id,
+        input_per_1m: catalog[j].input_per_1m,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Open the full-catalog search modal. Lazy-loads model-prices.json on
+ * first open. Filter is a substring match against the model id; matches
+ * paginated to the first 200 rows so a slow client doesn't paint 1,945
+ * <li>s on every keystroke.
+ */
+async function openModelBrowseModal() {
+  var existing = document.getElementById("recon-model-modal");
+  if (existing) return;
+
+  var catalog = await loadLitellmCatalog();
+  if (!catalog.length) {
+    alert("Could not load the model catalog. Pick from the curated list.");
+    return;
+  }
+
+  var modal = document.createElement("div");
+  modal.id = "recon-model-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.style.cssText =
+    "position:fixed;inset:0;background:rgba(0,0,0,0.5);" +
+    "display:flex;align-items:center;justify-content:center;z-index:1000";
+
+  var inner = document.createElement("div");
+  inner.style.cssText =
+    "background:var(--paper);border:1px solid var(--rule);border-radius:4px;" +
+    "width:min(640px,90vw);max-height:80vh;display:flex;flex-direction:column;" +
+    "padding:24px;gap:14px";
+
+  inner.innerHTML =
+    '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px">' +
+      '<h2 style="font-family:var(--serif);font-size:22px;letter-spacing:-.02em;margin:0">' +
+        "Browse all <em style=\"color:var(--clay)\">1,945</em> models</h2>" +
+      '<button type="button" id="recon-modal-close" ' +
+        'style="font-family:var(--mono);font-size:12px;padding:4px 10px;' +
+        'border:1px solid var(--rule);background:none;cursor:pointer;border-radius:2px">' +
+        "Close ✕</button>" +
+    "</div>" +
+    '<input type="search" id="recon-model-search" ' +
+      'placeholder="Type a model id — claude, gpt, gemini, llama, deepseek..." ' +
+      'autocomplete="off" autofocus ' +
+      'style="font-family:var(--mono);font-size:13px;padding:10px 12px;' +
+      'border:1px solid var(--rule);border-radius:2px;width:100%;background:none;' +
+      'color:var(--ink)">' +
+    '<div style="font-family:var(--mono);font-size:11px;color:var(--ink-3);' +
+      'letter-spacing:.04em" id="recon-model-results-meta">' +
+      escapeHtml(String(catalog.length)) + " models · sourced from litellm 2026-04-30" +
+    "</div>" +
+    '<div id="recon-model-results" style="overflow-y:auto;flex:1;border:1px solid var(--rule-soft);' +
+      'border-radius:2px;padding:4px"></div>';
+
+  modal.appendChild(inner);
+  document.body.appendChild(modal);
+
+  function renderResults(filter) {
+    var q = (filter || "").toLowerCase();
+    var matches = q
+      ? catalog.filter(function (m) { return m.id.toLowerCase().indexOf(q) !== -1; })
+      : catalog;
+    var meta = document.getElementById("recon-model-results-meta");
+    if (meta) {
+      meta.textContent =
+        matches.length === catalog.length
+          ? catalog.length + " models · sourced from litellm 2026-04-30"
+          : matches.length + " of " + catalog.length + " match";
+    }
+    var capped = matches.slice(0, 200);
+    var rows = capped
+      .map(function (m) {
+        return (
+          '<button type="button" data-model-id="' + escapeHtml(m.id) + '" ' +
+            'class="recon-model-row" ' +
+            'style="display:flex;align-items:baseline;justify-content:space-between;' +
+            'gap:12px;width:100%;padding:8px 12px;border:none;background:none;' +
+            'text-align:left;cursor:pointer;font-family:var(--mono);font-size:12px;' +
+            'color:var(--ink-2);border-bottom:1px solid var(--rule-soft)">' +
+            '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+              escapeHtml(m.id) + "</span>" +
+            '<span style="color:var(--clay);flex-shrink:0">$' +
+              m.input_per_1m + "/M</span>" +
+          "</button>"
+        );
+      })
+      .join("");
+    var truncated =
+      matches.length > 200
+        ? '<div style="padding:10px 12px;font-family:var(--mono);font-size:11px;' +
+          'color:var(--ink-3);text-align:center">' +
+          "showing first 200 of " + matches.length + " — narrow your search" +
+          "</div>"
+        : "";
+    document.getElementById("recon-model-results").innerHTML = rows + truncated;
+  }
+  renderResults("");
+
+  // Search input filters on every keystroke; substring match is fast on 2K rows.
+  document
+    .getElementById("recon-model-search")
+    .addEventListener("input", function (e) {
+      renderResults(e.target.value);
+    });
+
+  // Click any row to pick the model and close the modal.
+  document
+    .getElementById("recon-model-results")
+    .addEventListener("click", function (e) {
+      var btn = e.target.closest(".recon-model-row");
+      if (!btn) return;
+      var id = btn.getAttribute("data-model-id");
+      // Pull the full row out of the catalog so we can persist the rate
+      // alongside the id — getSelectedModel() reads this back on reload.
+      var picked = null;
+      for (var k = 0; k < catalog.length; k++) {
+        if (catalog[k].id === id) { picked = catalog[k]; break; }
+      }
+      setSelectedModel(
+        picked
+          ? { id: picked.id, label: picked.id, input_per_1m: picked.input_per_1m }
+          : id
+      );
+      closeModelBrowseModal();
+      loadSavings();
+    });
+
+  // Close on backdrop click, ESC key, or the close button.
+  document
+    .getElementById("recon-modal-close")
+    .addEventListener("click", closeModelBrowseModal);
+  modal.addEventListener("click", function (e) {
+    if (e.target === modal) closeModelBrowseModal();
+  });
+  document.addEventListener("keydown", _modalEscHandler);
+}
+
+function closeModelBrowseModal() {
+  var m = document.getElementById("recon-model-modal");
+  if (m && m.parentNode) m.parentNode.removeChild(m);
+  document.removeEventListener("keydown", _modalEscHandler);
+}
+
+function _modalEscHandler(e) {
+  if (e.key === "Escape") closeModelBrowseModal();
 }
 
 /**
@@ -723,6 +961,12 @@ function renderSavings(data) {
       setSelectedModel(e.target.value);
       loadSavings();
     });
+  }
+
+  // "Browse all 1,945 models" opens the catalog modal.
+  var browseBtn = document.getElementById("recon-model-browse-all");
+  if (browseBtn) {
+    browseBtn.addEventListener("click", openModelBrowseModal);
   }
 }
 
