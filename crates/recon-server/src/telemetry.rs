@@ -578,29 +578,47 @@ impl Telemetry {
     }
 
     /// Persist lifetime counters to the SQLite `meta` table. Holds the
-    /// `flush_guard` mutex so concurrent flushes serialize. Called from a
-    /// `tokio::spawn` so the hot path doesn't block on disk I/O.
+    /// `flush_guard` mutex only while snapshotting — disk I/O happens
+    /// without the lock so concurrent flushes don't serialize behind
+    /// each other's `set_meta` calls. Called from a `tokio::spawn` so
+    /// the hot path doesn't block on disk I/O.
     pub fn flush_to_store(&self, store: &Store) {
-        let _g = self.flush_guard.lock();
+        // Snapshot phase — under lock. Cheap (one atomic load per
+        // counter) and bounds the critical section to memcpy speed.
+        // Tool names are `&'static str`, so the snapshot list does
+        // no string allocation.
+        let snapshots: Vec<(&'static str, CounterSnapshot)> = {
+            let _g = self.flush_guard.lock();
+            self.tools
+                .iter()
+                .filter_map(|(name, counter)| {
+                    let snap = counter.snapshot();
+                    // Skip empty counters — keeps `meta` pristine for
+                    // tools that have never been used.
+                    if snap.calls == 0 {
+                        None
+                    } else {
+                        Some((*name, snap))
+                    }
+                })
+                .collect()
+        };
+
+        // Write phase — outside the lock. A second concurrent flush
+        // can run in parallel; SQLite's own WAL serialises the writes.
         let mut errors = 0;
-        for (name, counter) in self.tools.iter() {
-            let snapshot = counter.snapshot();
-            // Skip writing when nothing has happened — keeps `meta`
-            // pristine for tools that have never been used.
-            if snapshot.calls == 0 {
-                continue;
-            }
+        for (name, snapshot) in &snapshots {
             let key = format!("tel:tool:{name}");
-            let raw = match serde_json::to_string(&snapshot) {
+            let raw = match serde_json::to_string(snapshot) {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!(tool = name, %e, "telemetry: serialize failed");
+                    warn!(tool = %name, %e, "telemetry: serialize failed");
                     errors += 1;
                     continue;
                 }
             };
             if let Err(e) = store.set_meta(&key, &raw) {
-                warn!(tool = name, %e, "telemetry: meta write failed");
+                warn!(tool = %name, %e, "telemetry: meta write failed");
                 errors += 1;
             }
         }
