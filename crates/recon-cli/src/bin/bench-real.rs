@@ -90,9 +90,12 @@ async fn main() {
 
     // ── Phase 2: Full indexing ─────────────────────────────────────
     println!("── Phase 2: Full indexing ──────────────────────────────");
-    // Purge existing index for clean measurement
+    // Purge existing index for clean measurement, unless RECON_BENCH_KEEP_INDEX=1
+    // is set (useful when re-running the harness after a downstream panic to
+    // avoid re-paying the cold-index cost).
     let recon_dir = repo_path.join(".recon");
-    if recon_dir.exists() {
+    let keep_index = std::env::var("RECON_BENCH_KEEP_INDEX").ok().as_deref() == Some("1");
+    if recon_dir.exists() && !keep_index {
         fs::remove_dir_all(&recon_dir).unwrap();
     }
 
@@ -102,9 +105,10 @@ async fn main() {
     server.index_repo().await.unwrap();
     let index_elapsed = index_start.elapsed();
     println!(
-        "{:<40} {:>10.1} ms",
+        "{:<40} {:>10.1} ms{}",
         "index_repo (cold)",
-        index_elapsed.as_secs_f64() * 1000.0
+        index_elapsed.as_secs_f64() * 1000.0,
+        if keep_index { "  (RECON_BENCH_KEEP_INDEX=1 — warm)" } else { "" }
     );
     println!();
 
@@ -169,11 +173,18 @@ async fn main() {
             r#"{"lang": null, "filter": null, "glob": null}"#,
         )
         .await;
-    let ls_entries: Vec<serde_json::Value> = serde_json::from_str(&ls_result).unwrap();
-    let test_file = ls_entries
-        .first()
-        .and_then(|e| e["path"].as_str())
-        .unwrap_or("Cargo.toml");
+    // code_list returns a Hits view: {"shape":"Hits","kind":"file","count":N,"hits":[...]}
+    // — older revisions of this bench parsed it as a bare array.
+    let ls_value: serde_json::Value = serde_json::from_str(&ls_result).unwrap();
+    let test_file_owned = ls_value
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|e| e.get("path"))
+        .and_then(|p| p.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "Cargo.toml".to_string());
+    let test_file = test_file_owned.as_str();
 
     bench_tool(
         &server,
