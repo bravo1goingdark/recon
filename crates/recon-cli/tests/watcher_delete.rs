@@ -28,10 +28,21 @@ fn read_pool_for(root: &Path) -> ReadPool {
     ReadPool::new(&root.join(".recon/index.db"), 2).unwrap()
 }
 
-/// Wait long enough for at least one debounce flush + write phase.
-async fn settle() {
-    // 250 ms debounce + up to 500 ms recv_timeout + processing margin.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+/// Poll-assert: wait for `cond` to become true, up to `timeout`. Returns
+/// `true` on success, `false` on timeout. Used in place of a fixed-window
+/// sleep when the next operation depends on a watcher event having
+/// cascaded — fixed sleeps either undershoot (flake on a busy runner:
+/// rename test on the self-hosted CI in run 25166533782) or overshoot
+/// (test wall time bloats unnecessarily on fast hardware).
+async fn wait_until<F: FnMut() -> bool>(mut cond: F, timeout: Duration) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cond()
 }
 
 // macOS FSEvents in GitHub's `macos-latest` virtualized runner delivers events
@@ -72,7 +83,15 @@ async fn watcher_removes_symbols_on_file_delete() {
 
     // Delete the file — the watcher must observe and cascade.
     fs::remove_file(&file_path).unwrap();
-    settle().await;
+    wait_until(
+        || {
+            pool.symbols_for_path(Path::new("doomed.rs"))
+                .map(|s| s.is_empty())
+                .unwrap_or(false)
+        },
+        Duration::from_secs(30),
+    )
+    .await;
 
     let after = pool.symbols_for_path(Path::new("doomed.rs")).unwrap();
     assert!(
@@ -112,7 +131,26 @@ async fn watcher_handles_rename_as_delete_plus_create() {
     );
 
     fs::rename(&old_path, &new_path).unwrap();
-    settle().await;
+    // Two cascade phases here: MOVED_FROM has to delete the old row, and
+    // MOVED_TO has to (re)index the new path. We poll on BOTH end-states so
+    // a busy CI runner that's slow to fire the second event doesn't trip
+    // the assertion before the cascade finishes. Same 30 s upper bound as
+    // the delete test above.
+    wait_until(
+        || {
+            let old_gone = pool
+                .symbols_for_path(Path::new("renamed_from.rs"))
+                .map(|s| s.is_empty())
+                .unwrap_or(false);
+            let new_present = pool
+                .symbols_for_path(Path::new("renamed_to.rs"))
+                .map(|s| s.iter().any(|sym| sym.name == "watcher_rename_zzz_marker"))
+                .unwrap_or(false);
+            old_gone && new_present
+        },
+        Duration::from_secs(30),
+    )
+    .await;
 
     let old = pool.symbols_for_path(Path::new("renamed_from.rs")).unwrap();
     assert!(
