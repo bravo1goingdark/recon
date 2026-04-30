@@ -15,7 +15,6 @@ use recon_storage::store::Store;
 use rmcp::ServiceExt;
 use std::path::{Path, PathBuf};
 use tracing::info;
-#[cfg(feature = "embed")]
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
@@ -413,16 +412,151 @@ async fn shutdown_with_timeout(server: &recon_server::server::ReconServer) {
     }
 }
 
+/// Print a one-block savings summary to stderr at the end of every
+/// `recon serve` session. The IDE's MCP debug log captures stderr, so
+/// users see it in Claude Code / Cursor / Windsurf without having to
+/// remember `recon savings show` or visit the dashboard.
+///
+/// Output shape:
+///
+/// ```text
+/// recon · session ended
+///   N tool calls · saved K tokens vs Read+Grep equivalent
+///   top: code_outline (12,400)  code_search (9,800)  code_read_symbol (8,100)
+///   dashboard: https://mcprecon.pages.dev/dashboard
+/// ```
+///
+/// Suppressed when:
+/// - the session had zero tool calls (no "0 tokens saved" noise on a
+///   fresh `recon serve` that nobody connected to),
+/// - `RECON_QUIET=1`/`true`/`yes`/`on` is set (CI / scripted runs).
+///
+/// Telemetry is best-effort and the receipt is *more* best-effort:
+/// any panic or empty snapshot is a silent skip, never a blocker on
+/// shutdown.
+fn print_session_receipt(server: &recon_server::server::ReconServer) {
+    let raw = std::env::var("RECON_QUIET").unwrap_or_default();
+    let quiet = matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    if quiet {
+        return;
+    }
+
+    let telemetry = server.telemetry_arc();
+    let snapshots = telemetry.per_tool_snapshots();
+    let mut total_calls = 0u64;
+    let mut total_saved = 0u64;
+    let mut per_tool: Vec<(&'static str, u64, u64)> = Vec::with_capacity(snapshots.len());
+    for (name, s) in &snapshots {
+        if s.calls == 0 {
+            continue;
+        }
+        total_calls += s.calls;
+        let saved = s.tokens_saved();
+        total_saved += saved;
+        // Per-tool time saved: alternative latency (baseline × calls)
+        // minus recon's actual latency, clamped at 0.
+        let baseline_us = recon_server::telemetry::baseline_latency_ms_for(name)
+            .saturating_mul(s.calls)
+            .saturating_mul(1000);
+        let time_saved_us = baseline_us.saturating_sub(s.latency_micros_total);
+        per_tool.push((*name, saved, time_saved_us));
+    }
+    if total_calls == 0 {
+        return;
+    }
+    let total_time_saved_us = telemetry.latency_saved_micros();
+    per_tool.sort_by_key(|(_, saved, _)| std::cmp::Reverse(*saved));
+
+    let top: Vec<String> = per_tool
+        .iter()
+        .take(3)
+        .filter(|(_, saved, _)| *saved > 0)
+        .map(|(name, saved, t_us)| {
+            format!(
+                "{name} ({} tok, {})",
+                thousands(*saved),
+                format_duration_us(*t_us)
+            )
+        })
+        .collect();
+
+    eprintln!("recon · session ended");
+    eprintln!(
+        "  {} tool calls · saved {} tokens · ~{} faster than Read+Grep loop",
+        thousands(total_calls),
+        thousands(total_saved),
+        format_duration_us(total_time_saved_us),
+    );
+    if !top.is_empty() {
+        eprintln!("  top: {}", top.join("  "));
+    }
+    eprintln!("  dashboard: https://mcprecon.pages.dev/dashboard");
+}
+
+/// Format a microsecond count as a short human-friendly duration:
+/// `<1ms`, `12ms`, `1.6s`, `1m 23s`. Used in the session receipt where
+/// concise wins over precise.
+fn format_duration_us(us: u64) -> String {
+    if us == 0 {
+        return "0s".into();
+    }
+    let ms = us / 1000;
+    if ms < 1 {
+        return "<1ms".into();
+    }
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let secs_f = ms as f64 / 1000.0;
+    if secs_f < 60.0 {
+        return format!("{secs_f:.1}s");
+    }
+    let total_secs = ms / 1000;
+    let minutes = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{minutes}m {secs}s")
+}
+
+/// Format `n` with comma thousand-separators. Pure local helper for the
+/// session receipt; no `i18n` aspirations.
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
 /// Opt-in: when `RECON_AUTO_PUSH_SAVINGS=1` is set, push the local
 /// telemetry rollup to the dashboard after `recon serve` exits.
 ///
 /// Pure side-effect, never blocks shutdown. All failures are logged
 /// to stderr so an operator running `recon serve --log debug` sees
 /// them, but the process exit code remains whatever `serve` produced.
-/// Free-tier users see the upsell text once per session, then nothing
-/// until they upgrade — fine because the env var is opt-in.
+///
+/// Default-on as of v0.5.0 — most paid users never set the env var so
+/// the dashboard would show empty / upsell state forever despite live
+/// telemetry sitting in `.recon/index.db`. Privacy framing: the push
+/// only sends the aggregated counters (calls, response_tokens,
+/// baseline_tokens, latency_micros_total) keyed by tool name plus the
+/// licensed user's API key — no source, no paths, no logs (already the
+/// case before this flip; see crates/recon-cli/src/savings.rs).
+///
+/// Opt out by setting `RECON_AUTO_PUSH_SAVINGS=0` (or `false` / `no`
+/// / `off`). Anything else (including unset) is treated as on.
 fn maybe_auto_push_savings(repo: &Path) {
-    if std::env::var("RECON_AUTO_PUSH_SAVINGS").ok().as_deref() != Some("1") {
+    let raw = std::env::var("RECON_AUTO_PUSH_SAVINGS").unwrap_or_default();
+    let trimmed = raw.trim().to_ascii_lowercase();
+    let opted_out = matches!(trimmed.as_str(), "0" | "false" | "no" | "off");
+    if opted_out {
         return;
     }
     let repo_buf = repo.to_path_buf();
@@ -905,7 +1039,11 @@ fn read_server(repo: PathBuf) -> Result<ReconServer> {
 }
 
 /// Serve the MCP server over Streamable HTTP.
-async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
+async fn serve_http(
+    mcp_service: recon_server::multi_repo::MultiRepoService,
+    host: &str,
+    port: u16,
+) -> Result<()> {
     use hyper_util::rt::TokioIo;
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -930,14 +1068,17 @@ async fn serve_http(server: ReconServer, host: &str, port: u16) -> Result<()> {
             format!("::1:{port}"),
         ]);
 
-    // Hold a clone of the server outside the StreamableHttpService factory
-    // so the listen-loop can `select!` on its shutdown notify in addition
-    // to signal + accept. Without this clone the only way to stop the
-    // bound port is SIGTERM — a worker-side license rejection would leave
-    // the listener exposed indefinitely.
-    let server_for_shutdown = server.clone();
+    // Hold a snapshot of the currently-active ReconServer outside the
+    // StreamableHttpService factory so the listen-loop can `select!` on
+    // its shutdown notify in addition to signal + accept. Without this
+    // the only way to stop the bound port is SIGTERM — a worker-side
+    // license rejection would leave the listener exposed indefinitely.
+    // The license revalidation task fires `request_shutdown` on the
+    // initial server, so snapshotting here is correct.
+    let server_for_shutdown = mcp_service.active();
     let session_manager = Arc::new(LocalSessionManager::default());
-    let service = StreamableHttpService::new(move || Ok(server.clone()), session_manager, config);
+    let service =
+        StreamableHttpService::new(move || Ok(mcp_service.clone()), session_manager, config);
 
     let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1268,7 +1409,17 @@ async fn main() -> Result<()> {
                 Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut writer = tantivy.writer(50_000_000).ok();
+            let mut writer = match tantivy.writer(50_000_000) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    warn!(
+                        %e,
+                        "tantivy writer creation failed during `recon init`; \
+                         BM25 search will be unavailable until the next clean reindex"
+                    );
+                    None
+                }
+            };
             let stats =
                 indexer::index_repo_incremental(&store, Some(&tantivy), &repo, writer.as_mut())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1414,6 +1565,12 @@ async fn main() -> Result<()> {
 
             server.start_watcher();
 
+            // Hybrid telemetry flush: the count trigger fires every
+            // FLUSH_THRESHOLD tool calls; this timer covers the idle
+            // tail so even sessions with sub-threshold call rates
+            // persist their counters within FLUSH_INTERVAL_SECS.
+            server.start_telemetry_flush_timer();
+
             // Periodic license re-validation.
             //
             // Polls every 15 min (override via RECON_LICENSE_REVALIDATE_SECS).
@@ -1551,10 +1708,39 @@ async fn main() -> Result<()> {
                 });
             }
 
+            // ── Multi-repo wrapper for the rmcp transport ─────────────────────
+            //
+            // A `MultiRepoService` is what the rmcp stdio / HTTP transport
+            // sees from this point on. It exposes the same 18 stateful
+            // tools as `ReconServer` (via thin shims that delegate to the
+            // currently-active server) plus the two new multi-repo tools
+            // `code_activate_repo` and `code_list_repos`.
+            //
+            // The router is constructed with the validated tier so the
+            // first `code_activate_repo` call already enforces
+            // `max_repos`. `restore_session` re-loads the loaded set
+            // recorded by the previous `recon serve` so agents do not
+            // have to re-issue activate after every restart.
+            let router = std::sync::Arc::new(recon_server::router::RepoRouter::new(license.tier));
+            if license.expires_at != 0 {
+                router.set_expires_at(license.expires_at);
+            }
+            let config_dir = recon_server::license::global_config_dir();
+            let mcp_service = recon_server::multi_repo::MultiRepoService::new(
+                router.clone(),
+                server.clone(),
+                config_dir,
+            );
+            let restored = mcp_service.restore_session();
+            if restored > 0 {
+                info!(restored, "restored multi-repo session");
+            }
+
             if let Some(port) = port {
                 // serve_http already drives its own shutdown via ctrl_c + cancel.
-                let result = serve_http(server.clone(), &host, port).await;
+                let result = serve_http(mcp_service.clone(), &host, port).await;
                 shutdown_with_timeout(&server).await;
+                print_session_receipt(&server);
                 maybe_auto_push_savings(&repo);
                 result
             } else {
@@ -1564,7 +1750,7 @@ async fn main() -> Result<()> {
                 // just SIGINT/SIGTERM. So select on both: signal *or* the
                 // MCP service loop terminating on its own.
                 let (stdin, stdout) = rmcp::transport::io::stdio();
-                let service = server.clone().serve((stdin, stdout)).await?;
+                let service = mcp_service.clone().serve((stdin, stdout)).await?;
                 let mut waiter = Box::pin(service.waiting());
                 tokio::select! {
                     _ = wait_for_shutdown_signal() => {
@@ -1589,6 +1775,7 @@ async fn main() -> Result<()> {
                 // task and its owned transport, releasing stdin/stdout.
                 drop(waiter);
                 shutdown_with_timeout(&server).await;
+                print_session_receipt(&server);
                 maybe_auto_push_savings(&repo);
                 Ok(())
             }
@@ -1607,7 +1794,17 @@ async fn main() -> Result<()> {
                 Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut writer = tantivy.writer(50_000_000).ok();
+            let mut writer = match tantivy.writer(50_000_000) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    warn!(
+                        %e,
+                        "tantivy writer creation failed during `recon index`; \
+                         BM25 docs will not be updated this run"
+                    );
+                    None
+                }
+            };
             let stats =
                 indexer::index_repo_incremental(&store, Some(&tantivy), &repo, writer.as_mut())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;

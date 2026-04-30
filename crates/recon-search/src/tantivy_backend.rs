@@ -685,4 +685,42 @@ mod tests {
         let hits = backend.search("new_func", 10).unwrap();
         assert!(!hits.is_empty(), "new_func should exist");
     }
+
+    /// On a schema-version mismatch the index dir is wiped and rebuilt from
+    /// scratch. Exercises the version-bump recovery path so a future
+    /// `TANTIVY_SCHEMA_VERSION` bump can't silently break opening.
+    #[test]
+    fn schema_version_mismatch_wipes_and_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_dir = dir.path().join("tantivy");
+        std::fs::create_dir_all(&index_dir).unwrap();
+
+        // Plant a stale-version marker plus a sentinel file. After open(),
+        // the dir must contain the *new* SCHEMA_VERSION and the sentinel
+        // must be gone (proving the wipe ran).
+        std::fs::write(schema_version_path(&index_dir), "0").unwrap();
+        std::fs::write(index_dir.join("LEFTOVER"), b"junk").unwrap();
+
+        let backend = TantivyBackend::open(&index_dir).expect("open after stale schema");
+
+        // Version file rewritten to current.
+        let v = read_schema_version(&index_dir);
+        assert_eq!(v, TANTIVY_SCHEMA_VERSION);
+
+        // Sentinel was cleared by the wipe.
+        assert!(
+            !index_dir.join("LEFTOVER").exists(),
+            "stale file survived wipe-and-rebuild"
+        );
+
+        // Backend is operational post-rebuild: index one symbol, search.
+        let mut writer = backend.writer(15_000_000).unwrap();
+        let s = make_sym(1, "post_wipe", "mod::post_wipe", SymbolKind::Function);
+        backend
+            .index_symbols(&mut writer, Path::new("src/lib.rs"), &[s])
+            .unwrap();
+        backend.commit(&mut writer).unwrap();
+        let hits = backend.search("post_wipe", 10).unwrap();
+        assert!(!hits.is_empty(), "post-rebuild backend can index/search");
+    }
 }

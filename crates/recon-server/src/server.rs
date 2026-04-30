@@ -102,10 +102,50 @@ pub struct ReconServer {
     /// callers that bypass `recon serve`. The stdio `Command::Serve` path
     /// always populates this via [`ReconServer::set_license`].
     license: Arc<ArcSwap<Option<crate::license::ValidatedLicense>>>,
+    /// Cache of measured-baseline token counts keyed by absolute path,
+    /// valued by `(mtime_secs, tokens)`. The mtime in the value is what
+    /// makes the cache self-invalidating: every lookup compares the
+    /// current file mtime against the stored one; a mismatch is treated
+    /// as a miss and the slot is overwritten. No explicit watcher hook
+    /// is needed.
+    ///
+    /// Bounded at [`MAX_BASELINE_CACHE_ENTRIES`] to keep memory flat on
+    /// long-running servers; on overflow we drop ~25 % of entries to
+    /// retain warm files.
+    measured_baseline_cache: Arc<dashmap::DashMap<PathBuf, (i64, u64)>>,
 }
+
+/// Bound on [`ReconServer::measured_baseline_cache`]. Sized to match
+/// FffBackend's `MAX_CACHE_ENTRIES` so the two file-keyed caches scale
+/// together — a hot file in one is overwhelmingly likely to be hot in
+/// the other.
+const MAX_BASELINE_CACHE_ENTRIES: usize = 2048;
 
 fn redact_response(response: String) -> String {
     redact::redact_secrets(&response).unwrap_or(response)
+}
+
+/// Wrap a row-oriented tool response in the canonical [`ToolOutput::Hits`]
+/// envelope and run secret redaction once on the final wire JSON.
+///
+/// `kind` selects the row schema (`"symbol"`, `"text"`, `"file"`,
+/// `"string"`, `"multi_find"`, `"repo"`, `"savings"`); `cap` is the
+/// tool-specific row limit — when `entries.len() >= cap`, the response
+/// carries `truncated: true` so callers know results were capped.
+///
+/// The `entries` Vec is moved into `HitsView` (no clone) and serialised
+/// once; net wire-size overhead vs the bare-array format is the
+/// `{"shape":"Hits","kind":"…","count":N}` envelope (≈40 bytes) — well
+/// under 1% of typical row-oriented responses.
+fn hits_response(kind: &'static str, entries: Vec<serde_json::Value>, cap: usize) -> String {
+    let truncated = entries.len() >= cap;
+    let view = ToolOutput::Hits(HitsView {
+        kind: kind.into(),
+        count: entries.len(),
+        hits: entries,
+        truncated,
+    });
+    redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
 }
 
 /// Build a search-hit JSON object, omitting `col` when not captured.
@@ -331,10 +371,19 @@ impl ReconServer {
         // that create the root lazily.
         let repo_root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
 
-        let writer = tantivy.writer(50_000_000).ok();
-        if writer.is_none() {
-            warn!("tantivy writer creation failed at startup");
-        }
+        let writer = match tantivy.writer(50_000_000) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(
+                    %e,
+                    "tantivy writer creation failed at startup; \
+                     BM25 search will be degraded until restart \
+                     (most often a stale lock from a previously killed process — \
+                     check the index dir for a leftover .tantivy-writer.lock)"
+                );
+                None
+            }
+        };
         // Create a lock-free read pool from the same DB file (4 connections).
         // Falls back to an in-memory pool for in-memory stores (tests).
         let read_pool = match store.db_path().and_then(|p| ReadPool::new(p, 4).ok()) {
@@ -371,6 +420,9 @@ impl ReconServer {
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             watcher_handle: Arc::new(Mutex::new(None)),
             license: Arc::new(ArcSwap::new(Arc::new(None))),
+            measured_baseline_cache: Arc::new(dashmap::DashMap::with_capacity(
+                MAX_BASELINE_CACHE_ENTRIES,
+            )),
             embed_service: Arc::new(parking_lot::RwLock::new(None)),
             vec_read_pool: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             vec_writer: Arc::new(Mutex::new(None)),
@@ -622,14 +674,51 @@ impl ReconServer {
     /// those are cases where reporting a number would be misleading.
     /// The caller passes this straight through to
     /// [`Self::instrumented_measured`].
+    ///
+    /// Cached via [`ReconServer::measured_baseline_cache`] keyed by
+    /// `(path, mtime_secs)`. A typical session calls `code_outline`
+    /// then `code_read_symbol` (and often `code_context`) on the
+    /// same file — without the cache that's three full reads of
+    /// identical bytes just to recompute the baseline. The cache is
+    /// self-invalidating: an mtime mismatch is treated as a miss and
+    /// the slot is overwritten.
     async fn measure_read_baseline(&self, abs_path: &Path) -> Option<u64> {
-        match tokio::fs::metadata(abs_path).await {
-            Ok(m) if m.len() > MAX_READ_FILE_SIZE => return None,
-            Err(_) => return None,
-            _ => {}
+        let meta = tokio::fs::metadata(abs_path).await.ok()?;
+        if meta.len() > MAX_READ_FILE_SIZE {
+            return None;
         }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        if let Some(entry) = self.measured_baseline_cache.get(abs_path) {
+            let (cached_mtime, cached_tokens) = *entry;
+            if cached_mtime == mtime {
+                return Some(cached_tokens);
+            }
+        }
+
         let content = tokio::fs::read_to_string(abs_path).await.ok()?;
-        Some(recon_search::tokens::estimate_tokens(&content) as u64)
+        let tokens = recon_search::tokens::estimate_tokens(&content) as u64;
+
+        // Bound growth: drop ~25 % on overflow to retain warm entries.
+        if self.measured_baseline_cache.len() >= MAX_BASELINE_CACHE_ENTRIES {
+            let to_remove: Vec<PathBuf> = self
+                .measured_baseline_cache
+                .iter()
+                .take(MAX_BASELINE_CACHE_ENTRIES / 4)
+                .map(|e| e.key().clone())
+                .collect();
+            for key in to_remove {
+                self.measured_baseline_cache.remove(&key);
+            }
+        }
+        self.measured_baseline_cache
+            .insert(abs_path.to_path_buf(), (mtime, tokens));
+        Some(tokens)
     }
 
     /// Spawn an async task to persist lifetime telemetry. Hot-path
@@ -640,6 +729,52 @@ impl ReconServer {
         tokio::task::spawn_blocking(move || {
             let guard = store.lock();
             telemetry.flush_to_store(&guard);
+        });
+    }
+
+    /// Spawn a periodic telemetry-flush task so even idle sessions
+    /// persist counters at least once per
+    /// [`crate::telemetry::FLUSH_INTERVAL_SECS`]. The count-based
+    /// threshold ([`crate::telemetry::FLUSH_THRESHOLD`]) still fires on
+    /// hot bursts; the timer covers the long tail (3 calls/hr in an
+    /// otherwise-idle IDE window).
+    ///
+    /// Override the interval via `RECON_TELEMETRY_FLUSH_SECS`. Setting
+    /// it to `0` disables the timer entirely (the count trigger keeps
+    /// working). Clamped to [10, 3600] otherwise.
+    ///
+    /// The task holds a clone of the server (cheap — all state is
+    /// behind `Arc`) and exits when `shutdown_flag` is set, so it
+    /// terminates cleanly with the rest of `recon serve`.
+    pub fn start_telemetry_flush_timer(&self) {
+        let interval_secs = match std::env::var("RECON_TELEMETRY_FLUSH_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            Some(0) => {
+                info!("telemetry: periodic flush disabled (RECON_TELEMETRY_FLUSH_SECS=0)");
+                return;
+            }
+            Some(n) => n.clamp(10, 3600),
+            None => crate::telemetry::FLUSH_INTERVAL_SECS,
+        };
+        let server = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the immediate-fire so we wait one full interval before
+            // the first flush — fresh counters have nothing to persist.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if server
+                    .shutdown_flag
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    break;
+                }
+                server.flush_telemetry_async();
+            }
         });
     }
 
@@ -887,6 +1022,23 @@ impl ReconServer {
     /// Return a snapshot of the current license, if one is installed.
     pub fn current_license(&self) -> Option<crate::license::ValidatedLicense> {
         self.license.load().as_ref().clone()
+    }
+
+    /// The repository root this server indexes. Borrowed (no clone).
+    pub fn repo_root(&self) -> &std::path::Path {
+        &self.repo_root
+    }
+
+    /// Cached file count (updated on every index/reindex). Lock-free read.
+    pub fn file_count(&self) -> u64 {
+        self.cached_file_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Cached symbol count (updated on every index/reindex). Lock-free read —
+    /// reads the length of the cached symbols vector via `ArcSwap`.
+    pub fn symbol_count(&self) -> u64 {
+        self.cached_symbols.load_full().len() as u64
     }
 
     /// Dispatch a tool call by name with JSON arguments. For CLI `query` subcommand.
@@ -1723,13 +1875,20 @@ impl ReconServer {
     }
 }
 
+// Tool methods need to be `pub` so the multi-repo wrapper in
+// `multi_repo.rs` can shim them (each shim is `self.active.code_outline(p)`
+// etc). Their full prose lives in the `#[tool(description = "...")]`
+// attribute, which is what agents and tool-search consume; the Rust
+// doc-comment requirement is suppressed for the impl block to avoid
+// duplicating that prose into a `///` line for every method.
+#[allow(missing_docs)]
 #[tool_router(router = tool_router)]
 impl ReconServer {
     #[tool(
         name = "code_outline",
         description = "Show one-line-per-symbol outline of a file. Returns symbol kinds, names, and line numbers in a tree structure. Use instead of Read when you need to understand a file's structure without reading its full content. Typical output: 300-500 tokens for a 500-line file."
     )]
-    async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
+    pub async fn code_outline(&self, params: Parameters<OutlineParams>) -> String {
         self.instrumented_measured("code_outline", async move {
             // Validate path doesn't escape repo root. Capture the canonical
             // path so the measured-baseline read at the end can reuse it
@@ -1850,7 +2009,7 @@ impl ReconServer {
         name = "code_skeleton",
         description = "Show signatures and docstrings with bodies elided as '...'. 10x compression vs full file read. Use instead of Read when you need to understand APIs and structure. Output: ~300 tokens per 3000-token file."
     )]
-    async fn code_skeleton(&self, params: Parameters<SkeletonParams>) -> String {
+    pub async fn code_skeleton(&self, params: Parameters<SkeletonParams>) -> String {
         self.instrumented_measured("code_skeleton", async move {
             let rel_path = PathBuf::from(&params.0.path);
             let symbols = self
@@ -1947,7 +2106,18 @@ impl ReconServer {
                 };
                 measured_from_fallback =
                     Some(recon_search::tokens::estimate_tokens(&content) as u64);
-                skeleton = content.lines().take(50).collect::<Vec<_>>().join("\n");
+                // Build the truncated preview in one pass to avoid the
+                // intermediate `Vec<&str>` + `join` allocation. `content` is
+                // already bounded by `MAX_READ_FILE_SIZE`, so capping the
+                // capacity at 8 KB covers the 50-line preview comfortably.
+                let mut buf = String::with_capacity(content.len().min(8 * 1024));
+                for (i, line) in content.lines().take(50).enumerate() {
+                    if i > 0 {
+                        buf.push('\n');
+                    }
+                    buf.push_str(line);
+                }
+                skeleton = buf;
             }
 
             let token_est = recon_search::tokens::estimate_tokens(&skeleton);
@@ -1979,7 +2149,7 @@ impl ReconServer {
         name = "code_read_symbol",
         description = "Read the full source of one symbol plus its parent chain and caller/callee references. Use instead of Read when you need one specific function or type. Output: ~200-800 tokens."
     )]
-    async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
+    pub async fn code_read_symbol(&self, params: Parameters<ReadSymbolParams>) -> String {
         self.instrumented_measured("code_read_symbol", async move {
             let abs_path = match self.resolve_path(&params.0.path) {
                 Ok(p) => p,
@@ -2160,7 +2330,7 @@ impl ReconServer {
         name = "code_find_symbol",
         description = "Find symbols by name across the codebase. Tiered: exact SQLite match -> Tantivy BM25 -> FTS5 trigram + nucleo fuzzy. Use instead of Grep when searching for functions, types, or classes."
     )]
-    async fn code_find_symbol(&self, params: Parameters<FindSymbolParams>) -> String {
+    pub async fn code_find_symbol(&self, params: Parameters<FindSymbolParams>) -> String {
         self.instrumented("code_find_symbol", async move {
             // All reads go through lock-free ReadPool
             // Tier 0: exact match via SQLite index
@@ -2265,9 +2435,9 @@ impl ReconServer {
                 })
                 .collect();
 
-            redact_response(
-                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-            )
+            // Every retrieval tier caps at 20 — pass the cap so the
+            // envelope carries `truncated: true` when a tier hits its limit.
+            hits_response("symbol", entries, 20)
         })
         .await
     }
@@ -2276,7 +2446,7 @@ impl ReconServer {
         name = "code_find_refs",
         description = "Find all references to a symbol. Returns a count and top-k call sites as path:line triples. Use instead of Grep for finding usages of a function or type."
     )]
-    async fn code_find_refs(&self, params: Parameters<FindRefsParams>) -> String {
+    pub async fn code_find_refs(&self, params: Parameters<FindRefsParams>) -> String {
         self.instrumented("code_find_refs", async move {
             let refs = self
                 .read_pool
@@ -2348,7 +2518,7 @@ impl ReconServer {
         name = "code_path",
         description = "Shortest call-graph path from `src` to `dst`. Use to answer 'how does X reach Y?' \u{2014} replaces a chain of code_find_refs calls. Both arguments accept a bare name or a fully qualified name (preferred \u{2014} disambiguates). Returns an ordered hop sequence with file:line per hop. When unreachable within `max_hops` (default 8, max 16) returns an Error with kind 'not_found'/'unreachable' plus an `unresolved_hint` when the BFS hit a likely dyn-dispatch / FFI boundary. When src or dst is ambiguous (multiple symbols share the name) the BFS spans the cross-product and returns the shortest match. Bidirectional BFS over the cached reference graph; total-visit cap 50 000 nodes. Output uses ReferenceDigest with the `path` field populated."
     )]
-    async fn code_path(&self, params: Parameters<PathParams>) -> String {
+    pub async fn code_path(&self, params: Parameters<PathParams>) -> String {
         self.instrumented("code_path", async move {
             let max_hops = params.0.max_hops.min(recon_search::graph::MAX_ALLOWED_HOPS);
             if max_hops == 0 {
@@ -2429,7 +2599,7 @@ impl ReconServer {
         name = "code_callers",
         description = "Transitive callers of `symbol` up to `depth` rings (default 1, max 6). Replaces depth-many chained code_find_refs calls. Returns one tier per ring with the symbols at that depth. Cycle-safe (each symbol emitted at its minimum depth only). Per-tier fan-out is capped at 50 to bound god-node responses; total-visit cap 50 000 nodes. When either cap fires `truncated: true` is set. Returns symbol identities (qname + path + line of definition), not call-site lines \u{2014} use code_find_refs for the lexical call-site digest. `symbol` accepts bare or fully qualified names; ambiguous bare names traverse from all matches. Output uses ReferenceDigest with the `tiers` field populated."
     )]
-    async fn code_callers(&self, params: Parameters<CallersParams>) -> String {
+    pub async fn code_callers(&self, params: Parameters<CallersParams>) -> String {
         self.instrumented("code_callers", async move {
             self.callers_or_callees_inner(params, true).await
         })
@@ -2440,7 +2610,7 @@ impl ReconServer {
         name = "code_callees",
         description = "Transitive callees of `symbol` up to `depth` rings (default 1, max 6). Mirror of code_callers \u{2014} what does this symbol call (directly and transitively)? Cycle-safe, per-tier fan-out capped at 50, total-visit cap 50 000. `truncated: true` when caps fire. Returns symbol identities (qname + path + line of definition), not call-site lines. Use this to understand what changing X *requires* you to also understand (callees) versus what changing X *risks breaking* (callers). Output uses ReferenceDigest with the `tiers` field populated."
     )]
-    async fn code_callees(&self, params: Parameters<CallersParams>) -> String {
+    pub async fn code_callees(&self, params: Parameters<CallersParams>) -> String {
         self.instrumented("code_callees", async move {
             self.callers_or_callees_inner(params, false).await
         })
@@ -2451,7 +2621,7 @@ impl ReconServer {
         name = "code_context",
         description = "One-shot bundle of everything an agent needs to reason about a symbol \u{2014} replaces the canonical 4-call understand-X loop (find_symbol \u{2192} read_symbol \u{2192} find_refs \u{2192} search-for-tests). Returns: (1) the target symbol's signature + doc + first ~20 body lines, (2) up to 5 immediate callers, (3) up to 5 immediate callees, (4) up to 3 referenced types, (5) up to 3 tests that exercise it. Honors `token_budget` (default 2000); drops sections under pressure in this order: tests \u{2192} callees \u{2192} types \u{2192} callers (skeleton+body always kept). Accepts a bare name or a fully qualified name. When ambiguous (multiple symbols share the bare name) returns an Error with kind 'invalid_params' listing up to 5 candidates; reissue with a qualified name. Output uses SymbolCard with the `context` envelope populated. Test detection in v0.3 is Rust-only (tests::* qname patterns and test_* / Test* function names); cross-language coverage is on the v0.4 roadmap."
     )]
-    async fn code_context(&self, params: Parameters<ContextParams>) -> String {
+    pub async fn code_context(&self, params: Parameters<ContextParams>) -> String {
         self.instrumented_measured("code_context", async move {
             let symbols = self.cached_all_symbols();
             let matches = Self::resolve_symbol_to_indices(&symbols, &params.0.symbol);
@@ -2715,7 +2885,7 @@ impl ReconServer {
         name = "code_impact",
         description = "Blast radius of changing `symbol` \u{2014} transitive callers up to `depth` rings (default 4, max 6) plus tests that exercise it. Returns one tier per ring (production callers), a separate `tests` array for transitively-reaching test functions (Rust-only Phase-1 detector: tests::* qnames + test_* / Test* names), and `truncated: true` when fan-out caps fire. Use to answer 'what might break if I change X?' before refactoring. Per-tier fan-out cap 50, total-visit cap 50 000 \u{2014} a god-node query terminates with a marker rather than blowing up. Output uses ReferenceDigest with the `tiers` and `tests` fields populated."
     )]
-    async fn code_impact(&self, params: Parameters<ImpactParams>) -> String {
+    pub async fn code_impact(&self, params: Parameters<ImpactParams>) -> String {
         self.instrumented("code_impact", async move {
             let depth = params.0.depth;
             if depth == 0 {
@@ -2783,7 +2953,7 @@ impl ReconServer {
         name = "code_subsystems",
         description = "List the natural subsystems of the repo \u{2014} weakly-connected components of the reference graph. Each subsystem has an id (use with code_subsystem), the qualified-name of its highest-degree symbol (the 'hub'), the dominant directory, and a symbol count. Use to orient yourself before drilling in: subsystems separate cleanly along architectural lines (e.g. recon-search vs recon-storage) without you having to know the directory structure. Sorted by symbol count descending. `limit` caps the number returned (default 50). Output uses Skeleton with subsystems rendered as one line each. Phase 2 v0.3.x: connected components only. Future v0.4.x adds Leiden modularity-optimized clustering."
     )]
-    async fn code_subsystems(&self, params: Parameters<SubsystemsParams>) -> String {
+    pub async fn code_subsystems(&self, params: Parameters<SubsystemsParams>) -> String {
         self.instrumented("code_subsystems", async move {
             let symbols = self.cached_all_symbols();
             let graph = self.cached_call_graph();
@@ -2840,7 +3010,7 @@ impl ReconServer {
         name = "code_subsystem",
         description = "Detailed view of one subsystem (from code_subsystems). Returns a skeleton-style summary of all symbols in the component \u{2014} qname, kind, file:line \u{2014} within `token_budget` tokens (default 1500). Use after code_subsystems to drill into a specific cluster without reading every file in the directory. Output uses Skeleton."
     )]
-    async fn code_subsystem(&self, params: Parameters<SubsystemParams>) -> String {
+    pub async fn code_subsystem(&self, params: Parameters<SubsystemParams>) -> String {
         self.instrumented("code_subsystem", async move {
             let symbols = self.cached_all_symbols();
             let graph = self.cached_call_graph();
@@ -2897,7 +3067,7 @@ impl ReconServer {
     /// not registered as an MCP tool (no `#[tool(...)]` attribute) so
     /// agents don't burn context introspecting their own savings.
     /// Users get the same data through the CLI and the dashboard.
-    async fn code_savings(&self, _params: Parameters<SavingsParams>) -> String {
+    pub async fn code_savings(&self, _params: Parameters<SavingsParams>) -> String {
         self.instrumented("code_savings", async move {
             let mut content = String::from(
                 "# tool\tcalls\tresponse_tokens\tbaseline\ttokens_saved\tavg_latency_ms\n",
@@ -2950,7 +3120,7 @@ impl ReconServer {
         name = "code_search",
         description = "Search for text patterns. Modes: exact (default), regex, hybrid (BM25 + text fused via reciprocal rank fusion). Use instead of Grep for code search."
     )]
-    async fn code_search(&self, params: Parameters<SearchParams>) -> String {
+    pub async fn code_search(&self, params: Parameters<SearchParams>) -> String {
         self.instrumented_measured("code_search", async move {
             let paths = self.cached_file_paths();
 
@@ -2991,13 +3161,7 @@ impl ReconServer {
                                 |(id, dist)| serde_json::json!({"symbol_id": id, "distance": dist}),
                             )
                             .collect();
-                        return (
-                            redact_response(
-                                serde_json::to_string(&entries)
-                                    .unwrap_or_else(|e| format!("Error: {e}")),
-                            ),
-                            None,
-                        );
+                        return (hits_response("text", entries, 20), None);
                     }
                     _ => return (
                         "semantic search requires the embed service — run `recon login <key>`, \
@@ -3069,12 +3233,7 @@ impl ReconServer {
                 let entries: Vec<serde_json::Value> =
                     sorted.into_iter().take(30).map(|(_, v)| v).collect();
 
-                return (
-                    redact_response(
-                        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                    ),
-                    Some(measured),
-                );
+                return (hits_response("text", entries, 30), Some(measured));
             }
 
             if params.0.mode == "regex" {
@@ -3094,12 +3253,7 @@ impl ReconServer {
                     })
                     .collect();
 
-                return (
-                    redact_response(
-                        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                    ),
-                    Some(measured),
-                );
+                return (hits_response("text", entries, 30), Some(measured));
             }
 
             // Exact mode: try Tantivy first (sub-ms), fall back to grep only if empty.
@@ -3152,12 +3306,7 @@ impl ReconServer {
                         )
                     })
                     .collect();
-                return (
-                    redact_response(
-                        serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                    ),
-                    Some(measured),
-                );
+                return (hits_response("text", entries, 30), Some(measured));
             }
 
             // Tantivy had no hits — fall back to text grep, which gets a measured baseline.
@@ -3177,12 +3326,7 @@ impl ReconServer {
                 })
                 .collect();
 
-            (
-                redact_response(
-                    serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-                ),
-                Some(measured),
-            )
+            (hits_response("text", entries, 30), Some(measured))
         })
         .await
     }
@@ -3191,7 +3335,7 @@ impl ReconServer {
         name = "code_list",
         description = "List indexed source files with language, line count, and top symbols. Use instead of Glob when you need structured file listings. Supports language filter."
     )]
-    async fn code_list(&self, params: Parameters<ListParams>) -> String {
+    pub async fn code_list(&self, params: Parameters<ListParams>) -> String {
         self.instrumented_measured("code_list", async move {
             // Single query for all files + symbol counts + top symbols
             let summaries = self.read_pool.file_symbol_summaries().unwrap_or_default();
@@ -3276,9 +3420,10 @@ impl ReconServer {
                 }
             }
             let measured = Some(measured_total);
-            let response = redact_response(
-                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-            );
+            // `code_list` has no built-in row cap (it streams everything that
+            // passes the filters), so pass `usize::MAX` as a sentinel — the
+            // `truncated` flag is always omitted from the wire.
+            let response = hits_response("file", entries, usize::MAX);
             (response, measured)
         })
         .await
@@ -3288,7 +3433,7 @@ impl ReconServer {
         name = "code_repo_map",
         description = "Generate a ranked overview of the most important symbols in the repo. Uses personalized PageRank over the reference graph with Aider-style edge weights. Output fits within a token budget (default 2000). Best first tool to call for orientation."
     )]
-    async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
+    pub async fn code_repo_map(&self, params: Parameters<RepoMapParams>) -> String {
         self.instrumented("code_repo_map", async move {
             let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
             let budget = params.0.token_budget;
@@ -3382,7 +3527,7 @@ impl ReconServer {
         name = "code_find_strings",
         description = "Search for patterns in string literals and comments. Finds SQL fragments, i18n keys, log messages that structural search misses."
     )]
-    async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
+    pub async fn code_find_strings(&self, params: Parameters<FindStringsParams>) -> String {
         self.instrumented_measured("code_find_strings", async move {
             let paths = self.cached_file_paths();
 
@@ -3426,9 +3571,10 @@ impl ReconServer {
                 })
                 .collect();
 
-            let response = redact_response(
-                serde_json::to_string(&entries).unwrap_or_else(|e| format!("Error: {e}")),
-            );
+            // Underlying grep caps `max_results` at 30; that's the truncation
+            // signal even after the literal/comment classifier filters out a
+            // few hits, since the cap was already applied upstream.
+            let response = hits_response("string", entries, 30);
             (response, Some(measured))
         })
         .await
@@ -3438,7 +3584,7 @@ impl ReconServer {
         name = "code_multi_find",
         description = "Search for multiple patterns at once. More efficient than multiple code_search calls. Returns results grouped by pattern."
     )]
-    async fn code_multi_find(&self, params: Parameters<MultiFindParams>) -> String {
+    pub async fn code_multi_find(&self, params: Parameters<MultiFindParams>) -> String {
         self.instrumented_measured("code_multi_find", async move {
         let paths = self.cached_file_paths();
 
@@ -3465,7 +3611,9 @@ impl ReconServer {
             })
             .collect();
 
-        let response = redact_response(serde_json::to_string(&results).unwrap_or_else(|e| format!("Error: {e}")));
+        // Multi-find returns one row per pattern; row-cap doesn't apply to
+        // the pattern dimension. Pass `usize::MAX` so `truncated` is omitted.
+        let response = hits_response("multi_find", results, usize::MAX);
         (response, Some(measured))
             }).await
     }
@@ -3474,7 +3622,7 @@ impl ReconServer {
         name = "code_reindex",
         description = "Trigger a full re-index of the repository. Use when you suspect the index is stale or after major file changes outside the editor."
     )]
-    async fn code_reindex(&self, params: Parameters<ReindexParams>) -> String {
+    pub async fn code_reindex(&self, params: Parameters<ReindexParams>) -> String {
         self.instrumented("code_reindex", async move {
             let force = params.0.force;
 
@@ -3623,7 +3771,7 @@ impl ReconServer {
     /// MCP tool (no `#[tool(...)]` attribute) so agents don't burn
     /// context on operator-level diagnostics. The dashboard surfaces
     /// the same numbers for end users.
-    async fn code_stats(&self, _params: Parameters<StatsParams>) -> String {
+    pub async fn code_stats(&self, _params: Parameters<StatsParams>) -> String {
         self.instrumented("code_stats", async move {
             let mut file_count = self.cached_file_count.load(Ordering::Relaxed);
             if file_count == 0 {
@@ -4173,7 +4321,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_find_symbol should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("symbol"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(!entries.is_empty(), "should find 'add' symbol: {result}");
         assert!(
             entries
@@ -4197,7 +4348,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_find_symbol with kind filter should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("symbol"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(!entries.is_empty(), "should find 'add' as a function");
     }
 
@@ -4251,7 +4405,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_search regex should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("text"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(!entries.is_empty(), "regex search should find matches");
     }
 
@@ -4308,7 +4465,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_list should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("file"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(
             entries.len() >= 2,
             "should list at least 2 Rust files, got {}",
@@ -4391,7 +4551,10 @@ mod tests {
             !result.starts_with("Error:"),
             "code_multi_find should succeed: {result}"
         );
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Hits"));
+        assert_eq!(json["kind"].as_str(), Some("multi_find"));
+        let entries = json["hits"].as_array().expect("hits array");
         assert!(
             !entries.is_empty(),
             "multi_find should return at least 1 pattern result"
@@ -5135,6 +5298,35 @@ mod tests {
             .find(|(n, _)| *n == name)
             .map(|(_, s)| s)
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn measured_baseline_caches_by_path_and_mtime() {
+        let (server, _tmp) = make_indexed_server().await;
+        let abs = server.repo_root().join("src/math.rs");
+        // First call populates the cache.
+        let first = server.measure_read_baseline(&abs).await.unwrap();
+        assert!(first > 0);
+        assert_eq!(server.measured_baseline_cache.len(), 1);
+        let cached = server
+            .measured_baseline_cache
+            .get(&abs)
+            .map(|e| *e)
+            .unwrap();
+        // Second call hits the cache — same answer, no new entries.
+        let second = server.measure_read_baseline(&abs).await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(server.measured_baseline_cache.len(), 1);
+        // Forge a stale mtime in the cache; next call must invalidate
+        // and re-read (returning the same value computed from real bytes).
+        server
+            .measured_baseline_cache
+            .insert(abs.clone(), (cached.0 - 1, cached.1 + 999));
+        let third = server.measure_read_baseline(&abs).await.unwrap();
+        assert_eq!(
+            first, third,
+            "stale-mtime entry must be replaced, not served"
+        );
     }
 
     #[tokio::test]

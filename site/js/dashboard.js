@@ -189,6 +189,29 @@ function fmtCompact(n) {
 }
 
 /**
+ * Format a microsecond count as a short human-friendly duration:
+ * "120ms", "1.6s", "2m 14s", "3h 12m". Used for the headline
+ * "X faster than Read+Grep loop" line so the duration reads at a
+ * glance and never has a trailing decimal noise.
+ */
+function formatDurationMicros(us) {
+  if (typeof us !== "number" || !isFinite(us) || us <= 0) return "0s";
+  var ms = Math.floor(us / 1000);
+  if (ms < 1) return "<1ms";
+  if (ms < 1_000) return ms + "ms";
+  var totalSecs = Math.floor(ms / 1_000);
+  if (totalSecs < 60) {
+    return (ms / 1_000).toFixed(1) + "s";
+  }
+  var totalMin = Math.floor(totalSecs / 60);
+  if (totalMin < 60) {
+    return totalMin + "m " + (totalSecs % 60) + "s";
+  }
+  var totalHr = Math.floor(totalMin / 60);
+  return totalHr + "h " + (totalMin % 60) + "m";
+}
+
+/**
  * Render an inline-SVG line chart of the daily tokens-saved series.
  *
  * Aesthetic borrowed from `WebstormProjects/token`'s SpendChart (Chart.js):
@@ -474,6 +497,7 @@ function renderSavings(data) {
   var totals = data.totals || {};
   var saved = totals.tokens_saved || 0;
   var calls = totals.calls || 0;
+  var latencySavedMicros = totals.latency_saved_micros || 0;
   var range = data.range_days || 0;
   var daily = Array.isArray(data.daily) ? data.daily : [];
 
@@ -528,7 +552,13 @@ function renderSavings(data) {
     escapeHtml(String(range)) +
     " days · " +
     fmtInt(calls) +
-    " tool calls</div></div>" +
+    " tool calls" +
+    (latencySavedMicros > 0
+      ? ' · <span style="color:var(--clay)">~' +
+        escapeHtml(formatDurationMicros(latencySavedMicros)) +
+        " faster</span> than Read+Grep loop"
+      : "") +
+    "</div></div>" +
     '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px;line-height:1.55">' +
     "Measured per-call against the in-process Read/grep equivalent for the 8 direct " +
     "file/grep tools (<code>code_outline</code>, <code>code_skeleton</code>, " +

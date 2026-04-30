@@ -384,6 +384,19 @@ impl RepoRouter {
         self.repos.iter().map(|r| r.key().clone()).collect()
     }
 
+    /// List loaded repos with their cached `(file_count, symbol_count)`
+    /// tuples. Reads lock-free from each `ReconServer`'s atomic caches —
+    /// no SQL queries, no allocations beyond the result `Vec`.
+    pub fn loaded_repos_with_stats(&self) -> Vec<(PathBuf, u64, u64)> {
+        self.repos
+            .iter()
+            .map(|r| {
+                let server = &r.value().server;
+                (r.key().clone(), server.file_count(), server.symbol_count())
+            })
+            .collect()
+    }
+
     /// Explicitly unload a repo (e.g. on user request).
     pub fn unload(&self, repo_path: &Path) -> bool {
         self.repos.remove(repo_path).is_some()
@@ -456,7 +469,18 @@ impl RepoRouter {
         let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
             .map_err(|e| RouterError::Search(e.to_string()))?;
 
-        let mut writer = tantivy.writer(50_000_000).ok();
+        let mut writer = match tantivy.writer(50_000_000) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(
+                    repo = %repo_path.display(),
+                    %e,
+                    "tantivy writer creation failed; BM25 indexing skipped for this repo \
+                     (most often a stale .tantivy-writer.lock from a previously killed process)"
+                );
+                None
+            }
+        };
         match indexer::index_repo_incremental(&store, Some(&tantivy), repo_path, writer.as_mut()) {
             Ok(stats) => {
                 info!(

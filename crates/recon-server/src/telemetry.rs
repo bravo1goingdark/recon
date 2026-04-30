@@ -39,6 +39,7 @@
 //! away from what users actually pay. We report tokens-saved and let
 //! callers convert against whatever rate sheet they price against.
 
+use ahash::AHashMap;
 use parking_lot::Mutex;
 use recon_storage::store::Store;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,8 +48,19 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 /// Flush counters to SQLite every N tool calls. Trades a small SQLite
-/// write rate for bounded data loss on hard kill.
-pub const FLUSH_THRESHOLD: u64 = 50;
+/// write rate for bounded data loss on hard kill. Lowered from 50 to
+/// 10 in v0.5.0 — the count-only trigger left bursty agentic flows
+/// (3 calls/hr in an idle IDE window) with persisted state perpetually
+/// stale; pair the lower count with the timer below so the tail of
+/// any session also flushes.
+pub const FLUSH_THRESHOLD: u64 = 10;
+
+/// Periodic flush interval in seconds. Even idle sessions persist
+/// counters at least once per [`FLUSH_INTERVAL_SECS`] so
+/// `recon savings show` never reports "no telemetry" after an
+/// active session. Override via `RECON_TELEMETRY_FLUSH_SECS` (0
+/// disables the timer entirely; the count trigger still fires).
+pub const FLUSH_INTERVAL_SECS: u64 = 60;
 
 /// Per-tool baseline cost: what an agent would otherwise have paid using
 /// only Read/Grep/Glob.
@@ -58,6 +70,13 @@ pub struct Baseline {
     /// Estimated tokens an agent would consume reaching the same answer
     /// without recon.
     pub baseline_tokens: u64,
+    /// Estimated wall-time the alternative Read/Grep loop would have
+    /// taken per call, in milliseconds. The session receipt + dashboard
+    /// surface `(baseline_latency_ms × calls) - actual_latency_micros`
+    /// as "time saved" — the gut-feel number that lands harder than
+    /// "saved 47 K tokens." Order-of-magnitude estimates are fine; same
+    /// rationale as `baseline_tokens`.
+    pub baseline_latency_ms: u64,
     /// One-line rationale shown via `code_savings --explain` for trust.
     pub rationale: &'static str,
 }
@@ -74,16 +93,19 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_outline",
         baseline_tokens: 0,
+        baseline_latency_ms: 200,
         rationale: "measured per-call against the indexed file",
     },
     Baseline {
         tool: "code_skeleton",
         baseline_tokens: 0,
+        baseline_latency_ms: 200,
         rationale: "measured per-call against the indexed file",
     },
     Baseline {
         tool: "code_read_symbol",
         baseline_tokens: 0,
+        baseline_latency_ms: 250,
         rationale: "measured per-call (full-file Read equivalent)",
     },
     // ── Static estimates (composite tools, no clean alternative) ───
@@ -94,6 +116,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_find_symbol",
         baseline_tokens: 5000,
+        baseline_latency_ms: 800,
         rationale: "Grep across repo + read top 2 hits",
     },
     // Static-only: handler is index-driven (refs table, no grep on
@@ -103,51 +126,61 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_find_refs",
         baseline_tokens: 3000,
+        baseline_latency_ms: 600,
         rationale: "Grep for symbol name across repo",
     },
     Baseline {
         tool: "code_find_strings",
         baseline_tokens: 0,
+        baseline_latency_ms: 400,
         rationale: "measured per-call (sum of grep match-line tokens)",
     },
     Baseline {
         tool: "code_search",
         baseline_tokens: 0,
+        baseline_latency_ms: 500,
         rationale: "measured per-call when grep path is taken; 0 for tantivy/semantic",
     },
     Baseline {
         tool: "code_multi_find",
         baseline_tokens: 0,
+        baseline_latency_ms: 1000,
         rationale: "measured per-call (sum across all patterns + matches)",
     },
     Baseline {
         tool: "code_list",
         baseline_tokens: 0,
+        baseline_latency_ms: 2000,
         rationale: "measured per-call (sum of path + lang label bytes)",
     },
     Baseline {
         tool: "code_repo_map",
         baseline_tokens: 20000,
+        baseline_latency_ms: 5000,
         rationale: "Read 5 files for orientation",
     },
     Baseline {
         tool: "code_path",
         baseline_tokens: 5000,
+        baseline_latency_ms: 2000,
         rationale: "5x chained code_find_refs",
     },
     Baseline {
         tool: "code_callers",
         baseline_tokens: 3000,
+        baseline_latency_ms: 800,
         rationale: "depth=1 chained ref lookups",
     },
     Baseline {
         tool: "code_callees",
         baseline_tokens: 3000,
+        baseline_latency_ms: 800,
         rationale: "depth=1 chained ref lookups",
     },
     Baseline {
         tool: "code_context",
         baseline_tokens: 0,
+        baseline_latency_ms: 1500,
         rationale: "measured per-call (target file read; floor on the 4-call alternative)",
     },
     // Static-only: pure graph traversal (transitive callers + test
@@ -158,6 +191,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_impact",
         baseline_tokens: 9000,
+        baseline_latency_ms: 3000,
         rationale: "transitive callers + test grep + analysis",
     },
     // Static-only: pure connected-components computation over the
@@ -167,6 +201,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_subsystems",
         baseline_tokens: 12000,
+        baseline_latency_ms: 4000,
         rationale: "repo_map + 5 file reads",
     },
     // Static-only: index-only lookup over a cluster's symbol metadata.
@@ -175,6 +210,7 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_subsystem",
         baseline_tokens: 5000,
+        baseline_latency_ms: 1500,
         rationale: "directory listing + reads",
     },
     // Operator/system tools — not exposed via MCP as of v0.4. They
@@ -185,16 +221,19 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_stats",
         baseline_tokens: 0,
+        baseline_latency_ms: 0,
         rationale: "CLI/operator tool, not agent-facing",
     },
     Baseline {
         tool: "code_reindex",
         baseline_tokens: 0,
+        baseline_latency_ms: 0,
         rationale: "system operation, no agent alternative",
     },
     Baseline {
         tool: "code_savings",
         baseline_tokens: 0,
+        baseline_latency_ms: 0,
         rationale: "CLI/operator tool, not agent-facing",
     },
 ];
@@ -207,6 +246,18 @@ pub fn baseline_for(tool: &str) -> u64 {
         .iter()
         .find(|b| b.tool == tool)
         .map(|b| b.baseline_tokens)
+        .unwrap_or(0)
+}
+
+/// Look up the per-call latency baseline (ms) for a tool. Returns 0 for
+/// unknown tools and for operator-only tools whose baseline is genuinely
+/// "no agent alternative."
+#[inline]
+pub fn baseline_latency_ms_for(tool: &str) -> u64 {
+    BASELINES
+        .iter()
+        .find(|b| b.tool == tool)
+        .map(|b| b.baseline_latency_ms)
         .unwrap_or(0)
 }
 
@@ -276,6 +327,12 @@ impl ToolCounter {
 }
 
 /// Plain-old-data snapshot of a [`ToolCounter`] for serialization.
+///
+/// `static_baseline_tokens` and `measured_baseline_tokens` are tagged
+/// `#[serde(default)]` so snapshots persisted by older recon versions
+/// (which only had `calls`, `response_tokens`, and `latency_micros_total`)
+/// still deserialize cleanly on upgrade — missing fields hydrate as 0
+/// rather than wiping the user's lifetime "tokens saved" counters.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CounterSnapshot {
     /// Number of calls.
@@ -283,8 +340,10 @@ pub struct CounterSnapshot {
     /// Total response tokens emitted.
     pub response_tokens: u64,
     /// Total static-baseline tokens credited (non-migrated tools).
+    #[serde(default)]
     pub static_baseline_tokens: u64,
     /// Total measured-baseline tokens credited (migrated tools).
+    #[serde(default)]
     pub measured_baseline_tokens: u64,
     /// Total handler latency in microseconds.
     pub latency_micros_total: u64,
@@ -315,13 +374,15 @@ impl CounterSnapshot {
 
 /// Server-wide telemetry. Held in an `Arc<Telemetry>` on `ReconServer`.
 ///
-/// `tools` is a sorted list parallel to [`BASELINES`] so per-tool lookup is
-/// `O(log n)` via binary search on `&'static str`. Adding a tool requires
-/// only an entry in [`BASELINES`]; the constructor builds counters in lock-
-/// step.
+/// `tools` is an `AHashMap` keyed by tool name so per-tool lookup is `O(1)`
+/// on the hot path (`record`). Adding a tool requires only an entry in
+/// [`BASELINES`]; the constructor builds counters in lock-step.
 pub struct Telemetry {
-    /// Per-tool counters, indexed parallel to [`BASELINES`].
-    pub tools: Vec<(&'static str, ToolCounter)>,
+    /// Per-tool counters keyed by tool name. Entries are inserted exactly
+    /// once during construction from [`BASELINES`] and never mutated again
+    /// — only the contained atomics on each `ToolCounter` are updated, so
+    /// concurrent reads are safe without an outer lock.
+    pub tools: AHashMap<&'static str, ToolCounter>,
     /// Unix seconds when this telemetry instance was created (server start).
     pub session_started_at: u64,
     /// Calls accumulated since the last persistence flush. When this
@@ -342,10 +403,10 @@ impl Default for Telemetry {
 impl Telemetry {
     /// Construct a fresh telemetry instance with zeroed counters.
     pub fn new() -> Self {
-        let tools = BASELINES
-            .iter()
-            .map(|b| (b.tool, ToolCounter::default()))
-            .collect();
+        let mut tools = AHashMap::with_capacity(BASELINES.len());
+        for b in BASELINES {
+            tools.insert(b.tool, ToolCounter::default());
+        }
         Self {
             tools,
             session_started_at: now_unix_secs(),
@@ -381,7 +442,7 @@ impl Telemetry {
         response_tokens: u64,
         measured_baseline: Option<u64>,
     ) -> bool {
-        if let Some((_, c)) = self.tools.iter().find(|(name, _)| *name == tool) {
+        if let Some(c) = self.tools.get(tool) {
             c.calls.fetch_add(1, Ordering::Relaxed);
             c.response_tokens
                 .fetch_add(response_tokens, Ordering::Relaxed);
@@ -408,7 +469,7 @@ impl Telemetry {
     /// Aggregated counter across every tool — the "lifetime totals" surface.
     pub fn aggregate(&self) -> CounterSnapshot {
         let mut agg = CounterSnapshot::default();
-        for (_, c) in &self.tools {
+        for c in self.tools.values() {
             let s = c.snapshot();
             agg.calls += s.calls;
             agg.response_tokens += s.response_tokens;
@@ -419,12 +480,33 @@ impl Telemetry {
         agg
     }
 
-    /// Per-tool snapshot for the `code_savings` breakdown.
+    /// Per-tool snapshot for the `code_savings` breakdown. Order is the
+    /// declaration order from [`BASELINES`] so consumers see a stable
+    /// listing (the underlying `AHashMap` is unordered).
     pub fn per_tool_snapshots(&self) -> Vec<(&'static str, CounterSnapshot)> {
-        self.tools
+        BASELINES
             .iter()
-            .map(|(name, c)| (*name, c.snapshot()))
+            .filter_map(|b| self.tools.get(b.tool).map(|c| (b.tool, c.snapshot())))
             .collect()
+    }
+
+    /// Aggregate "wall-time saved" across every tool call recorded so
+    /// far, in microseconds. Computed as
+    /// `Σ (baseline_latency_ms × calls × 1000) - Σ latency_micros_total`,
+    /// clamped at 0 per tool so a slow recon path doesn't pull the
+    /// total negative.
+    ///
+    /// Surfaced on the session receipt (#19) and pushed to the
+    /// dashboard via `latency_saved_micros` on the `usage_rollups` row.
+    pub fn latency_saved_micros(&self) -> u64 {
+        let mut total: u64 = 0;
+        for (tool, snap) in self.per_tool_snapshots() {
+            let baseline_us = baseline_latency_ms_for(tool)
+                .saturating_mul(snap.calls)
+                .saturating_mul(1000);
+            total = total.saturating_add(baseline_us.saturating_sub(snap.latency_micros_total));
+        }
+        total
     }
 
     /// Hydrate from persisted state on server startup. Reads `tel:tool:<name>`
@@ -432,7 +514,7 @@ impl Telemetry {
     /// persisted blob just means the user's lifetime counters reset; the
     /// session counters keep working.
     pub fn hydrate_from_store(self: &Arc<Self>, store: &Store) {
-        for (name, counter) in &self.tools {
+        for (name, counter) in self.tools.iter() {
             let key = format!("tel:tool:{name}");
             let raw = match store.get_meta(&key) {
                 Ok(Some(s)) => s,
@@ -459,7 +541,7 @@ impl Telemetry {
     pub fn flush_to_store(&self, store: &Store) {
         let _g = self.flush_guard.lock();
         let mut errors = 0;
-        for (name, counter) in &self.tools {
+        for (name, counter) in self.tools.iter() {
             let snapshot = counter.snapshot();
             // Skip writing when nothing has happened — keeps `meta`
             // pristine for tools that have never been used.
@@ -528,9 +610,12 @@ mod tests {
     #[test]
     fn record_static_path_for_non_migrated_tool() {
         let t = Arc::new(Telemetry::new());
-        for _ in 0..10 {
+        // First 9 calls accumulate without firing the flush trigger.
+        for _ in 0..(FLUSH_THRESHOLD - 1) {
             assert!(!t.record("code_find_symbol", Duration::from_millis(2), 400, None));
         }
+        // 10th call hits the threshold and returns true.
+        assert!(t.record("code_find_symbol", Duration::from_millis(2), 400, None));
         let agg = t.aggregate();
         assert_eq!(agg.calls, 10);
         assert_eq!(agg.response_tokens, 4000);
@@ -612,31 +697,30 @@ mod tests {
         let t = Arc::new(Telemetry::new());
         t.record("code_outline", Duration::from_millis(1), 100, Some(2400));
         t.record("code_outline", Duration::from_millis(2), 200, Some(2800));
-        let snap_before = t
-            .tools
-            .iter()
-            .find(|(n, _)| *n == "code_outline")
-            .unwrap()
-            .1
-            .snapshot();
+        let snap_before = t.tools.get("code_outline").unwrap().snapshot();
 
         let t2 = Arc::new(Telemetry::new());
-        t2.tools
-            .iter()
-            .find(|(n, _)| *n == "code_outline")
-            .unwrap()
-            .1
-            .hydrate(&snap_before);
-        let snap_after = t2
-            .tools
-            .iter()
-            .find(|(n, _)| *n == "code_outline")
-            .unwrap()
-            .1
-            .snapshot();
+        t2.tools.get("code_outline").unwrap().hydrate(&snap_before);
+        let snap_after = t2.tools.get("code_outline").unwrap().snapshot();
         assert_eq!(snap_after.calls, 2);
         assert_eq!(snap_after.response_tokens, 300);
         assert_eq!(snap_after.static_baseline_tokens, 0);
         assert_eq!(snap_after.measured_baseline_tokens, 5200);
+    }
+
+    /// Snapshots persisted by older recon versions lacked the
+    /// `static_baseline_tokens` and `measured_baseline_tokens` fields.
+    /// They MUST still deserialize on upgrade — otherwise lifetime
+    /// tokens-saved counters silently reset to zero on every startup.
+    #[test]
+    fn counter_snapshot_deserializes_old_blob_without_baseline_fields() {
+        let legacy = r#"{"calls":42,"response_tokens":1234,"latency_micros_total":99999}"#;
+        let snap: CounterSnapshot =
+            serde_json::from_str(legacy).expect("legacy snapshot must deserialize");
+        assert_eq!(snap.calls, 42);
+        assert_eq!(snap.response_tokens, 1234);
+        assert_eq!(snap.latency_micros_total, 99999);
+        assert_eq!(snap.static_baseline_tokens, 0);
+        assert_eq!(snap.measured_baseline_tokens, 0);
     }
 }

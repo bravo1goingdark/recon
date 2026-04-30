@@ -49,6 +49,9 @@ import migration0010 from "../migrations/0010_usage_rollups_per_repo.sql?raw";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error vite `?raw` import — string, no type declaration
 import migration0011 from "../migrations/0011_usage_rollups_measured.sql?raw";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error vite `?raw` import — string, no type declaration
+import migration0012 from "../migrations/0012_usage_rollups_latency_saved.sql?raw";
 
 /**
  * Split a SQL file into individual statements.
@@ -104,6 +107,10 @@ const MIGRATIONS = [
   {
     name: "0011_usage_rollups_measured",
     queries: splitSql(migration0011 as string),
+  },
+  {
+    name: "0012_usage_rollups_latency_saved",
+    queries: splitSql(migration0012 as string),
   },
 ];
 
