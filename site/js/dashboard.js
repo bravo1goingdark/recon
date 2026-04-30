@@ -165,6 +165,95 @@ async function loadSavings() {
 }
 
 /**
+ * Per-model input-token rates in USD per 1M input tokens. Curated short
+ * list — sourced from litellm's model_prices_and_context_window.json
+ * snapshot 2026-04-30. Refresh by opening a PR with updated values when
+ * the underlying providers change pricing. The "self-hosted / not sure"
+ * row sets `input_per_1m` to null so the UI hides the dollar figure
+ * entirely (closes #21).
+ *
+ * Why a curated list over the full litellm catalog (~hundreds of
+ * models): the modal user picks once and forgets. A dropdown of 8
+ * recognizable models is easier to scan than a search box over 400
+ * obscure names. If a user runs on something not in this list, they
+ * pick "self-hosted / not sure" and the headline stays in tokens.
+ */
+var MODEL_PRICES = [
+  { id: "claude-sonnet-4-5", label: "Claude Sonnet 4.5", input_per_1m: 3.0 },
+  { id: "claude-opus-4-7",   label: "Claude Opus 4.7",   input_per_1m: 15.0 },
+  { id: "claude-haiku-4-5",  label: "Claude Haiku 4.5",  input_per_1m: 0.8 },
+  { id: "gpt-4o",            label: "GPT-4o",            input_per_1m: 2.5 },
+  { id: "gpt-4-turbo",       label: "GPT-4 Turbo",       input_per_1m: 10.0 },
+  { id: "gemini-2-5-pro",    label: "Gemini 2.5 Pro",    input_per_1m: 1.25 },
+  { id: "gemini-2-5-flash",  label: "Gemini 2.5 Flash",  input_per_1m: 0.1 },
+  { id: "self-hosted",       label: "Self-hosted / not sure", input_per_1m: null }
+];
+
+/**
+ * Read the user's saved model choice from localStorage, defaulting to
+ * Claude Sonnet 4.5 (the modal 2026 pick). Falls back to the first
+ * row if the stored id no longer exists in the table — handles the
+ * case where a price-table refresh removed an old model.
+ */
+function getSelectedModel() {
+  var saved = null;
+  try { saved = localStorage.getItem("recon-savings-model"); } catch (_) {}
+  for (var i = 0; i < MODEL_PRICES.length; i++) {
+    if (MODEL_PRICES[i].id === saved) return MODEL_PRICES[i];
+  }
+  return MODEL_PRICES[0];
+}
+
+function setSelectedModel(id) {
+  try { localStorage.setItem("recon-savings-model", id); } catch (_) {}
+}
+
+/**
+ * Convert a token count to a USD figure for the selected model. Returns
+ * null when the model has no rate (self-hosted) — the UI then hides the
+ * dollar tile rather than render "$0".
+ */
+function dollarsFor(tokensSaved, model) {
+  if (!model || model.input_per_1m == null || tokensSaved <= 0) return null;
+  return (tokensSaved / 1000000) * model.input_per_1m;
+}
+
+/**
+ * Format USD without trailing zeros for sub-dollar amounts ("$0.94"),
+ * comma thousand-separators above $1000 ("$1,247"), and a "<$0.01"
+ * floor for amounts that would round to zero. Avoids rendering "$0.00"
+ * which reads as "didn't save anything" when the tokens-saved figure
+ * is non-zero but small.
+ */
+function fmtUSD(amount) {
+  if (amount == null) return "—";
+  if (amount < 0.01) return "<$0.01";
+  if (amount < 1000) return "$" + amount.toFixed(2);
+  return "$" + amount.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+/**
+ * Render the model-picker `<select>` element. Bound to the
+ * recon-savings-model key in localStorage; on change it re-runs
+ * loadSavings() to refresh the dollar figure.
+ */
+function renderModelPicker(currentId) {
+  var options = MODEL_PRICES.map(function (m) {
+    var sel = m.id === currentId ? " selected" : "";
+    return '<option value="' + escapeHtml(m.id) + '"' + sel + '>' +
+      escapeHtml(m.label) + "</option>";
+  }).join("");
+  return (
+    '<select id="recon-model-picker" ' +
+      'style="font-family:var(--mono);font-size:11px;padding:4px 8px;' +
+      'border:1px solid var(--rule);border-radius:2px;background:none;' +
+      'color:var(--ink-2);cursor:pointer;letter-spacing:.04em">' +
+      options +
+    "</select>"
+  );
+}
+
+/**
  * Format an integer with thousands separators. Used for the headline
  * "tokens saved" number — a comma-separated 3,200,000 reads a lot
  * better than 3200000 at this size on the page.
@@ -543,11 +632,30 @@ function renderSavings(data) {
     })
     .join("");
 
+  // Model picker + dollar figure (#21). Read from localStorage; the
+  // "self-hosted / not sure" option intentionally returns null from
+  // dollarsFor() so the UI hides the dollar tile entirely rather than
+  // pretending there's a number.
+  var model = getSelectedModel();
+  var dollars = dollarsFor(saved, model);
+  var dollarTile = dollars != null
+    ? '<div style="font-size:24px;font-family:var(--serif);color:var(--clay);' +
+        'letter-spacing:-.02em" ' +
+        'title="Based on litellm\'s ' + escapeHtml(model.id) + ' input rate ($' +
+        model.input_per_1m + '/M, snapshotted 2026-04-30). Your actual bill ' +
+        'depends on provider, plan, and any cached-token discounts.">' +
+        escapeHtml(fmtUSD(dollars)) + " in " + escapeHtml(model.label) + " input" +
+      "</div>"
+    : "";
+
   box.innerHTML =
     '<div style="display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;margin-bottom:8px">' +
     '<div style="font-size:44px;font-family:var(--serif);letter-spacing:-.02em">' +
     fmtCompact(saved) +
     " tokens</div>" +
+    dollarTile +
+    "</div>" +
+    '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">' +
     '<div style="color:var(--ink-3);font-size:13px">saved · last ' +
     escapeHtml(String(range)) +
     " days · " +
@@ -558,7 +666,11 @@ function renderSavings(data) {
         escapeHtml(formatDurationMicros(latencySavedMicros)) +
         " faster</span> than Read+Grep loop"
       : "") +
-    "</div></div>" +
+    "</div>" +
+    '<div style="font-family:var(--mono);font-size:11px;color:var(--ink-3);' +
+      'letter-spacing:.04em">show as: </div>' +
+    renderModelPicker(model.id) +
+    "</div>" +
     '<div style="font-size:12px;color:var(--ink-3);margin-bottom:14px;line-height:1.55">' +
     "Measured per-call against the in-process Read/grep equivalent for the 8 direct " +
     "file/grep tools (<code>code_outline</code>, <code>code_skeleton</code>, " +
@@ -581,6 +693,17 @@ function renderSavings(data) {
 
   // Wire the hover layer against the freshly-injected SVG.
   wireSparklineHover();
+
+  // Bind the model-picker change handler. CSP-safe (no inline onchange).
+  // Re-rendering via loadSavings() refetches and re-runs the whole pipeline,
+  // which is fine — the dollar figure is the only thing that changes.
+  var picker = document.getElementById("recon-model-picker");
+  if (picker) {
+    picker.addEventListener("change", function (e) {
+      setSelectedModel(e.target.value);
+      loadSavings();
+    });
+  }
 }
 
 function renderProfile(user) {
