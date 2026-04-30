@@ -108,7 +108,11 @@ async fn main() {
         "{:<40} {:>10.1} ms{}",
         "index_repo (cold)",
         index_elapsed.as_secs_f64() * 1000.0,
-        if keep_index { "  (RECON_BENCH_KEEP_INDEX=1 — warm)" } else { "" }
+        if keep_index {
+            "  (RECON_BENCH_KEEP_INDEX=1 — warm)"
+        } else {
+            ""
+        }
     );
     println!();
 
