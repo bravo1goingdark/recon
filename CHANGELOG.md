@@ -4,6 +4,86 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.5.3] — 2026-04-30
+
+Performance + semantic-by-default release. Hosted semantic search now
+works in the released default-features binary (previously gated behind
+a feature flag that nobody could opt into); SQLite + Tantivy hot paths
+got a sweep of fixes that knock real time off cold-index and hot tool
+calls.
+
+### Changed — hosted semantic search wired in by default
+
+`init_embed()` was gated behind `#[cfg(feature = "embed")]`, so the
+released default-features binary never instantiated `HostedEmbedService`
+and `code_search mode=semantic` failed closed even with valid
+credentials. Since this repo is private and end users run the prebuilt
+binary, that gate effectively disabled hosted semantic for everyone.
+Ungated; the misleading `embed = ["local-embed"]` alias is gone.
+`local-embed` remains as the explicit air-gapped opt-in.
+
+### Performance — storage / search / server
+
+- **`(path, byte_start)` compound index — schema V5.** `symbols_for_path`
+  did `WHERE path = ?1 ORDER BY byte_start`; the V1 single-column
+  `symbols_path` index forced an index seek + filesort. The compound
+  index makes the planner walk rows in already-sorted order, so every
+  `code_outline` / `code_skeleton` / `code_read_symbol` call on a
+  many-symbol file pays no sort step. **Sub-millisecond on a 335K-symbol
+  index.**
+- **Drop FTS triggers during cold bulk index, rebuild after.** Each
+  `INSERT INTO symbols` previously fired the `symbols_ai` trigger,
+  which tokenised name + qualified_name + signature, computed
+  trigrams, and updated FTS5's internal btree — tens of millions of
+  trigram operations synchronously inside the bulk-insert transaction.
+  `enter_indexing_mode` now drops the three FTS triggers; `exit_indexing_mode`
+  issues one batched `INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')`
+  and recreates the triggers. `Store::init` runs a defensive
+  `repair_fts_state_if_needed` so an aborted bulk-index run can't leave
+  the FTS index half-built.
+- **Single-flight gate on `cached_call_graph`.** Two parallel `code_path` /
+  `code_callers` / `code_callees` / `code_impact` requests landing during
+  a cold-cache window each rebuilt the CSR call graph (~50–200 ms on a
+  300K-symbol repo) and the later `store()` overwrote the earlier one.
+  Added a `parking_lot::Mutex<()>` gate around the build phase with a
+  double-check after the lock so a waiter that arrived after the build
+  completed sees the published value and skips its own rebuild.
+- **Drop interim Tantivy commits during cold index.** Cold-index path
+  issued a commit every 20K symbols; each commit publishes a new
+  segment, and search latency scales with segment count. A 300K-symbol
+  cold index produced ~15 segments. One commit at the end produces
+  ~1–2; Tantivy's writer heap (50 MB) already flushes internal
+  segments without publishing them.
+- **Telemetry flush — release lock before SQLite writes.**
+  `flush_to_store` held a `parking_lot::Mutex` across the full
+  `set_meta()` loop, serialising concurrent flushes behind disk I/O for
+  the entire critical section. Snapshot the per-tool counters under
+  lock (one atomic load per counter), drop the guard, then issue the
+  writes outside it. Critical section drops from ~ms to ~µs.
+- **Bound watcher channel to 64 batches.** notify-debouncer feed was
+  unbounded (std `mpsc::channel`); a slow consumer or stalled parser
+  could let the queue grow without limit. `sync_channel(64)` provides
+  observable backpressure (~16 s of continuous churn before the
+  debouncer thread parks).
+- **Prepared-statement cache cap 16 → 128.** rusqlite's default LRU is
+  16; the hot read path issues ~25 distinct `prepare_cached()` statements
+  and the writer ~30. Cap raised to 128 on every connection (writer,
+  read pool, embed-side read pool at 64). Eliminates re-prepare overhead
+  on a normal tool-call mix.
+
+### Test tooling
+
+- `bench-real` parses `code_list`'s Hits-shape response correctly (used
+  to panic mid-bench).
+- `RECON_BENCH_KEEP_INDEX=1` skips the `.recon/` wipe so a re-run after
+  a downstream panic reuses the warm index.
+
+### CI
+
+- Release / cross-platform workflows reference `--features local-embed`
+  (the `embed` alias is gone). The feature jobs are renamed
+  `test-local-embed` / `local-embed` accordingly.
+
 ## [0.3.4] — 2026-04-29
 
 Hardening release. Three concurrency / process-supervision bugs surfaced
