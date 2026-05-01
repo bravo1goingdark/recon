@@ -151,6 +151,22 @@ fn bench_token_count(c: &mut Criterion) {
                 Ok(parts.len() == 2 && !parts[0].is_empty() && parts[1].contains('.'))\n}\n";
 
     c.bench_function("count_tokens/5_lines", |b| b.iter(|| count_tokens(code)));
+
+    // Realistic telemetry payload sizes — `record_call` runs `count_tokens`
+    // on every MCP response and `measure_read_baseline` runs it on whole
+    // files. 5 KB ≈ a typical Reference Digest response; 20 KB ≈ a
+    // medium source file in `code_outline` / `code_read_symbol`.
+    let resp_5k: String = code.repeat(5_000usize.div_ceil(code.len()));
+    let resp_5k = &resp_5k[..5_000.min(resp_5k.len())];
+    let file_20k: String = code.repeat(20_000usize.div_ceil(code.len()));
+    let file_20k = &file_20k[..20_000.min(file_20k.len())];
+
+    c.bench_function("count_tokens/5kb_response", |b| {
+        b.iter(|| count_tokens(resp_5k))
+    });
+    c.bench_function("count_tokens/20kb_file", |b| {
+        b.iter(|| count_tokens(file_20k))
+    });
 }
 
 criterion_group!(

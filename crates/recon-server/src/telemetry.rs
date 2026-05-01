@@ -64,14 +64,86 @@ pub const FLUSH_THRESHOLD: u64 = 10;
 /// disables the timer entirely; the count trigger still fires).
 pub const FLUSH_INTERVAL_SECS: u64 = 60;
 
+/// Meta key carrying the encoder version for persisted baseline /
+/// response token counters. Bumped when the encoder changes meaning,
+/// so `hydrate_from_store` can drop pre-bump counters whose units no
+/// longer match what fresh atomics will accrue.
+const ENCODER_VERSION_KEY: &str = "tel:encoder_version";
+
+/// Current encoder version. Bumped whenever the meaning of a
+/// persisted token counter changes — either the encoder itself
+/// (char/4 → BPE) or the static baseline values that get summed
+/// into `static_baseline_tokens`. Hydrate drops counters whose
+/// stored version doesn't match this constant so old units don't
+/// silently mix with new ones on the dashboard.
+///
+/// History:
+/// - `bpe-v1`: file-content baseline goes through cl100k_base BPE
+///   (`count_tokens`) while response_tokens stays on the char/4
+///   heuristic; see `record_call` in server.rs for the asymmetry.
+/// - `bpe-v2-baselines-measured`: static-baseline rows replaced
+///   with values measured by `bench-baselines` against a real
+///   fixture repo. The asserted point estimates that preceded
+///   them under-claimed by 2–5×; the version bump triggers a
+///   one-time counter reset so cumulative totals don't average
+///   across the two regimes.
+const ENCODER_VERSION: &str = "bpe-v2-baselines-measured";
+
+/// Sample period for the BPE-vs-heuristic ratio probe on response
+/// payloads. Every Nth call schedules a real cl100k_base count of
+/// the response text on a `spawn_blocking` thread, accumulating
+/// into `response_bpe_real_total` / `response_heuristic_total_on_samples`
+/// so a corrected `tokens_saved` can be computed without paying the
+/// BPE cost on every call. 64 = ~1.5 % of calls sampled, well-bounded
+/// CPU cost even with the off-thread move; the ratio stabilises after
+/// a few hundred calls (~5 minutes of agentic activity).
+pub const RESPONSE_BPE_SAMPLE_PERIOD: u64 = 64;
+
+/// Don't bother BPE-sampling responses below this byte size — the
+/// char/4 heuristic is accurate enough on small balanced payloads
+/// that sampling them just adds noise to the ratio without sharpening
+/// it. Picked so that fast tools like `code_outline` (typically 200–
+/// 800 byte responses) don't pay any sampling cost at all.
+pub const RESPONSE_BPE_SAMPLE_MIN_BYTES: usize = 1024;
+
+/// Meta key under which the dedupe set is persisted. Serialised as a
+/// JSON array of `[tool_name, key, ts_secs]` triples; on hydrate
+/// every triple older than [`DEDUP_TTL_SECS`] is dropped.
+const DEDUP_META_KEY: &str = "tel:dedup_v1";
+
+/// Sliding-window TTL for persisted dedupe entries. 24 h matches a
+/// typical "I started a fresh session today" boundary — long enough
+/// that a `recon serve` restart inside an active workday doesn't
+/// re-credit every baseline (which silently inflates lifetime
+/// "tokens saved"), short enough that yesterday's exploratory
+/// session doesn't suppress today's first call.
+const DEDUP_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// Hard cap on the persisted dedupe set. A pathological session
+/// (millions of distinct keys) shouldn't silently grow the meta
+/// blob unbounded. On overflow we keep the most-recently-stamped
+/// entries — those are the ones still well within the TTL window
+/// and most likely to fire again.
+const DEDUP_MAX_ENTRIES: usize = 50_000;
+
 /// Per-tool baseline cost: what an agent would otherwise have paid using
 /// only Read/Grep/Glob.
 pub struct Baseline {
     /// MCP tool name.
     pub tool: &'static str,
-    /// Estimated tokens an agent would consume reaching the same answer
-    /// without recon.
+    /// Point-estimate tokens an agent would consume reaching the same
+    /// answer without recon. For migrated tools this is 0 — the
+    /// measured per-call number is the truth and the static counter
+    /// never accrues.
     pub baseline_tokens: u64,
+    /// Lower end of the realistic baseline range. Captures "small-files
+    /// repo" / "narrow query" cases. Surfaced on `code_savings` so the
+    /// dashboard can show the static figure as a band rather than a
+    /// single integer pretending to be exact. 0 for migrated tools.
+    pub range_low_tokens: u64,
+    /// Upper end of the realistic baseline range. Captures "big-files
+    /// repo" / "broad query" cases. Same 0-for-migrated convention.
+    pub range_high_tokens: u64,
     /// Estimated wall-time the alternative Read/Grep loop would have
     /// taken per call, in milliseconds. The session receipt + dashboard
     /// surface `(baseline_latency_ms × calls) - actual_latency_micros`
@@ -79,8 +151,14 @@ pub struct Baseline {
     /// "saved 47 K tokens." Order-of-magnitude estimates are fine; same
     /// rationale as `baseline_tokens`.
     pub baseline_latency_ms: u64,
-    /// One-line rationale shown via `code_savings --explain` for trust.
+    /// One-line rationale shown on `code_savings` for at-a-glance trust.
     pub rationale: &'static str,
+    /// Reproducible derivation: the formula or measurement procedure
+    /// that yields the point estimate. A skeptical reader should be
+    /// able to recompute the number from this string — e.g.
+    /// `"5 files × 4 KB median × char/4 ≈ 5 000 tok"`. For migrated
+    /// tools: `"BPE count of file content actually read"`.
+    pub derivation: &'static str,
 }
 
 /// Per-tool baseline table. Conservative honest estimates for tools
@@ -95,20 +173,29 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_outline",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 200,
         rationale: "measured per-call against the indexed file",
+        derivation: "BPE (cl100k_base) count of file content actually read",
     },
     Baseline {
         tool: "code_skeleton",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 200,
         rationale: "measured per-call against the indexed file",
+        derivation: "BPE (cl100k_base) count of file content actually read",
     },
     Baseline {
         tool: "code_read_symbol",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 250,
         rationale: "measured per-call (full-file Read equivalent)",
+        derivation: "BPE (cl100k_base) count of file content actually read",
     },
     // ── Static estimates (composite tools, no clean alternative) ───
     // Static-only: 3-tier exact/BM25/fuzzy search has no clean grep
@@ -117,9 +204,13 @@ pub const BASELINES: &[Baseline] = &[
     // the real Read+grep+read-top-N cost.
     Baseline {
         tool: "code_find_symbol",
-        baseline_tokens: 5000,
+        baseline_tokens: 27_534,
+        range_low_tokens: 19_494,
+        range_high_tokens: 52_240,
         baseline_latency_ms: 800,
         rationale: "Grep across repo + read top 2 hits",
+        derivation: "bench-baselines (2026-05-01, intel repo, 130 files): \
+                     median grep + 2 hit-file reads across 9 symbol variants",
     },
     // Static-only: handler is index-driven (refs table, no grep on
     // the hot path). Computing a measured baseline would require an
@@ -127,63 +218,98 @@ pub const BASELINES: &[Baseline] = &[
     // doubles the work without changing the answer. Keep static.
     Baseline {
         tool: "code_find_refs",
-        baseline_tokens: 3000,
+        baseline_tokens: 5_979,
+        range_low_tokens: 1_665,
+        range_high_tokens: 38_276,
         baseline_latency_ms: 600,
         rationale: "Grep for symbol name across repo",
+        derivation: "bench-baselines (2026-05-01, intel repo): median grep \
+                     output across 9 symbol variants spanning common to rare names",
     },
     Baseline {
         tool: "code_find_strings",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 400,
         rationale: "measured per-call (sum of grep match-line tokens)",
+        derivation: "BPE (cl100k_base) count over the matched-line bytes the agent would have read",
     },
     Baseline {
         tool: "code_search",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 500,
         rationale: "measured per-call when grep path is taken; 0 for tantivy/semantic",
+        derivation: "BPE (cl100k_base) count of grep-equivalent match bytes; 0 when no grep alternative exists",
     },
     Baseline {
         tool: "code_multi_find",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 1000,
         rationale: "measured per-call (sum across all patterns + matches)",
+        derivation: "BPE (cl100k_base) count summed across every pattern's grep-equivalent matches",
     },
     Baseline {
         tool: "code_list",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 2000,
         rationale: "measured per-call (sum of path + lang label bytes)",
+        derivation: "BPE (cl100k_base) count of the `find` / `ls -R` output the agent would have walked",
     },
     Baseline {
         tool: "code_repo_map",
-        baseline_tokens: 20000,
+        baseline_tokens: 33_549,
+        range_low_tokens: 32_517,
+        range_high_tokens: 34_487,
         baseline_latency_ms: 5000,
         rationale: "Read 5 files for orientation",
+        derivation: "bench-baselines (2026-05-01, intel repo): file envelope + \
+                     5 reads, median across 1/3, 2/3, full repo cuts",
     },
     Baseline {
         tool: "code_path",
-        baseline_tokens: 5000,
+        baseline_tokens: 12_219,
+        range_low_tokens: 8_543,
+        range_high_tokens: 12_327,
         baseline_latency_ms: 2000,
         rationale: "5x chained code_find_refs",
+        derivation: "bench-baselines (2026-05-01, intel repo): 5-symbol chain, \
+                     median across repo-size cuts",
     },
     Baseline {
         tool: "code_callers",
-        baseline_tokens: 3000,
+        baseline_tokens: 15_711,
+        range_low_tokens: 5_764,
+        range_high_tokens: 50_099,
         baseline_latency_ms: 800,
         rationale: "depth=1 chained ref lookups",
+        derivation: "bench-baselines (2026-05-01, intel repo): depth-1 grep + \
+                     1-file read across 9 symbol variants",
     },
     Baseline {
         tool: "code_callees",
-        baseline_tokens: 3000,
+        baseline_tokens: 15_711,
+        range_low_tokens: 5_764,
+        range_high_tokens: 50_099,
         baseline_latency_ms: 800,
         rationale: "depth=1 chained ref lookups",
+        derivation: "bench-baselines (2026-05-01, intel repo): depth-1 grep + \
+                     1-file read across 9 symbol variants",
     },
     Baseline {
         tool: "code_context",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 1500,
         rationale: "measured per-call (target file read; floor on the 4-call alternative)",
+        derivation: "BPE (cl100k_base) count of target file (lower bound on read_symbol+find_refs+search-tests loop)",
     },
     // Static-only: pure graph traversal (transitive callers + test
     // detector). No file I/O on the hot path, so the only honest
@@ -192,9 +318,13 @@ pub const BASELINES: &[Baseline] = &[
     // changing the answer. Static stays.
     Baseline {
         tool: "code_impact",
-        baseline_tokens: 9000,
+        baseline_tokens: 14_960,
+        range_low_tokens: 7_837,
+        range_high_tokens: 14_960,
         baseline_latency_ms: 3000,
         rationale: "transitive callers + test grep + analysis",
+        derivation: "bench-baselines (2026-05-01, intel repo): 3× chained refs + \
+                     test-file grep, median across 2 symbol variants",
     },
     // Static-only: pure connected-components computation over the
     // cached graph. No file I/O, no grep — the alternative cost
@@ -202,18 +332,26 @@ pub const BASELINES: &[Baseline] = &[
     // from this handler without doing exactly that extra work.
     Baseline {
         tool: "code_subsystems",
-        baseline_tokens: 12000,
+        baseline_tokens: 39_706,
+        range_low_tokens: 38_674,
+        range_high_tokens: 40_644,
         baseline_latency_ms: 4000,
         rationale: "repo_map + 5 file reads",
+        derivation: "bench-baselines (2026-05-01, intel repo): repo_map + 5 \
+                     extra reads, median across repo-size cuts",
     },
     // Static-only: index-only lookup over a cluster's symbol metadata.
     // Same reasoning as `code_subsystems` — measuring the alternative
     // (`ls + cat top-N files`) requires the extra reads.
     Baseline {
         tool: "code_subsystem",
-        baseline_tokens: 5000,
+        baseline_tokens: 26_151,
+        range_low_tokens: 26_151,
+        range_high_tokens: 26_151,
         baseline_latency_ms: 1500,
         rationale: "directory listing + reads",
+        derivation: "bench-baselines (2026-05-01, intel repo): first-directory \
+                     ls + 4 reads (point estimate; sim is shape-invariant)",
     },
     // Operator/system tools — not exposed via MCP as of v0.4. They
     // still get [`ToolCounter`] entries so CLI invocations
@@ -223,20 +361,29 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         tool: "code_stats",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 0,
         rationale: "CLI/operator tool, not agent-facing",
+        derivation: "no credit — operator-invoked",
     },
     Baseline {
         tool: "code_reindex",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 0,
         rationale: "system operation, no agent alternative",
+        derivation: "no credit — system operation",
     },
     Baseline {
         tool: "code_savings",
         baseline_tokens: 0,
+        range_low_tokens: 0,
+        range_high_tokens: 0,
         baseline_latency_ms: 0,
         rationale: "CLI/operator tool, not agent-facing",
+        derivation: "no credit — operator-invoked",
     },
 ];
 
@@ -410,7 +557,32 @@ pub struct Telemetry {
     /// id through tool handlers to fix the HTTP case; until then, agents
     /// querying via HTTP should restart `recon serve` between conversations
     /// for exact accounting.
-    dedup: DashMap<(&'static str, CompactString), ()>,
+    /// Persisted across restarts: each entry stores its creation
+    /// timestamp so [`hydrate_from_store`] can drop entries older
+    /// than [`DEDUP_TTL_SECS`]. Same logical purpose as before
+    /// (gate the *first* baseline credit per `(tool, key)`); the
+    /// timestamp converts the gate from process-scoped to
+    /// 24 h-sliding-window-scoped.
+    dedup: DashMap<(&'static str, CompactString), i64>,
+
+    /// Sequence counter that selects which calls receive the BPE
+    /// sample. Wraps cleanly at u64 max — overflow takes ~580 years
+    /// at 1 M calls / sec.
+    response_bpe_seq: AtomicU64,
+    /// Number of calls on which a BPE sample was actually taken.
+    /// Equal to `floor(seq / RESPONSE_BPE_SAMPLE_PERIOD)` minus any
+    /// calls that arrived without response text (defensive None
+    /// branch in [`Self::record`]).
+    response_bpe_samples: AtomicU64,
+    /// Sum of cl100k_base BPE token counts across every sampled
+    /// response. Numerator of the corrected-vs-heuristic ratio.
+    response_bpe_real_total: AtomicU64,
+    /// Sum of `estimate_tokens` heuristic counts across the SAME
+    /// sampled responses. Denominator of the ratio. Tracking it
+    /// alongside the BPE total — instead of dividing by sample count
+    /// — lets the ratio reflect whatever response-size mix the
+    /// actual workload produces, not the unweighted call frequency.
+    response_heuristic_total_on_samples: AtomicU64,
 }
 
 impl Default for Telemetry {
@@ -432,19 +604,26 @@ impl Telemetry {
             calls_since_flush: AtomicU64::new(0),
             flush_guard: Mutex::new(()),
             dedup: DashMap::new(),
+            response_bpe_seq: AtomicU64::new(0),
+            response_bpe_samples: AtomicU64::new(0),
+            response_bpe_real_total: AtomicU64::new(0),
+            response_heuristic_total_on_samples: AtomicU64::new(0),
         }
     }
 
-    /// Returns `true` if this is the first time this process has credited
-    /// a baseline for `(tool, key)`, `false` thereafter. Caller credits
-    /// the full baseline only on the first occurrence and zero baseline
-    /// on every repeat — see #25 for the per-tool key table.
+    /// Returns `true` if this is the first time within the dedupe
+    /// window that a baseline has been credited for `(tool, key)`,
+    /// `false` thereafter. Caller credits the full baseline only on
+    /// the first occurrence and zero baseline on every repeat —
+    /// see #25 for the per-tool key table.
     ///
-    /// Atomic via `DashMap::insert` returning `None` only on first write.
-    /// No mutex; safe to call from concurrent tool handlers.
+    /// Window is [`DEDUP_TTL_SECS`] sliding, persisted across
+    /// restarts via [`Self::flush_dedup_to_store`]. Atomic via
+    /// `DashMap::insert` returning `None` only on first write — no
+    /// mutex on the hot path.
     pub fn should_credit_baseline(&self, tool: &'static str, key: &str) -> bool {
         self.dedup
-            .insert((tool, CompactString::new(key)), ())
+            .insert((tool, CompactString::new(key)), now_unix_secs() as i64)
             .is_none()
     }
 
@@ -455,6 +634,93 @@ impl Telemetry {
     #[cfg(test)]
     pub fn reset_dedup(&self) {
         self.dedup.clear();
+    }
+
+    /// Take a one-in-[`RESPONSE_BPE_SAMPLE_PERIOD`] BPE sample on
+    /// `response_text` and accumulate the sample into the rolling
+    /// ratio. Always called alongside [`Self::record`]; calling
+    /// `record` without `sample_response` is fine (the ratio just
+    /// stays at its current value), but `sample_response` is
+    /// pointless without a paired `record`.
+    ///
+    /// **Off-thread**: when sampling fires, the BPE encode is moved
+    /// to a `spawn_blocking` thread and this function returns
+    /// immediately. Without this, even a 1-in-64 sample landed a
+    /// 1–5 ms spike on a tool's response path; with it, the only
+    /// hot-path cost is the bounded clone of the response prefix.
+    ///
+    /// **Skips small responses**: payloads below
+    /// [`RESPONSE_BPE_SAMPLE_MIN_BYTES`] don't sample at all —
+    /// char/4 is already accurate on small balanced strings, and
+    /// the ratio is dominated by the long-tail responses where it
+    /// actually matters. Returns immediately, advancing no counters.
+    pub fn sample_response(self: &Arc<Self>, response_text: &str, heuristic_tokens: u64) {
+        if response_text.len() < RESPONSE_BPE_SAMPLE_MIN_BYTES {
+            return;
+        }
+        let seq = self.response_bpe_seq.fetch_add(1, Ordering::Relaxed);
+        if !seq.is_multiple_of(RESPONSE_BPE_SAMPLE_PERIOD) {
+            return;
+        }
+        // Bounded clone of the prefix actually used by the encode —
+        // never the whole response. `count_tokens_capped` only ever
+        // reads the first `COUNT_TOKENS_CAP_BYTES`, so cloning past
+        // that boundary would waste bytes on every sample.
+        let cap = recon_search::tokens::COUNT_TOKENS_CAP_BYTES;
+        let mut cut = response_text.len().min(cap);
+        while cut > 0 && !response_text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let owned: String = response_text[..cut].to_string();
+        let total_len = response_text.len();
+        let me = Arc::clone(self);
+        // Best-effort fire-and-forget. Failures (runtime shutting
+        // down) silently skip the sample — the ratio stays where it
+        // was, no harm done.
+        tokio::task::spawn_blocking(move || {
+            let head_tokens = recon_search::tokens::count_tokens(&owned) as u64;
+            let bpe = if total_len <= owned.len() || owned.is_empty() {
+                head_tokens
+            } else {
+                head_tokens.saturating_mul(total_len as u64) / owned.len() as u64
+            };
+            me.response_bpe_real_total.fetch_add(bpe, Ordering::Relaxed);
+            me.response_heuristic_total_on_samples
+                .fetch_add(heuristic_tokens, Ordering::Relaxed);
+            me.response_bpe_samples.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    /// Rolling BPE-vs-heuristic ratio for response payloads. Returns
+    /// 1.0 when no samples have been collected yet (interpretation:
+    /// "trust the heuristic until proven otherwise"). Otherwise the
+    /// numerator / denominator are both sums-of-tokens across the
+    /// same sampled responses, so the ratio reflects the workload's
+    /// actual mix rather than unweighted call frequency.
+    ///
+    /// Typical values for code: ~0.85–0.93 (real BPE counts ~7–15 %
+    /// fewer tokens than `len/4` for code). Multiplying the
+    /// heuristic `response_tokens` by this ratio yields an estimate
+    /// of what the BPE-real total would have been on the unsampled
+    /// calls — closes the unit asymmetry between the (BPE) baseline
+    /// and the (heuristic) response in `tokens_saved`.
+    pub fn response_bpe_ratio(&self) -> f64 {
+        let bpe = self.response_bpe_real_total.load(Ordering::Acquire);
+        let heur = self
+            .response_heuristic_total_on_samples
+            .load(Ordering::Acquire);
+        if heur == 0 {
+            1.0
+        } else {
+            bpe as f64 / heur as f64
+        }
+    }
+
+    /// Number of BPE samples taken so far. Useful for
+    /// dashboards/`code_savings --explain` so a viewer can see how
+    /// much weight to put on the ratio (1 sample = noisy, 1 000 = trustworthy).
+    pub fn response_bpe_sample_count(&self) -> u64 {
+        self.response_bpe_samples.load(Ordering::Acquire)
     }
 
     /// Record one tool call. Lock-free hot path: 4 atomic adds + a
@@ -555,7 +821,34 @@ impl Telemetry {
     /// keys and merges the counts. Failures are non-fatal — a corrupt
     /// persisted blob just means the user's lifetime counters reset; the
     /// session counters keep working.
+    ///
+    /// Encoder-version handling: if the persisted [`ENCODER_VERSION_KEY`]
+    /// does not match [`ENCODER_VERSION`], every tool's persisted token
+    /// counters (`response_tokens`, `static_baseline_tokens`,
+    /// `measured_baseline_tokens`) are zeroed before hydrate. `calls`
+    /// and `latency_micros_total` carry over unchanged since their
+    /// units are stable across encoder revisions. This costs the user
+    /// one cumulative reset on upgrade, which is the honest move —
+    /// silently mixing char/4 history with BPE-from-here on the
+    /// dashboard would be the wrong trade.
     pub fn hydrate_from_store(self: &Arc<Self>, store: &Store) {
+        let current_version = match store.get_meta(ENCODER_VERSION_KEY) {
+            Ok(Some(s)) => s,
+            Ok(None) => String::new(),
+            Err(e) => {
+                warn!(%e, "telemetry: encoder-version read failed; treating as upgrade");
+                String::new()
+            }
+        };
+        let drop_token_counters = current_version != ENCODER_VERSION;
+        if drop_token_counters {
+            debug!(
+                stored = %current_version,
+                expected = ENCODER_VERSION,
+                "telemetry: encoder version mismatch — dropping persisted token counters",
+            );
+        }
+
         for (name, counter) in self.tools.iter() {
             let key = format!("tel:tool:{name}");
             let raw = match store.get_meta(&key) {
@@ -567,7 +860,14 @@ impl Telemetry {
                 }
             };
             match serde_json::from_str::<CounterSnapshot>(&raw) {
-                Ok(snapshot) => counter.hydrate(&snapshot),
+                Ok(mut snapshot) => {
+                    if drop_token_counters {
+                        snapshot.response_tokens = 0;
+                        snapshot.static_baseline_tokens = 0;
+                        snapshot.measured_baseline_tokens = 0;
+                    }
+                    counter.hydrate(&snapshot);
+                }
                 Err(e) => warn!(
                     tool = name,
                     %e,
@@ -575,6 +875,99 @@ impl Telemetry {
                 ),
             }
         }
+
+        self.hydrate_dedup_from_store(store);
+    }
+
+    /// Load the persisted dedupe set, dropping entries older than
+    /// [`DEDUP_TTL_SECS`]. Best-effort: a missing or corrupt blob
+    /// just leaves the in-memory set empty (the worst case is one
+    /// session's worth of double-credit, which is what the
+    /// pre-persisted code did unconditionally on every restart).
+    ///
+    /// Tool names are matched against `BASELINES` to recover their
+    /// `&'static str` identity — the dedupe map is keyed on
+    /// `&'static str` so the lookup must round-trip through the
+    /// canonical interned name rather than a freshly allocated
+    /// String.
+    fn hydrate_dedup_from_store(&self, store: &Store) {
+        let raw = match store.get_meta(DEDUP_META_KEY) {
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => {
+                warn!(%e, "telemetry: dedup meta read failed; starting empty");
+                return;
+            }
+        };
+        // Wire format: array of [tool, key, ts] triples. Tuples are
+        // shorter than maps and (importantly) deserialize directly
+        // into Rust tuples without needing a struct.
+        let entries: Vec<(String, String, i64)> = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(%e, "telemetry: dedup meta parse failed; starting empty");
+                return;
+            }
+        };
+        let cutoff = (now_unix_secs() as i64).saturating_sub(DEDUP_TTL_SECS);
+        let mut kept = 0usize;
+        let mut dropped_stale = 0usize;
+        let mut dropped_unknown = 0usize;
+        for (tool_name, key, ts) in entries {
+            if ts < cutoff {
+                dropped_stale += 1;
+                continue;
+            }
+            let tool: Option<&'static str> = BASELINES
+                .iter()
+                .find(|b| b.tool == tool_name)
+                .map(|b| b.tool);
+            match tool {
+                Some(t) => {
+                    self.dedup.insert((t, CompactString::new(&key)), ts);
+                    kept += 1;
+                }
+                None => {
+                    // Tool removed/renamed since the persist —
+                    // ignore. No reason to credit a baseline for a
+                    // tool that no longer exists.
+                    dropped_unknown += 1;
+                }
+            }
+        }
+        debug!(
+            kept,
+            dropped_stale, dropped_unknown, "telemetry: dedup hydrated"
+        );
+    }
+
+    /// Persist the dedupe set under [`DEDUP_META_KEY`]. Bounds the
+    /// payload at [`DEDUP_MAX_ENTRIES`] by keeping the
+    /// most-recently-stamped entries — those are the ones still
+    /// well within the TTL window and most likely to fire again.
+    fn flush_dedup_to_store(&self, store: &Store) -> Result<(), String> {
+        let mut entries: Vec<(&'static str, String, i64)> = self
+            .dedup
+            .iter()
+            .map(|e| {
+                let (tool, key) = e.key();
+                (*tool, key.to_string(), *e.value())
+            })
+            .collect();
+
+        if entries.len() > DEDUP_MAX_ENTRIES {
+            // Keep the freshest entries: sort by timestamp descending,
+            // truncate. The dropped tail is closer to the TTL boundary
+            // and worth the least baseline-credit suppression.
+            entries.sort_by_key(|(_, _, ts)| std::cmp::Reverse(*ts));
+            entries.truncate(DEDUP_MAX_ENTRIES);
+        }
+
+        let raw = serde_json::to_string(&entries).map_err(|e| format!("dedup serialize: {e}"))?;
+        store
+            .set_meta(DEDUP_META_KEY, &raw)
+            .map_err(|e| format!("dedup set_meta: {e}"))?;
+        Ok(())
     }
 
     /// Persist lifetime counters to the SQLite `meta` table. Holds the
@@ -622,6 +1015,22 @@ impl Telemetry {
                 errors += 1;
             }
         }
+        // Stamp the encoder version so the next `hydrate_from_store`
+        // can tell whether the persisted token counters were written
+        // under the current encoder regime. Idempotent — writing the
+        // same value every flush is fine.
+        if let Err(e) = store.set_meta(ENCODER_VERSION_KEY, ENCODER_VERSION) {
+            warn!(%e, "telemetry: encoder-version write failed");
+            errors += 1;
+        }
+        // Persist the dedupe set so a `recon serve` restart inside
+        // the TTL window doesn't re-credit every baseline. Best-
+        // effort: a write failure is logged but doesn't block other
+        // counter writes. The next flush will retry.
+        if let Err(e) = self.flush_dedup_to_store(store) {
+            warn!(%e, "telemetry: dedup write failed");
+            errors += 1;
+        }
         // After flushing per-tool, reset the flush counter so the next
         // batch starts from zero.
         self.calls_since_flush.store(0, Ordering::Release);
@@ -647,9 +1056,24 @@ mod tests {
 
     #[test]
     fn baseline_lookup_known_tool() {
-        // Composite tools keep their static baselines.
-        assert_eq!(baseline_for("code_repo_map"), 20000);
-        assert_eq!(baseline_for("code_find_symbol"), 5000);
+        // Composite tools keep a non-zero static baseline. Pin to
+        // ">0" rather than to specific integers — the BASELINES
+        // table values are derived from `bench-baselines` against a
+        // real fixture and rebenching can change them; the property
+        // we care about is that lookup returns the table value, not
+        // any particular number.
+        let repo_map = baseline_for("code_repo_map");
+        let find_sym = baseline_for("code_find_symbol");
+        assert!(repo_map > 0, "code_repo_map baseline must be non-zero");
+        assert!(find_sym > 0, "code_find_symbol baseline must be non-zero");
+        // Cross-check: the lookup matches what the BASELINES table
+        // declares for that tool. Catches a typo'd name in either side.
+        let table_repo_map = BASELINES
+            .iter()
+            .find(|b| b.tool == "code_repo_map")
+            .unwrap()
+            .baseline_tokens;
+        assert_eq!(repo_map, table_repo_map);
     }
 
     #[test]
@@ -670,6 +1094,7 @@ mod tests {
     #[test]
     fn record_static_path_for_non_migrated_tool() {
         let t = Arc::new(Telemetry::new());
+        let per_call = baseline_for("code_find_symbol");
         // First 9 calls accumulate without firing the flush trigger.
         for _ in 0..(FLUSH_THRESHOLD - 1) {
             assert!(!t.record("code_find_symbol", Duration::from_millis(2), 400, None));
@@ -679,10 +1104,12 @@ mod tests {
         let agg = t.aggregate();
         assert_eq!(agg.calls, 10);
         assert_eq!(agg.response_tokens, 4000);
-        // 10 × 5000 (code_find_symbol static).
-        assert_eq!(agg.static_baseline_tokens, 50_000);
+        // 10 × baseline_for(code_find_symbol). Derived from the
+        // table rather than a hardcoded constant so a future
+        // bench-baselines rerun doesn't regress this test.
+        assert_eq!(agg.static_baseline_tokens, 10 * per_call);
         assert_eq!(agg.measured_baseline_tokens, 0);
-        assert_eq!(agg.tokens_saved(), 46_000);
+        assert_eq!(agg.tokens_saved(), (10 * per_call).saturating_sub(4000));
     }
 
     #[test]
@@ -747,8 +1174,11 @@ mod tests {
         let agg = t.aggregate();
         assert_eq!(agg.calls, 2, "both calls counted");
         assert_eq!(agg.response_tokens, 800, "both response sums counted");
-        // Only the first call accrued the static baseline.
-        assert_eq!(agg.static_baseline_tokens, 5000);
+        // Only the first call accrued the static baseline. Pulled
+        // from BASELINES rather than hardcoded so a bench rerun
+        // doesn't regress this test.
+        let per_call = baseline_for("code_find_symbol");
+        assert_eq!(agg.static_baseline_tokens, per_call);
         assert_eq!(agg.measured_baseline_tokens, 0);
     }
 
@@ -823,5 +1253,208 @@ mod tests {
         assert_eq!(snap.latency_micros_total, 99999);
         assert_eq!(snap.static_baseline_tokens, 0);
         assert_eq!(snap.measured_baseline_tokens, 0);
+    }
+
+    /// Persisted dedupe round-trip + TTL drop.
+    /// (a) Two `should_credit_baseline` calls in one process credit then suppress.
+    /// (b) After flush + fresh `Telemetry`, hydrate restores the suppress.
+    /// (c) An entry forged with an old timestamp is dropped on hydrate
+    ///     so the same key credits again — closes the lifetime
+    ///     "tokens saved" inflation hole.
+    #[test]
+    fn dedup_persists_across_restart_with_ttl_drop() {
+        let store = Store::open_memory().unwrap();
+
+        // Process 1: credit a fresh key, then verify the second call
+        // is suppressed.
+        let t = Arc::new(Telemetry::new());
+        assert!(t.should_credit_baseline("code_outline", "src/lib.rs"));
+        assert!(!t.should_credit_baseline("code_outline", "src/lib.rs"));
+        // Drive a flush so the dedupe set lands in SQLite. We can't
+        // call flush_to_store directly without a populated tool
+        // counter making the path non-empty, so populate one and flush.
+        t.record("code_outline", Duration::from_millis(1), 100, Some(1000));
+        t.flush_to_store(&store);
+
+        // Process 2: brand-new Telemetry, hydrate from the same store.
+        // The key MUST still be marked credited (no double-credit on
+        // restart inside the TTL window).
+        let t2 = Arc::new(Telemetry::new());
+        t2.hydrate_from_store(&store);
+        assert!(
+            !t2.should_credit_baseline("code_outline", "src/lib.rs"),
+            "key persisted before restart must remain suppressed"
+        );
+
+        // Now forge a stale entry: write a dedupe blob whose only
+        // timestamp is well past the TTL. Hydrate must drop it,
+        // freeing the key to credit again.
+        let stale_ts = (now_unix_secs() as i64) - DEDUP_TTL_SECS - 60;
+        let stale_blob = serde_json::to_string(&vec![(
+            "code_outline".to_string(),
+            "src/old_file.rs".to_string(),
+            stale_ts,
+        )])
+        .unwrap();
+        store.set_meta(DEDUP_META_KEY, &stale_blob).unwrap();
+
+        let t3 = Arc::new(Telemetry::new());
+        t3.hydrate_from_store(&store);
+        assert!(
+            t3.should_credit_baseline("code_outline", "src/old_file.rs"),
+            "stale entry must be dropped on hydrate so the key credits anew"
+        );
+    }
+
+    /// Sampled-BPE ratio probe: every Nth call schedules a real BPE
+    /// count of the response text alongside the heuristic count.
+    /// Verifies that
+    /// (a) only every Nth call advances `response_bpe_samples`
+    ///     (after the spawn_blocking tasks have completed),
+    /// (b) the ratio reflects BPE/heuristic on the sampled subset,
+    /// (c) `response_bpe_ratio()` returns 1.0 when no samples yet,
+    /// (d) responses below `RESPONSE_BPE_SAMPLE_MIN_BYTES` never sample.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sample_response_collects_every_nth_call() {
+        let t = Arc::new(Telemetry::new());
+        // Pre-sample: ratio defaults to 1.0 ("trust the heuristic").
+        assert_eq!(t.response_bpe_ratio(), 1.0);
+        assert_eq!(t.response_bpe_sample_count(), 0);
+
+        // Tiny responses (below the size threshold) must not
+        // advance the sequence counter at all — we don't even
+        // pretend to sample them.
+        for _ in 0..32 {
+            t.sample_response("short", 1);
+        }
+        assert_eq!(t.response_bpe_sample_count(), 0);
+
+        // Drive RESPONSE_BPE_SAMPLE_PERIOD * 3 calls with a payload
+        // safely above the size threshold. Exactly 3 samples should
+        // accumulate after the spawn_blocking tasks land.
+        let response = "fn add(a: i32, b: i32) -> i32 { a + b }\n".repeat(40);
+        assert!(response.len() >= RESPONSE_BPE_SAMPLE_MIN_BYTES);
+        let heuristic = recon_search::tokens::estimate_tokens(&response) as u64;
+        let calls = (RESPONSE_BPE_SAMPLE_PERIOD * 3) as usize;
+        for _ in 0..calls {
+            t.sample_response(&response, heuristic);
+        }
+        // Wait for the fire-and-forget BPE tasks to update the
+        // counters. spawn_blocking is fast (<5 ms each) but not
+        // synchronous; poll briefly with a generous deadline.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if t.response_bpe_sample_count() == 3 {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "expected 3 samples within 5 s, got {}",
+                    t.response_bpe_sample_count()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Ratio reflects BPE/heuristic on the SAMPLED subset.
+        // Direction depends on payload shape: punctuation-dense
+        // synthetic snippets like the test fixture tokenize into
+        // MORE BPE tokens than `len/4` (each `(`, `:`, `,`, `->` is
+        // typically its own token), so the ratio for code-heavy
+        // payloads can exceed 1.0. Real-world MCP responses sit
+        // closer to 1.0 since they mix code with prose. Sanity-
+        // bound widely so the test catches obvious breakage
+        // (zero / NaN / negative) without tripping on encoding
+        // realities.
+        let ratio = t.response_bpe_ratio();
+        assert!(
+            (0.3..=3.0).contains(&ratio),
+            "ratio={ratio} outside sane sanity band [0.3, 3.0]"
+        );
+        assert!(ratio.is_finite() && ratio > 0.0);
+    }
+
+    /// Encoder-version upgrade path: a meta blob persisted under an
+    /// older encoder (no `tel:encoder_version` key) must hydrate with
+    /// token counters zeroed while `calls` and `latency_micros_total`
+    /// carry over. After a fresh flush stamps the current version,
+    /// the next hydrate carries everything through unchanged.
+    ///
+    /// This is the load-bearing piece for the BPE-swap upgrade — if
+    /// it silently misbehaves, every existing user's first
+    /// post-upgrade dashboard view shows mixed-units totals.
+    #[test]
+    fn hydrate_drops_token_counters_on_encoder_version_upgrade() {
+        let store = Store::open_memory().unwrap();
+
+        // Simulate a pre-upgrade state: a CounterSnapshot blob
+        // persisted under the old encoder, with NO encoder_version key.
+        let legacy = CounterSnapshot {
+            calls: 42,
+            response_tokens: 12_000,
+            static_baseline_tokens: 50_000,
+            measured_baseline_tokens: 30_000,
+            latency_micros_total: 99_999,
+        };
+        store
+            .set_meta(
+                "tel:tool:code_outline",
+                &serde_json::to_string(&legacy).unwrap(),
+            )
+            .unwrap();
+        // sanity: no version key persisted yet.
+        assert!(store.get_meta(ENCODER_VERSION_KEY).unwrap().is_none());
+
+        // First hydrate: token counters must drop, calls/latency keep.
+        let t = Arc::new(Telemetry::new());
+        t.hydrate_from_store(&store);
+        let after_upgrade = t.tools.get("code_outline").unwrap().snapshot();
+        assert_eq!(
+            after_upgrade.calls, 42,
+            "calls preserved across encoder upgrade"
+        );
+        assert_eq!(
+            after_upgrade.latency_micros_total, 99_999,
+            "latency preserved across encoder upgrade"
+        );
+        assert_eq!(after_upgrade.response_tokens, 0, "response_tokens dropped");
+        assert_eq!(
+            after_upgrade.static_baseline_tokens, 0,
+            "static_baseline_tokens dropped"
+        );
+        assert_eq!(
+            after_upgrade.measured_baseline_tokens, 0,
+            "measured_baseline_tokens dropped"
+        );
+
+        // Now record a new call (under the new encoder regime) and flush.
+        // The flush stamps `tel:encoder_version` so the next hydrate is
+        // a same-version round-trip.
+        t.record("code_outline", Duration::from_millis(1), 100, Some(2400));
+        t.flush_to_store(&store);
+        assert_eq!(
+            store.get_meta(ENCODER_VERSION_KEY).unwrap().as_deref(),
+            Some(ENCODER_VERSION),
+            "flush must stamp the encoder version"
+        );
+
+        // Second hydrate: same-version, all fields carry over unchanged.
+        let snap_before_second_hydrate = t.tools.get("code_outline").unwrap().snapshot();
+        let t2 = Arc::new(Telemetry::new());
+        t2.hydrate_from_store(&store);
+        let after_round_trip = t2.tools.get("code_outline").unwrap().snapshot();
+        assert_eq!(
+            after_round_trip.calls, snap_before_second_hydrate.calls,
+            "same-version hydrate preserves calls"
+        );
+        assert_eq!(
+            after_round_trip.response_tokens, snap_before_second_hydrate.response_tokens,
+            "same-version hydrate preserves response_tokens"
+        );
+        assert_eq!(
+            after_round_trip.measured_baseline_tokens,
+            snap_before_second_hydrate.measured_baseline_tokens,
+            "same-version hydrate preserves measured_baseline_tokens"
+        );
     }
 }

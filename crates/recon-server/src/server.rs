@@ -112,16 +112,17 @@ pub struct ReconServer {
     /// always populates this via [`ReconServer::set_license`].
     license: Arc<ArcSwap<Option<crate::license::ValidatedLicense>>>,
     /// Cache of measured-baseline token counts keyed by absolute path,
-    /// valued by `(mtime_secs, tokens)`. The mtime in the value is what
-    /// makes the cache self-invalidating: every lookup compares the
-    /// current file mtime against the stored one; a mismatch is treated
-    /// as a miss and the slot is overwritten. No explicit watcher hook
-    /// is needed.
+    /// valued by `(mtime_secs, tokens, last_access_secs)`. The mtime
+    /// in the value is what makes the cache self-invalidating: every
+    /// lookup compares the current file mtime against the stored one;
+    /// a mismatch is treated as a miss and the slot is overwritten.
+    /// `last_access_secs` is updated on every hit and drives LRU
+    /// eviction so the busiest files stay resident under pressure.
     ///
     /// Bounded at [`MAX_BASELINE_CACHE_ENTRIES`] to keep memory flat on
-    /// long-running servers; on overflow we drop ~25 % of entries to
-    /// retain warm files.
-    measured_baseline_cache: Arc<dashmap::DashMap<PathBuf, (i64, u64)>>,
+    /// long-running servers; on overflow we evict the bottom-25 % by
+    /// `last_access_secs` so cold entries leave first.
+    measured_baseline_cache: Arc<dashmap::DashMap<PathBuf, (i64, u64, i64)>>,
 }
 
 /// Bound on [`ReconServer::measured_baseline_cache`]. Sized to match
@@ -405,6 +406,14 @@ impl ReconServer {
                 )
             }
         };
+        // Prewarm the cl100k_base BPE merge table so the first
+        // measured-baseline computation doesn't pay the ~100 ms
+        // initialization cost on the user-visible MCP hot path. Cheap
+        // to do here — server construction is already non-hot —
+        // and idempotent across multiple `ReconServer::new` calls
+        // (the `OnceLock` runs the heavy load at most once per process).
+        recon_search::tokens::prewarm();
+
         // Hydrate telemetry counters from the meta table BEFORE the
         // store is moved into the Mutex. Best-effort: a corrupt DB
         // resets counters to zero; never blocks startup.
@@ -646,7 +655,18 @@ impl ReconServer {
         response: &str,
         measured_baseline: Option<u64>,
     ) {
+        // `response_tokens` is the char/4 heuristic on the hot path —
+        // real BPE here would add ~1 ms per MCP call (5 KB response
+        // on tiktoken-rs cl100k_base, see the `count_tokens/5kb_response`
+        // bench in recon-search), enough to multiply the latency of
+        // sub-millisecond tools like `code_outline`. To close the unit
+        // asymmetry between the (BPE) baseline counter and the
+        // (heuristic) response counter, [`Telemetry::sample_response`]
+        // takes a real-BPE sample on every Nth call and accumulates a
+        // running ratio so `tokens_saved` can be corrected on the way
+        // out. The hot path stays heuristic-fast.
         let response_tokens = recon_search::tokens::estimate_tokens(response) as u64;
+        self.telemetry.sample_response(response, response_tokens);
         let should_flush = self.telemetry.record(
             tool,
             started_at.elapsed(),
@@ -766,45 +786,184 @@ impl ReconServer {
     /// identical bytes just to recompute the baseline. The cache is
     /// self-invalidating: an mtime mismatch is treated as a miss and
     /// the slot is overwritten.
+    ///
+    /// Uses real cl100k_base BPE via `recon_search::tokens::count_tokens`,
+    /// capped at [`recon_search::tokens::COUNT_TOKENS_CAP_BYTES`] (32 KB)
+    /// with linear extrapolation for larger files. The encode itself
+    /// runs on a `spawn_blocking` thread so a busy CPU-bound BPE pass
+    /// doesn't stall the tokio executor under concurrent tool calls.
+    /// On a 20 KB file, encoding takes ~1–5 ms cold; the cache makes
+    /// every subsequent baseline lookup on the same `(path, mtime)`
+    /// effectively free.
     async fn measure_read_baseline(&self, abs_path: &Path) -> Option<u64> {
         let meta = tokio::fs::metadata(abs_path).await.ok()?;
         if meta.len() > MAX_READ_FILE_SIZE {
             return None;
         }
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let mtime = self.mtime_secs(&meta);
 
-        if let Some(entry) = self.measured_baseline_cache.get(abs_path) {
-            let (cached_mtime, cached_tokens) = *entry;
-            if cached_mtime == mtime {
-                return Some(cached_tokens);
-            }
+        if let Some(tokens) = self.cached_baseline(abs_path, mtime) {
+            return Some(tokens);
         }
 
         let content = tokio::fs::read_to_string(abs_path).await.ok()?;
-        let tokens = recon_search::tokens::estimate_tokens(&content) as u64;
-
-        // Bound growth: drop ~25 % on overflow to retain warm entries.
-        if self.measured_baseline_cache.len() >= MAX_BASELINE_CACHE_ENTRIES {
-            let to_remove: Vec<PathBuf> = self
-                .measured_baseline_cache
-                .iter()
-                .take(MAX_BASELINE_CACHE_ENTRIES / 4)
-                .map(|e| e.key().clone())
-                .collect();
-            for key in to_remove {
-                self.measured_baseline_cache.remove(&key);
-            }
-        }
-        self.measured_baseline_cache
-            .insert(abs_path.to_path_buf(), (mtime, tokens));
-        Some(tokens)
+        Some(self.insert_baseline(abs_path, mtime, &content).await)
     }
 
+    /// Share-the-cache variant: the caller has already read `content`
+    /// for its own work (e.g. `code_read_symbol`, `code_context`,
+    /// `code_skeleton` fallback) and just needs the baseline number.
+    /// Looks up `measured_baseline_cache` by `(path, mtime)`; on miss,
+    /// runs BPE on the supplied bytes and inserts the result.
+    ///
+    /// Returns `None` when `mtime` cannot be read or the path is too
+    /// large per [`MAX_READ_FILE_SIZE`] — same skip rules as
+    /// [`Self::measure_read_baseline`] so the two helpers agree on
+    /// "this file does not contribute a baseline."
+    async fn measure_baseline_for_known_content(
+        &self,
+        abs_path: &Path,
+        content: &str,
+    ) -> Option<u64> {
+        let meta = tokio::fs::metadata(abs_path).await.ok()?;
+        if meta.len() > MAX_READ_FILE_SIZE {
+            return None;
+        }
+        let mtime = self.mtime_secs(&meta);
+        if let Some(tokens) = self.cached_baseline(abs_path, mtime) {
+            return Some(tokens);
+        }
+        Some(self.insert_baseline(abs_path, mtime, content).await)
+    }
+
+    /// Lookup helper: mtime-keyed read of the baseline cache. Updates
+    /// `last_access_secs` on a hit so the LRU eviction in
+    /// [`Self::insert_baseline`] keeps hot entries resident.
+    fn cached_baseline(&self, abs_path: &Path, mtime: i64) -> Option<u64> {
+        // First check + value extract; entry guard dropped before we
+        // re-acquire to bump `last_access` so the read path holds the
+        // shard lock for as little as possible.
+        let cached_tokens = {
+            let entry = self.measured_baseline_cache.get(abs_path)?;
+            let (cached_mtime, cached_tokens, _) = *entry;
+            if cached_mtime != mtime {
+                return None;
+            }
+            cached_tokens
+        };
+        let now = now_unix_secs();
+        if let Some(mut entry) = self.measured_baseline_cache.get_mut(abs_path) {
+            // Same-mtime double-check guards against a concurrent
+            // overwrite between the `get` and `get_mut` above.
+            if entry.0 == mtime {
+                entry.2 = now;
+            }
+        }
+        Some(cached_tokens)
+    }
+
+    /// Insert helper: BPE-encode `content` (bounded by the 32 KB cap)
+    /// off the tokio executor and store the result under
+    /// `(path, mtime)`. Bounds growth at [`MAX_BASELINE_CACHE_ENTRIES`]
+    /// by evicting the bottom-25 % of entries by `last_access_secs`
+    /// (true LRU). On a `spawn_blocking` join error — extremely rare,
+    /// only during runtime shutdown — falls back to the heuristic so
+    /// the caller still gets a number.
+    async fn insert_baseline(&self, abs_path: &Path, mtime: i64, content: &str) -> u64 {
+        // Clone the bounded prefix that will actually be encoded —
+        // never the whole file. `spawn_blocking` requires `'static`
+        // input, so we own a copy; the cap keeps that copy small.
+        let cap = recon_search::tokens::COUNT_TOKENS_CAP_BYTES;
+        let mut cut = content.len().min(cap);
+        while cut > 0 && !content.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let head_owned: String = if cut == 0 && !content.is_empty() {
+            // Pathological single-codepoint > cap: encode the whole
+            // string. Same fallback as `count_tokens_capped`.
+            content.to_string()
+        } else {
+            content[..cut].to_string()
+        };
+        let total_len = content.len();
+        let head_len = head_owned.len();
+
+        let tokens = match tokio::task::spawn_blocking(move || {
+            let head_tokens = recon_search::tokens::count_tokens(&head_owned) as u64;
+            if total_len <= head_len || head_len == 0 {
+                head_tokens
+            } else {
+                head_tokens.saturating_mul(total_len as u64) / head_len as u64
+            }
+        })
+        .await
+        {
+            Ok(n) => n,
+            Err(_) => recon_search::tokens::estimate_tokens(content) as u64,
+        };
+
+        if self.measured_baseline_cache.len() >= MAX_BASELINE_CACHE_ENTRIES {
+            self.evict_lru();
+        }
+        let now = now_unix_secs();
+        self.measured_baseline_cache
+            .insert(abs_path.to_path_buf(), (mtime, tokens, now));
+        tokens
+    }
+
+    /// LRU eviction: scan the cache, partition by `last_access_secs`,
+    /// and drop the coldest 25 %. Called only on overflow, so a full
+    /// linear scan over [`MAX_BASELINE_CACHE_ENTRIES`] is amortized
+    /// across `MAX_BASELINE_CACHE_ENTRIES / 4` future inserts. A
+    /// proper concurrent LRU (moka, etc.) would be cheaper per-call,
+    /// but the throughput here is bounded by file I/O upstream — the
+    /// scan never shows up in flame graphs for realistic workloads.
+    fn evict_lru(&self) {
+        let target = MAX_BASELINE_CACHE_ENTRIES / 4;
+        let mut by_access: Vec<(PathBuf, i64)> = self
+            .measured_baseline_cache
+            .iter()
+            .map(|e| (e.key().clone(), e.value().2))
+            .collect();
+        // Partial sort: nth_element-style "give me the smallest N" is
+        // optimal here, but the std lib doesn't expose it. A full
+        // sort is O(n log n) and runs ~once per `target` inserts —
+        // overhead is negligible relative to the BPE encode that
+        // triggered the overflow.
+        by_access.sort_by_key(|(_, ts)| *ts);
+        for (key, _) in by_access.into_iter().take(target) {
+            self.measured_baseline_cache.remove(&key);
+        }
+    }
+
+    /// Extract `mtime` as seconds-since-epoch with a 0 fallback. Kept
+    /// separate so the two cache-aware helpers agree on the key shape.
+    fn mtime_secs(&self, meta: &std::fs::Metadata) -> i64 {
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
+
+/// Current wall-clock seconds since the UNIX epoch as an `i64`.
+/// Used by the LRU `last_access_secs` field on
+/// [`ReconServer::measured_baseline_cache`]. Saturates at the start
+/// of the epoch on the (unobservable) failure path so cache code
+/// never has to handle a negative timestamp.
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+// Re-open the impl block so the rest of `ReconServer`'s methods stay
+// intact below. This is a no-op syntactically; splitting and re-opening
+// the impl lets the free-standing `now_unix_secs` sit between two
+// blocks of methods rather than inside one.
+impl ReconServer {
     /// Spawn an async task to persist lifetime telemetry. Hot-path
     /// callers must not block on this.
     fn flush_telemetry_async(&self) {
@@ -2209,8 +2368,9 @@ impl ReconServer {
                         );
                     }
                 };
-                measured_from_fallback =
-                    Some(recon_search::tokens::estimate_tokens(&content) as u64);
+                measured_from_fallback = self
+                    .measure_baseline_for_known_content(&abs_path, &content)
+                    .await;
                 // Build the truncated preview in one pass to avoid the
                 // intermediate `Vec<&str>` + `join` allocation. `content` is
                 // already bounded by `MAX_READ_FILE_SIZE`, so capping the
@@ -2321,8 +2481,12 @@ impl ReconServer {
             // Measured baseline: token-cost of the full file we just
             // read. Captured here so it's available on every successful
             // path below — we already paid the read I/O for our own work.
-            let measured: Option<u64> =
-                Some(recon_search::tokens::estimate_tokens(&content) as u64);
+            // Goes through the shared `(path, mtime)` cache so a session
+            // that calls `code_outline` then `code_read_symbol` on the
+            // same file BPE-encodes once.
+            let measured: Option<u64> = self
+                .measure_baseline_for_known_content(&abs_path, &content)
+                .await;
 
             let rel_path = PathBuf::from(&params.0.path);
             let symbols = self
@@ -2848,8 +3012,11 @@ impl ReconServer {
             // read is the dominant component, the rest is grep
             // overhead. Reporting the file-read floor keeps the
             // measurement honest (under-counts rather than inflates).
-            let measured_baseline =
-                Some(recon_search::tokens::estimate_tokens(&content) as u64);
+            // Goes through the shared `(path, mtime)` cache so we
+            // BPE-encode at most once per file per session.
+            let measured_baseline = self
+                .measure_baseline_for_known_content(&abs_path, &content)
+                .await;
 
             let line_start = *target.line_range.start() as usize;
             let line_end = *target.line_range.end() as usize;
@@ -3199,6 +3366,22 @@ impl ReconServer {
     /// Users get the same data through the CLI and the dashboard.
     pub async fn code_savings(&self, _params: Parameters<SavingsParams>) -> String {
         self.instrumented("code_savings", async move {
+            // BPE/heuristic ratio for response_tokens. Once applied,
+            // the displayed `tokens_saved` uses BPE-equivalent units
+            // on both sides of the subtraction (baseline is BPE for
+            // measured tools; response was heuristic but is now
+            // ratio-corrected). Ratio defaults to 1.0 until samples
+            // arrive, so a fresh process shows the same pre-sampling
+            // numbers as before.
+            let ratio = self.telemetry.response_bpe_ratio();
+            let sample_count = self.telemetry.response_bpe_sample_count();
+            let correct = |resp: u64| -> u64 { ((resp as f64) * ratio) as u64 };
+            let corrected_saved = |s: &crate::telemetry::CounterSnapshot| -> u64 {
+                s.static_baseline_tokens
+                    .saturating_add(s.measured_baseline_tokens)
+                    .saturating_sub(correct(s.response_tokens))
+            };
+
             let mut content = String::from(
                 "# tool\tcalls\tresponse_tokens\tbaseline\ttokens_saved\tavg_latency_ms\n",
             );
@@ -3217,9 +3400,9 @@ impl ReconServer {
                     "{name}\t{calls}\t{resp}\t{base}\t{saved}\t{latency:.2}\n",
                     name = name,
                     calls = snapshot.calls,
-                    resp = snapshot.response_tokens,
+                    resp = correct(snapshot.response_tokens),
                     base = baseline,
-                    saved = snapshot.tokens_saved(),
+                    saved = corrected_saved(&snapshot),
                     latency = snapshot.avg_latency_ms(),
                 ));
             }
@@ -3231,10 +3414,60 @@ impl ReconServer {
             content.push_str(&format!(
                 "# total\t{calls}\t{resp}\t{base}\t{saved}\t-\n",
                 calls = agg.calls,
-                resp = agg.response_tokens,
+                resp = correct(agg.response_tokens),
                 base = agg_baseline,
-                saved = agg.tokens_saved(),
+                saved = corrected_saved(&agg),
             ));
+            // BPE-ratio disclosure trailer. Surfaces the correction
+            // factor so a reader can see whether the ratio is well-
+            // sampled (high count) or noisy (single-digit count).
+            content.push_str(&format!(
+                "# response_bpe_ratio: {ratio:.4} (samples: {sample_count}; \
+                 1-in-{period} calls; 1.0 = no samples yet)\n",
+                ratio = ratio,
+                sample_count = sample_count,
+                period = crate::telemetry::RESPONSE_BPE_SAMPLE_PERIOD,
+            ));
+
+            // Methodology trailer. Lists each tool's baseline source
+            // so a skeptical reader can verify the number rather than
+            // accept it on faith. Only emitted for tools the caller
+            // actually used (calls > 0); keeps the response compact
+            // for a fresh telemetry session.
+            let used_tools: std::collections::HashSet<&'static str> = self
+                .telemetry
+                .per_tool_snapshots()
+                .into_iter()
+                .filter(|(_, s)| s.calls > 0)
+                .map(|(name, _)| name)
+                .collect();
+            if !used_tools.is_empty() {
+                content.push_str("\n# methodology — how each baseline is derived:\n");
+                for b in crate::telemetry::BASELINES.iter() {
+                    if !used_tools.contains(b.tool) {
+                        continue;
+                    }
+                    if b.baseline_tokens == 0 && b.range_low_tokens == 0 && b.range_high_tokens == 0
+                    {
+                        // Migrated tool: derivation is the per-call
+                        // measurement; no static range to report.
+                        content.push_str(&format!(
+                            "# {tool}: {derivation}\n",
+                            tool = b.tool,
+                            derivation = b.derivation,
+                        ));
+                    } else {
+                        content.push_str(&format!(
+                            "# {tool}: {point} tok (range {low}–{high}) — {derivation}\n",
+                            tool = b.tool,
+                            point = b.baseline_tokens,
+                            low = b.range_low_tokens,
+                            high = b.range_high_tokens,
+                            derivation = b.derivation,
+                        ));
+                    }
+                }
+            }
 
             let view = ToolOutput::Skeleton(recon_core::shapes::SkeletonView {
                 path: None,
@@ -5525,7 +5758,7 @@ mod tests {
         // and re-read (returning the same value computed from real bytes).
         server
             .measured_baseline_cache
-            .insert(abs.clone(), (cached.0 - 1, cached.1 + 999));
+            .insert(abs.clone(), (cached.0 - 1, cached.1 + 999, cached.2));
         let third = server.measure_read_baseline(&abs).await.unwrap();
         assert_eq!(
             first, third,
@@ -5735,5 +5968,115 @@ mod tests {
             "code_find_refs must remain on static-only baseline"
         );
         assert!(fr.static_baseline_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn evict_lru_drops_coldest_quartile_keeps_hot() {
+        // Fill the cache past capacity with a mix of cold and hot
+        // entries (cold = small last_access timestamp), call
+        // `evict_lru`, and verify the hot quartile survives.
+        //
+        // Tests the eviction policy directly rather than exercising
+        // it through the full async I/O path — fewer moving parts,
+        // and the policy is exactly what we care about.
+        let server = make_test_server();
+
+        // Hot quartile: high `last_access`. Cold quartile: low.
+        // Mid two quartiles: linearly distributed in between. The
+        // expected outcome is that the lowest-25 % (purely cold) is
+        // dropped, leaving the rest.
+        let total = MAX_BASELINE_CACHE_ENTRIES + 1; // force overflow path
+        for i in 0..total {
+            let path = std::path::PathBuf::from(format!("/synth/file_{i}.rs"));
+            let last_access = i as i64; // larger i = hotter
+            server
+                .measured_baseline_cache
+                .insert(path, (1, 100, last_access));
+        }
+        assert_eq!(server.measured_baseline_cache.len(), total);
+
+        // Trigger the actual eviction the live code uses.
+        server.evict_lru();
+
+        let target_drop = MAX_BASELINE_CACHE_ENTRIES / 4;
+        assert_eq!(
+            server.measured_baseline_cache.len(),
+            total - target_drop,
+            "evict_lru must drop exactly the bottom-quartile",
+        );
+
+        // The hottest entry (last_access = total-1) must still be
+        // resident. The coldest entry (last_access = 0) must be gone.
+        let hottest = std::path::PathBuf::from(format!("/synth/file_{}.rs", total - 1));
+        assert!(
+            server.measured_baseline_cache.contains_key(&hottest),
+            "hottest entry must survive eviction",
+        );
+        let coldest = std::path::PathBuf::from("/synth/file_0.rs");
+        assert!(
+            !server.measured_baseline_cache.contains_key(&coldest),
+            "coldest entry must be evicted",
+        );
+    }
+
+    #[tokio::test]
+    async fn measured_baseline_caches_and_bumps_lru() {
+        // End-to-end check that measure_baseline_for_known_content
+        // (a) populates the cache with `last_access`, and
+        // (b) updates `last_access` on cache hit. Also verifies the
+        // 32 KB cap path runs without panic on a large content blob.
+        let (server, tmp) = make_indexed_server().await;
+
+        // Tiny file under the cap.
+        let small_path = tmp.path().join("tiny.rs");
+        std::fs::write(&small_path, "pub fn touch() -> u64 { 1 }\n").unwrap();
+        let abs_small = std::fs::canonicalize(&small_path).unwrap();
+        let small_content = std::fs::read_to_string(&abs_small).unwrap();
+        let t1 = server
+            .measure_baseline_for_known_content(&abs_small, &small_content)
+            .await
+            .expect("small file must produce a baseline");
+        assert!(t1 > 0);
+
+        // Force a clear timestamp delta on the cache hit.
+        let access_before = server
+            .measured_baseline_cache
+            .get(&abs_small)
+            .map(|e| e.value().2)
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let t2 = server
+            .measure_baseline_for_known_content(&abs_small, &small_content)
+            .await
+            .expect("cache hit must still produce a baseline");
+        assert_eq!(t1, t2, "same content yields same baseline");
+        let access_after = server
+            .measured_baseline_cache
+            .get(&abs_small)
+            .map(|e| e.value().2)
+            .unwrap();
+        assert!(
+            access_after > access_before,
+            "cache hit must bump last_access (before={access_before}, after={access_after})",
+        );
+
+        // Cap path: write a large file (~80 KB) and confirm
+        // measure_baseline_for_known_content returns a sensible
+        // number rather than panicking on the slice / spawn_blocking.
+        let big_path = tmp.path().join("big.rs");
+        let big_content = "fn add(a: i32, b: i32) -> i32 { a + b }\n".repeat(2_000);
+        std::fs::write(&big_path, &big_content).unwrap();
+        let abs_big = std::fs::canonicalize(&big_path).unwrap();
+        let big_baseline = server
+            .measure_baseline_for_known_content(&abs_big, &big_content)
+            .await
+            .expect("big file must produce a baseline via the cap path");
+        // Heuristic floor: char/4 was the pre-BPE estimate. Real BPE
+        // counts are smaller for code, so the capped extrapolation
+        // should land below that ceiling.
+        assert!(
+            big_baseline > 0 && (big_baseline as usize) < big_content.len(),
+            "big_baseline={big_baseline} must be positive and below byte length",
+        );
     }
 }

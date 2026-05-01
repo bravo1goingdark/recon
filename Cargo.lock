@@ -4098,6 +4098,7 @@ dependencies = [
  "flate2",
  "hyper",
  "hyper-util",
+ "ignore",
  "mimalloc",
  "recon-core",
  "recon-indexer",

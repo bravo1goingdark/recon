@@ -39,6 +39,13 @@ semver = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 
+# `bench-baselines` simulator: walks the repo respecting .gitignore
+# and runs literal grep-equivalent matches to derive the static
+# BASELINES table from real workload measurements rather than
+# asserted constants. Word-boundary matching is hand-rolled rather
+# than pulling in the `regex` crate as a new workspace dependency.
+ignore = { workspace = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 zip = { workspace = true }
 
