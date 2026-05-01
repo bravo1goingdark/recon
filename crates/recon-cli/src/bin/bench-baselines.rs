@@ -581,7 +581,10 @@ mod tests {
     fn alternative_find_refs_returns_nonzero_for_known_symbol() {
         let (_tmp, files) = fixture();
         let tokens = alternative_find_refs(&files, "validate");
-        assert!(tokens > 0, "find_refs against a known symbol must return >0");
+        assert!(
+            tokens > 0,
+            "find_refs against a known symbol must return >0"
+        );
     }
 
     #[test]
@@ -642,9 +645,7 @@ mod tests {
         });
         assert!(m_path.median() > 0);
 
-        let m_impact = run_variants("code_impact", &[symbol], |s| {
-            alternative_impact(&files, s)
-        });
+        let m_impact = run_variants("code_impact", &[symbol], |s| alternative_impact(&files, s));
         assert!(m_impact.median() > 0);
 
         let m_subs = run_on_subsets("code_subsystems", &files, alternative_subsystems);
