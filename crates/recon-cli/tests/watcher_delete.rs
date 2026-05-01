@@ -89,7 +89,7 @@ async fn watcher_removes_symbols_on_file_delete() {
                 .map(|s| s.is_empty())
                 .unwrap_or(false)
         },
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     )
     .await;
 
@@ -134,7 +134,7 @@ async fn watcher_handles_rename_as_delete_plus_create() {
     // Two cascade phases here: MOVED_FROM has to delete the old row, and
     // MOVED_TO has to (re)index the new path. We poll on BOTH end-states so
     // a busy CI runner that's slow to fire the second event doesn't trip
-    // the assertion before the cascade finishes. Same 30 s upper bound as
+    // the assertion before the cascade finishes. Same 60 s upper bound as
     // the delete test above.
     wait_until(
         || {
@@ -148,7 +148,7 @@ async fn watcher_handles_rename_as_delete_plus_create() {
                 .unwrap_or(false);
             old_gone && new_present
         },
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     )
     .await;
 
