@@ -4,6 +4,70 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.5.4] — 2026-05-02
+
+Token-savings credibility release. Every number in the static
+`BASELINES` table now traces to either real BPE on real file content
+(4 migrated tools) or a `cargo run` you can rerun yourself (9
+non-migrated tools via the new `bench-baselines` binary). The headline
+"tokens saved" figure is no longer a vendor metric — it's an audit
+trail.
+
+### Changed — measured baselines replace asserted ones
+
+- New `crates/recon-cli/src/bin/bench-baselines.rs` walks a fixture
+  repo, simulates each non-migrated tool's literal Read+Grep
+  alternative, and BPE-counts the result via `count_tokens`. Static
+  `BASELINES` rows now carry the resulting medians + (low, high)
+  ranges. Previous asserted point estimates under-claimed the real
+  alternative-loop cost by 2–5×.
+- `Baseline` struct extended with `range_low_tokens`,
+  `range_high_tokens`, and `derivation` — a one-line reproducible
+  methodology string. `code_savings` emits a "methodology" trailer
+  listing each used tool's range + derivation so dashboard consumers
+  can audit at a glance.
+- `ENCODER_VERSION` bumped `bpe-v1` → `bpe-v2-baselines-measured`.
+  First hydrate after upgrade drops the persisted token counters
+  (response, static_baseline, measured_baseline) so old asserted-unit
+  history doesn't silently mix with new measured-unit credit on the
+  dashboard. `calls` and `latency_micros_total` carry over unchanged.
+
+### Performance — measured-baseline path hardened
+
+- **Real BPE replaces char/4 on the file-content baseline.** The four
+  migrated tools (`code_outline`, `code_skeleton`, `code_read_symbol`,
+  `code_context`) now BPE-count the file the agent would have read
+  via cl100k_base. `count_tokens_capped` bounds per-call cost at 32 KB
+  with linear extrapolation for larger files; the encode runs off the
+  tokio executor via `spawn_blocking`. Cache is shared across all four
+  tools so a session that touches the same file from multiple handlers
+  pays one BPE pass.
+- **`recon_search::tokens::prewarm()`** at server construction loads
+  the cl100k_base merge table during startup so the first MCP call
+  doesn't pay the ~100 ms initialisation tax.
+- **`response_tokens` stays heuristic** on the hot path (real BPE here
+  would add ~1 ms per MCP call; measurable for sub-millisecond tools
+  like `code_outline`). To close the unit asymmetry between baseline
+  and response, `Telemetry::sample_response` runs a fire-and-forget
+  BPE sample on 1-in-64 calls (responses ≥ 1 KB), tracking a running
+  BPE/heuristic ratio. `code_savings` applies the ratio to display
+  corrected `tokens_saved`.
+- **Per-process baseline-credit dedup persists to SQLite** with a 24 h
+  sliding-window TTL. A `recon serve` restart inside the window no
+  longer re-credits every file's baseline, closing the lifetime
+  inflation hole.
+- **True LRU eviction** on `measured_baseline_cache` (was iteration-order
+  eviction).
+
+### Caveat
+
+The static `BASELINES` integers are calibrated against this repo
+specifically (130 source files, ~MB scale). Repos of dramatically
+different shape — e.g. the rust-lang/rust source tree, where the
+alternative loop costs 20–80× more tokens — will see understated
+savings until per-repo background calibration lands (tracked as
+GitHub issue #29).
+
 ## [0.5.3] — 2026-04-30
 
 Performance + semantic-by-default release. Hosted semantic search now
