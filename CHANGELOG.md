@@ -4,6 +4,51 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.5.5] — 2026-05-02
+
+Hosted-embeddings repair release. `mode: "semantic"` was failing
+closed for every user — credentials valid, key authorized,
+worker reachable, but three independent bugs along the embed
+path stopped vectors from reaching the vector store.
+
+### Fixed — semantic search end-to-end
+
+- **`router::load_repo` now initializes the embed service.** Any
+  repo activated through the multi-repo router (i.e. via
+  `code_activate_repo`) constructed a fresh `ReconServer` whose
+  `embed_service` stayed `None`, so semantic queries against
+  router-managed repos returned the "requires the embed service"
+  sentinel even though the primary `--repo` worked. Mirror the
+  startup flow: warn-on-fail, never fatal.
+- **`init_embed` creates `.recon/vectors/` before opening
+  `VectorStore`.** rusqlite refuses to open a db whose parent
+  directory does not exist, and `init_embed` did not
+  `create_dir_all`. The result was a silent failure on every
+  fresh repo, primary path included — the embed service was
+  built, the vector store open call errored, and the caller
+  warned without setting `embed_service`. `create_dir_all`
+  resolves it.
+- **`recon-embed-client` `DEFAULT_API_URL` now points at the
+  deployed worker host.** The hardcoded default was
+  `https://api.mcprecon.dev`, which has no DNS record (NXDOMAIN),
+  so every hosted embed call failed with a transport error
+  mapped to `Error::EmbedUnavailable`. The rest of the codebase
+  (`recon-server::license`, `recon-cli::savings`) already used
+  the workers.dev hostname that actually serves traffic;
+  aligning here closes the gap. `RECON_API_URL` continues to
+  override.
+
+### Changed — minor
+
+- `ReconServer::init_embed` is no longer `async`; its body had
+  no `.await` and the sync signature lets `router::load_repo`
+  (sync, inside a dashmap entry block) call it without an
+  executor handle. Sole async caller in `recon-cli` drops
+  `.await`.
+- Field `ReconServer::embed_service` is `pub(crate)` so the new
+  cross-module regression test in `router.rs` can assert it
+  becomes `Some` after a router load.
+
 ## [0.5.4] — 2026-05-02
 
 Token-savings credibility release. Every number in the static
