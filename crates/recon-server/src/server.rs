@@ -83,7 +83,8 @@ pub struct ReconServer {
     /// the version we ship. Reads happen on the slow path (semantic
     /// search, watcher catch-up) so RwLock contention is in noise vs
     /// the inference round-trip itself.
-    embed_service: Arc<parking_lot::RwLock<Option<Arc<dyn recon_core::embed::EmbedService>>>>,
+    pub(crate) embed_service:
+        Arc<parking_lot::RwLock<Option<Arc<dyn recon_core::embed::EmbedService>>>>,
     /// Lock-free read pool for vector similarity search. Always linked
     /// (sqlite-vec only, no ONNX); the storage layer is identical for
     /// hosted vs local — only the *generator* (the embed service)
@@ -1100,8 +1101,10 @@ impl ReconServer {
     ///
     /// Vector storage opens unconditionally — the storage layer is
     /// identical whether the generator is local or hosted.
-    pub async fn init_embed(&self) -> Result<(), recon_core::error::Error> {
+    pub fn init_embed(&self) -> Result<(), recon_core::error::Error> {
         let vec_dir = self.repo_root.join(".recon").join("vectors");
+        std::fs::create_dir_all(&vec_dir)
+            .map_err(|e| recon_core::error::Error::Search(format!("vector dir create: {e}")))?;
 
         let svc = self.build_embed_service()?;
         let vs = recon_embed::VectorStore::open(&vec_dir)

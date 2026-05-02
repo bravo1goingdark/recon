@@ -1558,7 +1558,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            if let Err(e) = server.init_embed().await {
+            if let Err(e) = server.init_embed() {
                 warn!("embed init failed, semantic search disabled: {e}");
             }
 

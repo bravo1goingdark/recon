@@ -495,7 +495,11 @@ impl RepoRouter {
             }
         }
 
-        Ok(ReconServer::new(repo_path.to_path_buf(), store, tantivy)?)
+        let server = ReconServer::new(repo_path.to_path_buf(), store, tantivy)?;
+        if let Err(e) = server.init_embed() {
+            warn!(repo = %repo_path.display(), "embed init failed, semantic search disabled: {e}");
+        }
+        Ok(server)
     }
 }
 
@@ -837,5 +841,53 @@ mod tests {
         let err = result.err().unwrap().to_string();
         assert!(err.contains("lines of code"), "unexpected error: {err}");
         assert!(err.contains("Upgrade"), "should suggest upgrade: {err}");
+    }
+
+    /// Regression: router-loaded repos must run `init_embed` so semantic
+    /// search works for any repo activated through `code_activate_repo`,
+    /// not just the primary `--repo`. Pre-fix, `load_repo` skipped the
+    /// embed init and `embed_service` stayed `None` → semantic mode
+    /// failed closed even with valid credentials.
+    #[test]
+    fn router_load_initializes_embed_service_when_credentials_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        make_test_repo(&repo);
+
+        let cred_dir = dir.path().join("creds");
+        std::fs::create_dir_all(&cred_dir).unwrap();
+        std::fs::write(
+            cred_dir.join("credentials.json"),
+            r#"{"key":"sk-recon-test-router-embed"}"#,
+        )
+        .unwrap();
+
+        // SAFETY: env mutation. Cargo runs tests concurrently; the worst
+        // case is a flaky pass for another test that happens to read
+        // `RECON_CONFIG_DIR` mid-run (none currently do). Same pattern as
+        // `recon-embed-client::tests::from_env_respects_recon_no_embed`.
+        unsafe {
+            std::env::set_var("RECON_CONFIG_DIR", &cred_dir);
+            std::env::remove_var("RECON_NO_EMBED");
+        }
+
+        let router = RepoRouter::new(Tier::new(
+            "Pro",
+            TierLimits {
+                max_repos: 10,
+                ..TierLimits::PRO
+            },
+        ));
+        let server = router.get_or_load(&repo).expect("repo loads");
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("RECON_CONFIG_DIR");
+        }
+
+        assert!(
+            server.embed_service.read().is_some(),
+            "embed_service must be Some after router load when creds are present"
+        );
     }
 }
