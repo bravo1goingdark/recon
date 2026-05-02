@@ -58,7 +58,7 @@ use tracing::{debug, warn};
 
 /// Production worker base URL. Override with `RECON_API_URL` for
 /// dev/test only (intentionally undocumented in user-facing docs).
-const DEFAULT_API_URL: &str = "https://api.mcprecon.dev";
+const DEFAULT_API_URL: &str = "https://recon-api.kumarashutosh34169.workers.dev";
 
 /// Maximum chunks per worker round-trip. Matches the worker's
 /// `MAX_TEXTS_PER_BATCH` cap (`worker/src/routes/embed.ts`). Batches
