@@ -71,6 +71,15 @@ async fn watcher_removes_symbols_on_file_delete() {
     server.index_repo().await.unwrap();
     server.start_watcher();
 
+    // Settle window: `start_watcher` is fire-and-forget — it spawns the
+    // blocking task that calls `Watcher::new` (which is what registers
+    // the inotify watches) and returns immediately. A `fs::remove_file`
+    // before `Watcher::new` completes goes to a kernel that nobody is
+    // listening to and the event is lost. 500 ms covers the worst case
+    // observed on GitHub-hosted ubuntu-latest under contention; matches
+    // the warm-up pattern in `bench-watcher.rs:82`.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     let pool = read_pool_for(dir.path());
 
     // Pre-condition: symbol is present after the cold index.
@@ -121,6 +130,12 @@ async fn watcher_handles_rename_as_delete_plus_create() {
     let server = make_server(dir.path());
     server.index_repo().await.unwrap();
     server.start_watcher();
+
+    // Settle window — see comment on the same line in
+    // `watcher_removes_symbols_on_file_delete`. `start_watcher` is
+    // fire-and-forget and the kernel drops events delivered before
+    // `Watcher::new` registers its inotify watches.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let pool = read_pool_for(dir.path());
 
