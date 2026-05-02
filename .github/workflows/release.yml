@@ -25,9 +25,14 @@ jobs:
     # Hard cap per matrix leg. macOS FSEvents in CI has historically delivered
     # file events unreliably enough to wedge a `recv()` test forever; v0.2.2's
     # release run sat hung for 1h+ on the macos-latest leg until manually
-    # cancelled. 30 min is well above the worst observed legitimate run
-    # (Windows ~25 min) but bounded enough that a hang fails fast.
-    timeout-minutes: 30
+    # cancelled. v0.5.4's Windows leg hit the previous 30 min cap with the
+    # build at 4m 57s and tests still actively passing at the 30 min mark
+    # (run 25248490710) — cold build only, no rust-cache save on Windows
+    # (see comment on Swatinem/rust-cache below), so each release rebuilds
+    # the whole tree from scratch. 45 min keeps the hang-fast property
+    # while leaving enough headroom for the cold Windows build + the
+    # workspace test suite as the codebase grows.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
