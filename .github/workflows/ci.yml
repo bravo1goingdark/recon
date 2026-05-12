@@ -108,7 +108,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           # NOTE: deliberately no `cache: npm` here — it routes through
           # GitHub's Actions cache service which fails auth on this
           # self-hosted runner and hangs the step indefinitely. npm's

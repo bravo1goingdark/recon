@@ -199,6 +199,10 @@ jobs:
         with:
           merge-multiple: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Install wrangler
         run: npm install -g wrangler
 
@@ -322,6 +326,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Install wrangler
         run: npm install -g wrangler
