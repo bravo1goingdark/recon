@@ -4,6 +4,62 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [0.5.6] — 2026-05-12
+
+Operational hardening release. This patch closes the main regressions
+found after the hosted-embeddings repair and makes savings telemetry
+scale to the repository actually being indexed.
+
+### Added — per-repo baseline calibration
+
+- `index_repo()` now schedules a background calibration pass after the
+  initial index. It simulates the alternative Read+Grep loops against
+  the repo's own source files, persists per-tool median token counts in
+  SQLite meta, and hot-reloads them into the current session.
+- `Telemetry::baseline_for_local()` prefers those calibrated baselines
+  for static-baseline tools, falling back to the shipped table until
+  calibration has completed. Repos much larger than this one no longer
+  inherit understated static savings forever.
+- Calibration is bounded, delayed by 2 seconds so first tool calls are
+  not starved, and re-runs when the indexed file count changes by more
+  than 25% or after `code_reindex --force`.
+
+### Fixed — multi-repo and tool correctness
+
+- `restore_session()` no longer overrides the repo passed to
+  `recon serve --repo`. Session restore now only preloads previously
+  loaded repos so later `code_activate_repo` calls are fast; the startup
+  repo remains active.
+- Cache refresh gating moved from a process-global static to each
+  `ReconServer`, allowing multi-repo servers to refresh independently.
+- Path-based tools now canonicalize relative paths such as
+  `src/../src/math.rs` back to the indexed relative path before lookup.
+- `sk-recon-*` API keys are allowlisted in response redaction so
+  user-facing login/help messages do not replace recon's own keys with
+  `***REDACTED***`.
+- Env-var-mutating tests now serialize access to avoid parallel-test
+  races in embed-client, router, and pretty-output coverage.
+
+### Changed — indexing, config, and release hygiene
+
+- Indexing now honors `.recon/config.toml` limits consistently:
+  `max_file_size`, `tantivy_heap_bytes`, and `allow_sensitive` are
+  threaded through full, incremental, Merkle, watcher, and manual
+  reindex paths.
+- Sensitive paths (`.env*`, private-key material, and blocked key
+  extensions) are skipped during indexing unless
+  `allow_sensitive = true` is explicitly set.
+- Worker rate-limit bindings fail closed in production when missing,
+  while local/test requests still fail open for development.
+- CI/deploy/release workflows were updated for the current Node runtime,
+  and the README was refreshed to match the current product surface.
+
+### Removed
+
+- Automatic savings push on `recon serve` shutdown has been removed.
+  Dashboard uploads are explicit again via `recon savings push`, which
+  avoids surprising network side effects at session exit.
+
 ## [0.5.5] — 2026-05-02
 
 Hosted-embeddings repair release. `mode: "semantic"` was failing
