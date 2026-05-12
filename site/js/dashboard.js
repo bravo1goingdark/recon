@@ -857,7 +857,7 @@ function renderSavings(data) {
       escapeHtml(String(range)) +
       " days</div></div>" +
       renderSparkline([]) +
-      '<p style="margin-top:14px;color:var(--ink-2);font-size:14px">No rollups pushed yet. Run <code>recon savings push</code> after using the MCP tools, or set <code>RECON_AUTO_PUSH_SAVINGS=1</code> to push automatically when each session ends.</p>';
+      '<p style="margin-top:14px;color:var(--ink-2);font-size:14px">No rollups pushed yet. Run <code>recon savings push</code> after using the MCP tools.</p>';
     return;
   }
 

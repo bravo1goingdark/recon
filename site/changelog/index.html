@@ -147,8 +147,6 @@
       <li><code>recon savings show</code> TSV gains a <code>time_saved_ms</code> column (per-tool + total row).</li>
     </ul>
 
-    <p><b>Default <code>RECON_AUTO_PUSH_SAVINGS</code> to on</b> (closes #15). Most paid users never set the env var, so the dashboard's Savings tab showed the upsell or empty state for them forever — despite live telemetry already sitting in <code>.recon/index.db</code>. Flip the default: unset (or any truthy value) is on; explicit <code>0</code> / <code>false</code> / <code>no</code> / <code>off</code> opts out. The push has always been privacy-clean (aggregated counters keyed by tool name plus the licensed user's API key — no source, no paths, no logs); defaulting to on doesn't change <i>what</i> is sent, only whether.</p>
-
     <p><b>Hybrid telemetry flush — count OR timer</b> (closes #13). Pure count-based flushing left bursty agentic flows fine but stranded idle sessions: an IDE window with 3 calls/hr never persisted any telemetry, so <code>recon savings show</code> reported "no counters" after a real session. Lower <code>FLUSH_THRESHOLD</code> from 50 → 10 so even moderately active sessions persist quickly; add <code>FLUSH_INTERVAL_SECS = 60</code> with a periodic flush task that covers the long tail. Override via <code>RECON_TELEMETRY_FLUSH_SECS</code> (clamped to <code>[10, 3600]</code>; <code>0</code> disables the timer entirely).</p>
 
     <p><b>Hot-path performance</b> — three caches and one O(1) lookup along the dispatcher and search paths:</p>

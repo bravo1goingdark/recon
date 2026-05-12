@@ -536,43 +536,6 @@ fn thousands(n: u64) -> String {
     out
 }
 
-/// Opt-in: when `RECON_AUTO_PUSH_SAVINGS=1` is set, push the local
-/// telemetry rollup to the dashboard after `recon serve` exits.
-///
-/// Pure side-effect, never blocks shutdown. All failures are logged
-/// to stderr so an operator running `recon serve --log debug` sees
-/// them, but the process exit code remains whatever `serve` produced.
-///
-/// Default-on as of v0.5.0 — most paid users never set the env var so
-/// the dashboard would show empty / upsell state forever despite live
-/// telemetry sitting in `.recon/index.db`. Privacy framing: the push
-/// only sends the aggregated counters (calls, response_tokens,
-/// baseline_tokens, latency_micros_total) keyed by tool name plus the
-/// licensed user's API key — no source, no paths, no logs (already the
-/// case before this flip; see crates/recon-cli/src/savings.rs).
-///
-/// Opt out by setting `RECON_AUTO_PUSH_SAVINGS=0` (or `false` / `no`
-/// / `off`). Anything else (including unset) is treated as on.
-fn maybe_auto_push_savings(repo: &Path) {
-    let raw = std::env::var("RECON_AUTO_PUSH_SAVINGS").unwrap_or_default();
-    let trimmed = raw.trim().to_ascii_lowercase();
-    let opted_out = matches!(trimmed.as_str(), "0" | "false" | "no" | "off");
-    if opted_out {
-        return;
-    }
-    let repo_buf = repo.to_path_buf();
-    match savings::push(Some(repo_buf)) {
-        Ok(()) => {}
-        Err(e) => {
-            // Log via tracing so it shows up under --log debug, AND
-            // print to stderr in case the user is running with the
-            // default log level. Never block shutdown.
-            tracing::warn!("auto-push savings failed: {e}");
-            eprintln!("recon: auto-push savings failed: {e}");
-        }
-    }
-}
-
 // ── License helpers ────────────────────────────────────────────────────────────
 
 /// Read the globally cached license, failing with a clear user-facing message.
@@ -1762,7 +1725,6 @@ async fn main() -> Result<()> {
                 let result = serve_http(mcp_service.clone(), &host, port).await;
                 shutdown_with_timeout(&server).await;
                 print_session_receipt(&server);
-                maybe_auto_push_savings(&repo);
                 result
             } else {
                 // Stdio MCP: the IDE (Claude Code, Cursor, Windsurf, OpenCode)
@@ -1797,7 +1759,6 @@ async fn main() -> Result<()> {
                 drop(waiter);
                 shutdown_with_timeout(&server).await;
                 print_session_receipt(&server);
-                maybe_auto_push_savings(&repo);
                 Ok(())
             }
         }

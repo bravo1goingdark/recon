@@ -639,9 +639,6 @@ month?" — now flows through the worker into the recon dashboard at
   Pro-only 402 with a clean upgrade message instead of a stack trace.
 - **`recon savings show`** — local-only TSV print of the same numbers
   (no network), so you can sanity-check what's about to be pushed.
-- **`RECON_AUTO_PUSH_SAVINGS=1`** — opt-in env var. When set,
-  `recon serve` runs `savings push` after every clean shutdown so the
-  dashboard stays current without the developer remembering.
 - **Dashboard "Savings" tab** — fifth tab on the account dashboard.
   Big tokens-saved headline, inline-SVG sparkline of the daily series
   (no chart library), per-day TSV table. Free tier sees an upgrade
