@@ -32,6 +32,7 @@ compact_str = { workspace = true }
 smallvec = { workspace = true }
 arc-swap = { workspace = true }
 ulid = { workspace = true }
+ignore = { workspace = true }
 # Cross-platform "is this the same file?" oracle. Used by start_watcher's
 # self-heal loop to detect `.recon/index.db` being unlinked / replaced
 # under us. std's Windows `MetadataExt::file_index()` is gated behind

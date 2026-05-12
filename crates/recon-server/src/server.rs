@@ -1257,6 +1257,73 @@ impl ReconServer {
             });
         }
 
+        // Phase E: Per-repo baseline calibration (issue #29).
+        //
+        // Spawns a background task that simulates the alternative Read+Grep
+        // loop for each non-migrated tool against this repo's actual files.
+        // Results are persisted to SQLite meta so `baseline_for_local(tool)`
+        // returns a repo-calibrated number from session 2 onwards.
+        //
+        // Staleness check: skips if the stored calibration version matches
+        // the current file count (within 25%). Re-runs on significant repo
+        // growth or after `recon reindex --force`.
+        //
+        // Delay: waits 2s after index completes so the user's first tool
+        // calls don't compete with calibration for CPU.
+        {
+            let server = self.clone();
+            tokio::task::spawn(async move {
+                // Let the user's first tool calls land before we start
+                // CPU-intensive calibration.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                let file_count = server.file_count() as usize;
+                let repo_root = server.repo_root.clone();
+                let write_store = server.write_store.clone();
+                let telemetry = server.telemetry.clone();
+
+                // Staleness check — avoid redundant work.
+                let is_stale = {
+                    let store = write_store.lock();
+                    crate::telemetry::Telemetry::calibration_is_stale(&store, file_count)
+                };
+                if !is_stale {
+                    debug!("calibration: skipped (baselines are fresh)");
+                    return;
+                }
+
+                // Run the heavy simulation on a blocking thread.
+                let results = match tokio::task::spawn_blocking(move || {
+                    crate::calibrate::calibrate_baselines(&repo_root)
+                })
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("calibration: task join error: {e}");
+                        return;
+                    }
+                };
+
+                if results.is_empty() {
+                    return;
+                }
+
+                // Persist and hot-reload into the current session.
+                {
+                    let store = write_store.lock();
+                    crate::telemetry::Telemetry::persist_local_baselines(
+                        &store, &results, file_count,
+                    );
+                }
+                telemetry.reload_local_baselines(&write_store.lock());
+                info!(
+                    tools = results.len(),
+                    file_count, "calibration: per-repo baselines persisted and loaded"
+                );
+            });
+        }
+
         Ok(())
     }
 
@@ -4172,6 +4239,34 @@ impl ReconServer {
                 Ok(stats) => {
                     // Refresh path cache after reindex.
                     self.refresh_caches();
+
+                    // Trigger re-calibration after force reindex (issue #29).
+                    if stats.get("force").and_then(|v| v.as_bool()) == Some(true) {
+                        let server = self.clone();
+                        tokio::task::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let file_count = server.file_count() as usize;
+                            let repo_root = server.repo_root.clone();
+                            let write_store = server.write_store.clone();
+                            let telemetry = server.telemetry.clone();
+                            let results = match tokio::task::spawn_blocking(move || {
+                                crate::calibrate::calibrate_baselines(&repo_root)
+                            })
+                            .await
+                            {
+                                Ok(r) => r,
+                                Err(_) => return,
+                            };
+                            if !results.is_empty() {
+                                let store = write_store.lock();
+                                crate::telemetry::Telemetry::persist_local_baselines(
+                                    &store, &results, file_count,
+                                );
+                                telemetry.reload_local_baselines(&store);
+                            }
+                        });
+                    }
+
                     serde_json::to_string(&stats).unwrap_or_else(|e| format!("Error: {e}"))
                 }
                 Err(e) => format!("Reindex failed: {e}"),

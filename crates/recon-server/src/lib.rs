@@ -2,6 +2,7 @@
 #![deny(missing_docs)]
 
 pub mod account;
+pub mod calibrate;
 pub mod license;
 pub mod multi_repo;
 pub mod repos;

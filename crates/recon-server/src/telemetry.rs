@@ -565,6 +565,15 @@ pub struct Telemetry {
     /// 24 h-sliding-window-scoped.
     dedup: DashMap<(&'static str, CompactString), i64>,
 
+    /// Per-repo calibrated baselines loaded from SQLite `meta` on startup.
+    /// Keyed by tool name, valued by the median token count from the local
+    /// `bench-baselines` run. When present, `baseline_for_local(tool)`
+    /// returns this value instead of the static `BASELINES` entry — giving
+    /// large repos an honest 20–80× higher baseline that matches their
+    /// actual alternative cost. Populated by the background calibration
+    /// task spawned after `index_repo()` (issue #29).
+    local_baselines: parking_lot::RwLock<AHashMap<String, u64>>,
+
     /// Sequence counter that selects which calls receive the BPE
     /// sample. Wraps cleanly at u64 max — overflow takes ~580 years
     /// at 1 M calls / sec.
@@ -604,6 +613,7 @@ impl Telemetry {
             calls_since_flush: AtomicU64::new(0),
             flush_guard: Mutex::new(()),
             dedup: DashMap::new(),
+            local_baselines: parking_lot::RwLock::new(AHashMap::new()),
             response_bpe_seq: AtomicU64::new(0),
             response_bpe_samples: AtomicU64::new(0),
             response_bpe_real_total: AtomicU64::new(0),
@@ -762,7 +772,7 @@ impl Telemetry {
                 }
                 None => {
                     c.static_baseline_tokens
-                        .fetch_add(baseline_for(tool), Ordering::Relaxed);
+                        .fetch_add(self.baseline_for_local(tool), Ordering::Relaxed);
                 }
             }
         }
@@ -772,6 +782,110 @@ impl Telemetry {
             return true;
         }
         false
+    }
+
+    // ── Per-repo local baselines (issue #29) ─────────────────────────────────
+
+    /// Meta key prefix for per-repo calibrated baselines.
+    const LOCAL_BASELINE_PREFIX: &'static str = "baselines_local:";
+
+    /// Meta key for the calibration version stamp. Format:
+    /// `{file_count}:{unix_timestamp}`. Used by the staleness check to
+    /// decide whether to re-run calibration.
+    const LOCAL_BASELINE_VERSION_KEY: &'static str = "baselines_local:_version";
+
+    /// Look up the baseline for `tool`, preferring the per-repo local
+    /// calibration over the static `BASELINES` table. Returns 0 for
+    /// migrated tools (their `BASELINES` entry is 0 and they should
+    /// never have a local override — they use per-call measurement).
+    pub fn baseline_for_local(&self, tool: &str) -> u64 {
+        // Migrated tools always return 0 — they use measured baselines.
+        let static_val = baseline_for(tool);
+        if static_val == 0 {
+            // Check if this is a known migrated tool (has a BASELINES entry
+            // with baseline_tokens == 0). If so, return 0 unconditionally.
+            if BASELINES
+                .iter()
+                .any(|b| b.tool == tool && b.baseline_tokens == 0)
+            {
+                return 0;
+            }
+        }
+        // Check local override first.
+        if let Some(local) = self.local_baselines.read().get(tool) {
+            return *local;
+        }
+        static_val
+    }
+
+    /// Hydrate local baselines from the SQLite `meta` table. Called once
+    /// during `hydrate_from_store`. Non-fatal: missing keys just mean
+    /// calibration hasn't run yet (session 1 behavior).
+    fn hydrate_local_baselines(&self, store: &Store) {
+        let mut map = AHashMap::new();
+        for b in BASELINES {
+            // Only load overrides for non-migrated tools.
+            if b.baseline_tokens == 0 {
+                continue;
+            }
+            let key = format!("{}{}", Self::LOCAL_BASELINE_PREFIX, b.tool);
+            if let Ok(Some(val_str)) = store.get_meta(&key) {
+                if let Ok(val) = val_str.parse::<u64>() {
+                    map.insert(b.tool.to_string(), val);
+                }
+            }
+        }
+        if !map.is_empty() {
+            debug!(count = map.len(), "telemetry: hydrated local baselines");
+        }
+        *self.local_baselines.write() = map;
+    }
+
+    /// Persist a set of calibrated baselines to the SQLite `meta` table.
+    /// Called by the background calibration task after a successful run.
+    pub fn persist_local_baselines(store: &Store, results: &[(&str, u64)], file_count: usize) {
+        for &(tool, tokens) in results {
+            let key = format!("{}{}", Self::LOCAL_BASELINE_PREFIX, tool);
+            if let Err(e) = store.set_meta(&key, &tokens.to_string()) {
+                warn!(tool, %e, "calibration: failed to persist baseline");
+            }
+        }
+        let version = format!("{}:{}", file_count, now_unix_secs());
+        if let Err(e) = store.set_meta(Self::LOCAL_BASELINE_VERSION_KEY, &version) {
+            warn!(%e, "calibration: failed to persist version stamp");
+        }
+    }
+
+    /// Check whether calibration is stale and should re-run. Returns
+    /// `true` when: (1) no version stamp exists, or (2) the current
+    /// file count differs from the stored count by > 25%.
+    pub fn calibration_is_stale(store: &Store, current_file_count: usize) -> bool {
+        let version = match store.get_meta(Self::LOCAL_BASELINE_VERSION_KEY) {
+            Ok(Some(v)) => v,
+            _ => return true, // No calibration yet.
+        };
+        let stored_count: usize = version
+            .split(':')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if stored_count == 0 {
+            return true;
+        }
+        let delta = (current_file_count as f64 - stored_count as f64).abs() / stored_count as f64;
+        delta > 0.25
+    }
+
+    /// Hot-reload local baselines after a background calibration completes.
+    /// Called from the calibration task so the current session immediately
+    /// benefits without requiring a restart.
+    pub fn reload_local_baselines(&self, store: &Store) {
+        self.hydrate_local_baselines(store);
+    }
+
+    /// Whether local baselines are populated (for `code_savings` display).
+    pub fn has_local_baselines(&self) -> bool {
+        !self.local_baselines.read().is_empty()
     }
 
     /// Aggregated counter across every tool — the "lifetime totals" surface.
@@ -877,6 +991,7 @@ impl Telemetry {
         }
 
         self.hydrate_dedup_from_store(store);
+        self.hydrate_local_baselines(store);
     }
 
     /// Load the persisted dedupe set, dropping entries older than
