@@ -7,9 +7,8 @@
  * selected by the `keyFrom` function), calls `.limit({ key })`, and emits a
  * 429 with `Retry-After` when the bucket is exhausted.
  *
- * All buckets fail-open: if the binding is missing in dev, the middleware
- * logs once and lets the request through. We do NOT want local dev broken
- * because rate-limit bindings haven't been provisioned yet.
+ * Missing buckets fail open only for local/test requests. Production must
+ * fail closed so a bad deploy cannot silently run without rate limits.
  */
 
 import type { Context, MiddlewareHandler } from "hono";
@@ -25,7 +24,7 @@ interface RateLimitBinding {
 
 /**
  * Look up a named binding on `env` and coerce to our narrow shape.
- * Returns `null` when the binding is absent — caller fails open.
+ * Returns `null` when the binding is absent.
  */
 function lookupBinding(env: Env, name: string): RateLimitBinding | null {
   const raw = (env as unknown as Record<string, unknown>)[name];
@@ -33,6 +32,16 @@ function lookupBinding(env: Env, name: string): RateLimitBinding | null {
     return raw as RateLimitBinding;
   }
   return null;
+}
+
+function isLocalOrTestRequest(c: Pick<Context, "req">): boolean {
+  const hostname = new URL(c.req.url).hostname.toLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".local")
+  );
 }
 
 /**
@@ -65,13 +74,28 @@ export function rateLimit<E extends AnyEnv = { Bindings: Env }>(
   return async (c, next) => {
     const bucket = lookupBinding(c.env, bindingName);
     if (!bucket) {
+      if (isLocalOrTestRequest(c)) {
+        if (!warnedMissing) {
+          warnedMissing = true;
+          console.warn(
+            `rate-limit binding ${bindingName} missing — failing open (local/test only)`,
+          );
+        }
+        return next();
+      }
       if (!warnedMissing) {
         warnedMissing = true;
         console.warn(
-          `rate-limit binding ${bindingName} missing — failing open (dev only)`,
+          `rate-limit binding ${bindingName} missing — failing closed`,
         );
       }
-      return next();
+      return c.json(
+        {
+          error: "rate limit unavailable",
+          message: `required rate-limit binding ${bindingName} is not configured`,
+        },
+        503,
+      );
     }
     const key = await keyFrom(c);
     const { success } = await bucket.limit({ key });

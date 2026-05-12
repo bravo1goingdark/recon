@@ -89,7 +89,7 @@ pub struct RepoMapParams {
 }
 
 fn default_budget() -> usize {
-    2000
+    0
 }
 
 /// Parameters for `code_find_strings`.
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn repo_map_params_default_budget() {
         let p: RepoMapParams = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(p.token_budget, 2000);
+        assert_eq!(p.token_budget, 0);
     }
 
     #[test]

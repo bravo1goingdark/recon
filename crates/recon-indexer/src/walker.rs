@@ -139,7 +139,8 @@ pub fn is_generated_content(content: &[u8]) -> bool {
 /// Uses a pre-compiled Aho-Corasick automaton for O(n) single-pass matching
 /// against all vendor path segments and file suffixes.
 pub fn is_vendored(path: &str) -> bool {
-    vendored_ac().is_match(path)
+    let normalized = path.replace('\\', "/");
+    vendored_ac().is_match(&normalized)
 }
 
 #[cfg(test)]
@@ -158,6 +159,16 @@ mod tests {
         assert!(is_vendored("/app/bundle.min.js"));
         assert!(is_vendored("/proto/types.pb.go"));
         assert!(!is_vendored("/src/bundle.rs"));
+    }
+
+    #[test]
+    fn vendored_detection_handles_windows_paths() {
+        assert!(is_vendored(r"C:\repo\node_modules\pkg\index.js"));
+        assert!(is_vendored(r"C:\repo\target\debug\thing.rs"));
+        assert!(is_vendored(r"C:\repo\.git\hooks\pre-commit"));
+        assert!(is_vendored(r"C:\repo\src\bundle.min.js"));
+        assert!(is_vendored(r"C:\repo\src\types.generated.rs"));
+        assert!(!is_vendored(r"C:\repo\src\main.rs"));
     }
 
     #[test]

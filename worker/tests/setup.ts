@@ -133,6 +133,7 @@ export async function resetDb(): Promise<void> {
     "user_repos",
     "api_keys",
     "users",
+    "d1_migrations",
   ];
   for (const t of tables) {
     await db.prepare(`DROP TABLE IF EXISTS ${t}`).run();

@@ -84,6 +84,11 @@ impl Watcher {
     /// On notify overflow or generic errors, falls back to `gix status`
     /// to discover changed paths.
     pub fn new(root: &Path) -> Result<Self, notify::Error> {
+        Self::new_with_debounce(root, Duration::from_millis(250))
+    }
+
+    /// Start watching a directory with a configurable debounce interval.
+    pub fn new_with_debounce(root: &Path, debounce: Duration) -> Result<Self, notify::Error> {
         // Bounded channel: a backed-up consumer (slow parser, paused
         // debugger, etc.) blocks the debouncer's send rather than
         // letting the queue grow unbounded. 64 batches is generous —
@@ -93,68 +98,72 @@ impl Watcher {
 
         let sender = tx.clone();
         let root_for_fallback = root.to_path_buf();
-        let mut debouncer = new_debouncer(
-            Duration::from_millis(250),
-            None,
-            move |result: DebounceEventResult| match result {
-                Ok(events) => {
-                    // Keep delete events: a deleted path is neither a file nor a
-                    // directory, so `!p.is_dir()` lets it through (and excludes
-                    // genuine directories). The downstream Phase 0 in the server
-                    // checks `path.exists()` to discriminate delete vs. modify.
-                    let paths: Vec<PathBuf> = events
-                        .into_iter()
-                        .flat_map(|e| e.event.paths)
-                        .filter(|p| !p.components().any(|c| c.as_os_str() == ".recon"))
-                        .filter(|p| !p.is_dir() && Language::from_path(p) != Language::Unknown)
-                        .collect();
-                    if !paths.is_empty() {
-                        debug!(count = paths.len(), "debounced file changes");
-                        let _ = sender.send(paths);
-                    }
-                }
-                Err(errors) => {
-                    // Detect any signal that events were lost or coalesced and
-                    // fall back to gix status. notify-rs uses several phrasings
-                    // across backends ("queue overflow", "Event queue has
-                    // overflowed", "events lost", etc.); lowercase + a small
-                    // substring set catches the realistic shapes without
-                    // triggering on every transient error.
-                    let is_event_loss = errors.iter().any(|e| {
-                        let msg = format!("{e}").to_lowercase();
-                        msg.contains("overflow")
-                            || msg.contains("coalesced")
-                            || msg.contains("lost")
-                            || msg.contains("queue")
-                    });
-
-                    if is_event_loss {
-                        warn!("notify event loss detected, falling back to gix status");
-                        match crate::git::status_paths(&root_for_fallback) {
-                            Ok(paths) => {
-                                let paths: Vec<PathBuf> = paths
-                                    .into_iter()
-                                    .filter(|p| !p.components().any(|c| c.as_os_str() == ".recon"))
-                                    .filter(|p| {
-                                        !p.is_dir() && Language::from_path(p) != Language::Unknown
-                                    })
-                                    .collect();
-                                if !paths.is_empty() {
-                                    let _ = sender.send(paths);
-                                }
-                            }
-                            Err(e) => {
-                                warn!("gix status fallback failed: {e}");
-                            }
+        let mut debouncer =
+            new_debouncer(
+                debounce,
+                None,
+                move |result: DebounceEventResult| match result {
+                    Ok(events) => {
+                        // Keep delete events: a deleted path is neither a file nor a
+                        // directory, so `!p.is_dir()` lets it through (and excludes
+                        // genuine directories). The downstream Phase 0 in the server
+                        // checks `path.exists()` to discriminate delete vs. modify.
+                        let paths: Vec<PathBuf> = events
+                            .into_iter()
+                            .flat_map(|e| e.event.paths)
+                            .filter(|p| !p.components().any(|c| c.as_os_str() == ".recon"))
+                            .filter(|p| !p.is_dir() && Language::from_path(p) != Language::Unknown)
+                            .collect();
+                        if !paths.is_empty() {
+                            debug!(count = paths.len(), "debounced file changes");
+                            let _ = sender.send(paths);
                         }
                     }
+                    Err(errors) => {
+                        // Detect any signal that events were lost or coalesced and
+                        // fall back to gix status. notify-rs uses several phrasings
+                        // across backends ("queue overflow", "Event queue has
+                        // overflowed", "events lost", etc.); lowercase + a small
+                        // substring set catches the realistic shapes without
+                        // triggering on every transient error.
+                        let is_event_loss = errors.iter().any(|e| {
+                            let msg = format!("{e}").to_lowercase();
+                            msg.contains("overflow")
+                                || msg.contains("coalesced")
+                                || msg.contains("lost")
+                                || msg.contains("queue")
+                        });
 
-                    for e in &errors {
-                        warn!("watch error: {e}");
+                        if is_event_loss {
+                            warn!("notify event loss detected, falling back to gix status");
+                            match crate::git::status_paths(&root_for_fallback) {
+                                Ok(paths) => {
+                                    let paths: Vec<PathBuf> = paths
+                                        .into_iter()
+                                        .filter(|p| {
+                                            !p.components().any(|c| c.as_os_str() == ".recon")
+                                        })
+                                        .filter(|p| {
+                                            !p.is_dir()
+                                                && Language::from_path(p) != Language::Unknown
+                                        })
+                                        .collect();
+                                    if !paths.is_empty() {
+                                        let _ = sender.send(paths);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("gix status fallback failed: {e}");
+                                }
+                            }
+                        }
+
+                        for e in &errors {
+                            warn!("watch error: {e}");
+                        }
                     }
-                }
-            },
-        )?;
+                },
+            )?;
 
         watch_non_ignored(&mut debouncer, root)?;
         drop(tx); // Drop our copy so rx drains when debouncer stops

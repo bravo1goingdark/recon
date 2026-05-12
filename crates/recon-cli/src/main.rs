@@ -8,6 +8,7 @@ mod update;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
+use recon_core::config::Config;
 use recon_indexer::indexer;
 use recon_search::tantivy_backend::TantivyBackend;
 use recon_server::server::ReconServer;
@@ -1409,7 +1410,13 @@ async fn main() -> Result<()> {
                 Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut writer = match tantivy.writer(50_000_000) {
+            let recon_config = Config::load(&repo);
+            let index_options = indexer::IndexOptions {
+                max_file_size: recon_config.max_file_size,
+                tantivy_heap_bytes: recon_config.tantivy_heap_bytes,
+                allow_sensitive: recon_config.allow_sensitive,
+            };
+            let mut writer = match tantivy.writer(recon_config.tantivy_heap_bytes) {
                 Ok(w) => Some(w),
                 Err(e) => {
                     warn!(
@@ -1420,9 +1427,14 @@ async fn main() -> Result<()> {
                     None
                 }
             };
-            let stats =
-                indexer::index_repo_incremental(&store, Some(&tantivy), &repo, writer.as_mut())
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let stats = indexer::index_repo_incremental_with_options(
+                &store,
+                Some(&tantivy),
+                &repo,
+                writer.as_mut(),
+                index_options,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
             eprintln!(
                 "Indexed {} files, {} symbols ({} errors)",
                 stats.files_indexed, stats.total_symbols, stats.errors
@@ -1512,7 +1524,17 @@ async fn main() -> Result<()> {
             );
 
             // Pre-flight: check repo size against license limits before indexing.
-            let paths = recon_indexer::walker::walk_repo(&repo);
+            let recon_config = Config::load(&repo);
+            let paths: Vec<_> =
+                recon_indexer::walker::walk_repo_with_limit(&repo, recon_config.max_file_size)
+                    .into_iter()
+                    .filter(|p| {
+                        recon_config.allow_sensitive
+                            || !recon_core::redact::is_blocked_path(
+                                p.strip_prefix(&repo).unwrap_or(p),
+                            )
+                    })
+                    .collect();
             if paths.len() > limits.max_files {
                 return Err(anyhow::anyhow!(
                     "Repository has {} source files — exceeds your {} plan limit of {} files.\n\
@@ -1793,7 +1815,13 @@ async fn main() -> Result<()> {
                 Store::open(&store_dir.join("index.db")).map_err(|e| anyhow::anyhow!("{e}"))?;
             let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut writer = match tantivy.writer(50_000_000) {
+            let recon_config = Config::load(&repo);
+            let index_options = indexer::IndexOptions {
+                max_file_size: recon_config.max_file_size,
+                tantivy_heap_bytes: recon_config.tantivy_heap_bytes,
+                allow_sensitive: recon_config.allow_sensitive,
+            };
+            let mut writer = match tantivy.writer(recon_config.tantivy_heap_bytes) {
                 Ok(w) => Some(w),
                 Err(e) => {
                     warn!(
@@ -1804,9 +1832,14 @@ async fn main() -> Result<()> {
                     None
                 }
             };
-            let stats =
-                indexer::index_repo_incremental(&store, Some(&tantivy), &repo, writer.as_mut())
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let stats = indexer::index_repo_incremental_with_options(
+                &store,
+                Some(&tantivy),
+                &repo,
+                writer.as_mut(),
+                index_options,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
             eprintln!(
                 "Indexed {} files, {} symbols, {} tantivy docs ({} errors)",
                 stats.files_indexed,

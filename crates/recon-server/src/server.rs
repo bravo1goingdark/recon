@@ -6,6 +6,7 @@ use arc_swap::ArcSwap;
 use compact_str::CompactString;
 use parking_lot::Mutex;
 use rayon::prelude::*;
+use recon_core::config::Config;
 use recon_core::error::ReconErrorCode;
 use recon_core::lang::Language;
 use recon_core::redact;
@@ -46,6 +47,7 @@ pub struct ReconServer {
     tantivy_writer: Arc<Mutex<Option<tantivy::IndexWriter>>>,
     text_searcher: Arc<dyn TextSearcher>,
     repo_root: PathBuf,
+    config: Arc<Config>,
     /// Cached file paths — invalidated on index/reindex. Avoids SQLite query on every tool call.
     cached_paths: Arc<ArcSwap<Vec<PathBuf>>>,
     /// Cached file count — updated on index/reindex. Avoids loading all paths just for count.
@@ -137,33 +139,6 @@ pub struct ReconServer {
 /// the other.
 const MAX_BASELINE_CACHE_ENTRIES: usize = 2048;
 
-fn redact_response(response: String) -> String {
-    redact::redact_secrets(&response).unwrap_or(response)
-}
-
-/// Wrap a row-oriented tool response in the canonical [`ToolOutput::Hits`]
-/// envelope and run secret redaction once on the final wire JSON.
-///
-/// `kind` selects the row schema (`"symbol"`, `"text"`, `"file"`,
-/// `"string"`, `"multi_find"`, `"repo"`, `"savings"`); `cap` is the
-/// tool-specific row limit — when `entries.len() >= cap`, the response
-/// carries `truncated: true` so callers know results were capped.
-///
-/// The `entries` Vec is moved into `HitsView` (no clone) and serialised
-/// once; net wire-size overhead vs the bare-array format is the
-/// `{"shape":"Hits","kind":"…","count":N}` envelope (≈40 bytes) — well
-/// under 1% of typical row-oriented responses.
-fn hits_response(kind: &'static str, entries: Vec<serde_json::Value>, cap: usize) -> String {
-    let truncated = entries.len() >= cap;
-    let view = ToolOutput::Hits(HitsView {
-        kind: kind.into(),
-        count: entries.len(),
-        hits: entries,
-        truncated,
-    });
-    redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
-}
-
 /// Build a search-hit JSON object, omitting `col` when not captured.
 ///
 /// Token diet (v0.2.2): `"col":null` was emitted on every lexical hit and on
@@ -186,9 +161,10 @@ fn text_hit_json(
     serde_json::Value::Object(map)
 }
 
-/// Maximum file size for `read_to_string` calls (2 MB).
-/// Prevents OOM on accidentally large files (e.g. minified bundles, lock files).
-const MAX_READ_FILE_SIZE: u64 = 2 * 1024 * 1024;
+struct ResolvedPath {
+    abs: PathBuf,
+    rel: PathBuf,
+}
 
 /// Cross-platform "is this the same file?" oracle.
 ///
@@ -370,6 +346,45 @@ pub(crate) fn tool_error_invalid_args(err: &serde_json::Error) -> String {
 }
 
 impl ReconServer {
+    fn read_file_size_limit(&self) -> u64 {
+        self.config.max_file_size.max(1)
+    }
+
+    fn search_result_limit(&self) -> usize {
+        self.config.max_search_results.max(1)
+    }
+
+    fn redact_response(&self, response: String) -> String {
+        if self.config.redact_secrets {
+            redact::redact_secrets(&response).unwrap_or(response)
+        } else {
+            response
+        }
+    }
+
+    /// Wrap a row-oriented tool response in the canonical [`ToolOutput::Hits`]
+    /// envelope and run secret redaction once on the final wire JSON.
+    ///
+    /// `kind` selects the row schema (`"symbol"`, `"text"`, `"file"`,
+    /// `"string"`, `"multi_find"`, `"repo"`, `"savings"`); `cap` is the
+    /// tool-specific row limit — when `entries.len() >= cap`, the response
+    /// carries `truncated: true` so callers know results were capped.
+    fn hits_response(
+        &self,
+        kind: &'static str,
+        entries: Vec<serde_json::Value>,
+        cap: usize,
+    ) -> String {
+        let truncated = entries.len() >= cap;
+        let view = ToolOutput::Hits(HitsView {
+            kind: kind.into(),
+            count: entries.len(),
+            hits: entries,
+            truncated,
+        });
+        self.redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+    }
+
     /// Create a new server for the given repo root.
     ///
     /// Creates a single Tantivy `IndexWriter` that is shared between initial
@@ -392,8 +407,9 @@ impl ReconServer {
         // construction-time failure would regress behavior for callers
         // that create the root lazily.
         let repo_root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
+        let config = Arc::new(Config::load(&repo_root));
 
-        let writer = match tantivy.writer(50_000_000) {
+        let writer = match tantivy.writer(config.tantivy_heap_bytes) {
             Ok(w) => Some(w),
             Err(e) => {
                 warn!(
@@ -440,6 +456,7 @@ impl ReconServer {
             tantivy_writer: Arc::new(Mutex::new(writer)),
             text_searcher: Arc::new(FffBackend::new()),
             repo_root,
+            config,
             cached_paths: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
             cached_file_count: Arc::new(AtomicU64::new(0)),
             cached_symbols: Arc::new(ArcSwap::new(Arc::new(Vec::new()))),
@@ -782,7 +799,7 @@ impl ReconServer {
     }
 
     /// Compute the "what would Read of this file have cost" baseline,
-    /// in tokens. Reuses the same `MAX_READ_FILE_SIZE` cap that real
+    /// in tokens. Reuses the same configured read-size cap that real
     /// Read-shaped handlers apply (see `code_skeleton` at line ~1828)
     /// so the baseline reflects what the agent would actually have
     /// been able to read.
@@ -810,7 +827,7 @@ impl ReconServer {
     /// effectively free.
     async fn measure_read_baseline(&self, abs_path: &Path) -> Option<u64> {
         let meta = tokio::fs::metadata(abs_path).await.ok()?;
-        if meta.len() > MAX_READ_FILE_SIZE {
+        if meta.len() > self.read_file_size_limit() {
             return None;
         }
         let mtime = self.mtime_secs(&meta);
@@ -830,7 +847,7 @@ impl ReconServer {
     /// runs BPE on the supplied bytes and inserts the result.
     ///
     /// Returns `None` when `mtime` cannot be read or the path is too
-    /// large per [`MAX_READ_FILE_SIZE`] — same skip rules as
+    /// large per the configured read-size cap — same skip rules as
     /// [`Self::measure_read_baseline`] so the two helpers agree on
     /// "this file does not contribute a baseline."
     async fn measure_baseline_for_known_content(
@@ -839,7 +856,7 @@ impl ReconServer {
         content: &str,
     ) -> Option<u64> {
         let meta = tokio::fs::metadata(abs_path).await.ok()?;
-        if meta.len() > MAX_READ_FILE_SIZE {
+        if meta.len() > self.read_file_size_limit() {
             return None;
         }
         let mtime = self.mtime_secs(&meta);
@@ -1094,7 +1111,7 @@ impl ReconServer {
             unresolved_hint: None,
             tests: vec![],
         });
-        redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+        self.redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
     }
 
     /// Initialize the embedding engine + open the vector store.
@@ -1179,11 +1196,16 @@ impl ReconServer {
         let stats = {
             let store = self.write_store.lock();
             let mut tw = self.tantivy_writer.lock();
-            indexer::index_repo_incremental(
+            indexer::index_repo_incremental_with_options(
                 &store,
                 Some(&self.tantivy),
                 &self.repo_root,
                 tw.as_mut(),
+                indexer::IndexOptions {
+                    max_file_size: self.config.max_file_size,
+                    tantivy_heap_bytes: self.config.tantivy_heap_bytes,
+                    allow_sensitive: self.config.allow_sensitive,
+                },
             )?
         }; // Both locks released here.
 
@@ -1225,7 +1247,7 @@ impl ReconServer {
                 let all_symbols = server.cached_all_symbols();
                 let all_refs = server.cached_all_refs();
                 let last_idx = server.read_pool.max_indexed_at().unwrap_or(0);
-                let budget = 2000;
+                let budget = server.config.default_map_budget;
                 let cache_key = format!("map_cache:{last_idx}:{budget}");
 
                 let ranked = pagerank::pagerank(
@@ -1242,7 +1264,7 @@ impl ReconServer {
                     content,
                     token_estimate: token_est,
                 });
-                let result = redact_response(
+                let result = server.redact_response(
                     serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
                 );
 
@@ -1567,6 +1589,7 @@ impl ReconServer {
         let refresh_gate = self.refresh_gate.clone();
         let shutdown_flag = self.shutdown_flag.clone();
         let shutdown_notify = self.shutdown_notify.clone();
+        let watcher_debounce = Duration::from_millis(self.config.watcher_debounce_ms.max(1));
         // Capture the initial file-id of `.recon/index.db` so we can detect
         // it being unlinked / replaced from underneath us. This happens
         // when a misbehaving test or `rm -rf .recon/` clobbers the dir
@@ -1589,11 +1612,14 @@ impl ReconServer {
         let embed_svc: Option<Arc<dyn recon_core::embed::EmbedService>> =
             self.embed_service.read().clone();
         let vec_pool: Option<Arc<recon_embed::VecReadPool>> = self.vec_read_pool.load_full();
+        let max_embed_size = self.config.max_embed_size;
+        let max_file_size = self.config.max_file_size;
+        let allow_sensitive = self.config.allow_sensitive;
         // Take the write handle — watcher owns it exclusively from here.
         let vec_writer: Option<recon_embed::VectorStore> = self.vec_writer.lock().take();
 
         let handle = tokio::task::spawn_blocking(move || {
-            let watcher = match Watcher::new(&repo_root) {
+            let watcher = match Watcher::new_with_debounce(&repo_root, watcher_debounce) {
                 Ok(w) => w,
                 Err(e) => {
                     warn!("failed to start watcher: {e}");
@@ -1688,15 +1714,30 @@ impl ReconServer {
                                         }
                                     };
                                     for chunk in syms.chunks(EMBED_BATCH) {
-                                        let texts: Vec<String> = chunk
+                                        let text_pairs: Vec<(&recon_core::symbol::Symbol, String)> =
+                                            chunk
+                                                .iter()
+                                                .filter_map(|s| {
+                                                    let body = file_bytes
+                                                        .get(s.byte_range.clone())
+                                                        .and_then(|b| std::str::from_utf8(b).ok())
+                                                        .unwrap_or("");
+                                                    if body.len() as u64 > max_embed_size {
+                                                        None
+                                                    } else {
+                                                        Some((
+                                                            *s,
+                                                            recon_embed::format_symbol(s, body),
+                                                        ))
+                                                    }
+                                                })
+                                                .collect();
+                                        if text_pairs.is_empty() {
+                                            continue;
+                                        }
+                                        let texts: Vec<String> = text_pairs
                                             .iter()
-                                            .map(|s| {
-                                                let body = file_bytes
-                                                    .get(s.byte_range.clone())
-                                                    .and_then(|b| std::str::from_utf8(b).ok())
-                                                    .unwrap_or("");
-                                                recon_embed::format_symbol(s, body)
-                                            })
+                                            .map(|(_, text)| text.clone())
                                             .collect();
                                         let vecs = match svc.embed_batch(texts) {
                                             Ok(v) => v,
@@ -1705,10 +1746,10 @@ impl ReconServer {
                                                 continue;
                                             }
                                         };
-                                        let entries: Vec<recon_embed::EmbedEntry> = chunk
+                                        let entries: Vec<recon_embed::EmbedEntry> = text_pairs
                                             .iter()
                                             .zip(vecs)
-                                            .map(|(s, vec)| recon_embed::EmbedEntry {
+                                            .map(|((s, _), vec)| recon_embed::EmbedEntry {
                                                 id: s.id,
                                                 qualified_name: s.qualified_name.to_string(),
                                                 vector: vec,
@@ -1719,7 +1760,7 @@ impl ReconServer {
                                         if let Err(e) = writer.upsert_embeddings(&entries) {
                                             warn!("embed catch-up: upsert: {e}");
                                         }
-                                        done += chunk.len();
+                                        done += entries.len();
                                     }
                                 }
                                 info!(done, "embed catch-up: complete");
@@ -1855,6 +1896,16 @@ impl ReconServer {
                     let to_parse: Vec<(PathBuf, Vec<u8>)> = existing_paths
                         .into_iter()
                         .filter_map(|path| {
+                            if !allow_sensitive
+                                && recon_core::redact::is_blocked_path(
+                                    path.strip_prefix(&repo_root).unwrap_or(&path),
+                                )
+                            {
+                                return None;
+                            }
+                            if std::fs::metadata(&path).is_ok_and(|m| m.len() > max_file_size) {
+                                return None;
+                            }
                             let content = std::fs::read(&path).ok()?;
                             if walker::is_generated_content(&content) {
                                 return None;
@@ -1998,17 +2049,27 @@ impl ReconServer {
                                 );
 
                                 for chunk in to_embed.chunks(EMBED_BATCH) {
-                                    let texts: Vec<String> = chunk
-                                        .iter()
-                                        .map(|s| {
-                                            let body = content_map
-                                                .get(s.path.as_path())
-                                                .and_then(|b| b.get(s.byte_range.clone()))
-                                                .and_then(|b| std::str::from_utf8(b).ok())
-                                                .unwrap_or("");
-                                            recon_embed::format_symbol(s, body)
-                                        })
-                                        .collect();
+                                    let text_pairs: Vec<(&recon_core::symbol::Symbol, String)> =
+                                        chunk
+                                            .iter()
+                                            .filter_map(|s| {
+                                                let body = content_map
+                                                    .get(s.path.as_path())
+                                                    .and_then(|b| b.get(s.byte_range.clone()))
+                                                    .and_then(|b| std::str::from_utf8(b).ok())
+                                                    .unwrap_or("");
+                                                if body.len() as u64 > max_embed_size {
+                                                    None
+                                                } else {
+                                                    Some((*s, recon_embed::format_symbol(s, body)))
+                                                }
+                                            })
+                                            .collect();
+                                    if text_pairs.is_empty() {
+                                        continue;
+                                    }
+                                    let texts: Vec<String> =
+                                        text_pairs.iter().map(|(_, text)| text.clone()).collect();
 
                                     // Channel send (local) or HTTP round-trip (hosted) —
                                     // no lock either way; the trait abstracts both.
@@ -2020,10 +2081,10 @@ impl ReconServer {
                                         }
                                     };
 
-                                    let entries: Vec<recon_embed::EmbedEntry> = chunk
+                                    let entries: Vec<recon_embed::EmbedEntry> = text_pairs
                                         .iter()
                                         .zip(vecs)
-                                        .map(|(s, vec)| recon_embed::EmbedEntry {
+                                        .map(|((s, _), vec)| recon_embed::EmbedEntry {
                                             id: s.id,
                                             qualified_name: s.qualified_name.to_string(),
                                             vector: vec,
@@ -2157,12 +2218,12 @@ impl ReconServer {
         info!("shutdown: complete");
     }
 
-    /// Resolve a repo-relative path to its canonical absolute form.
+    /// Resolve a repo-relative path to canonical absolute and indexed relative forms.
     ///
     /// Returns `Err((code, message))` so callers can forward the exact
     /// `ReconErrorCode` into their `tool_error` response.
-    fn resolve_path(&self, rel: &str) -> Result<PathBuf, (ReconErrorCode, String)> {
-        if redact::is_blocked_path(std::path::Path::new(rel)) {
+    fn resolve_path(&self, rel: &str) -> Result<ResolvedPath, (ReconErrorCode, String)> {
+        if !self.config.allow_sensitive && redact::is_blocked_path(std::path::Path::new(rel)) {
             return Err((
                 ReconErrorCode::PermissionDenied,
                 format!("access denied: sensitive file: {rel}"),
@@ -2182,7 +2243,19 @@ impl ReconServer {
                 format!("path traversal denied: {rel}"),
             ));
         }
-        Ok(canonical)
+        let rel_path = canonical
+            .strip_prefix(&self.repo_root)
+            .map(PathBuf::from)
+            .map_err(|_| {
+                (
+                    ReconErrorCode::PathTraversal,
+                    format!("path traversal denied: {rel}"),
+                )
+            })?;
+        Ok(ResolvedPath {
+            abs: canonical,
+            rel: rel_path,
+        })
     }
 
     /// Resolve indexed paths to absolute paths — async version with spawn_blocking for git status.
@@ -2240,7 +2313,7 @@ impl ReconServer {
             // Validate path doesn't escape repo root. Capture the canonical
             // path so the measured-baseline read at the end can reuse it
             // (no second `resolve_path` round-trip on the success path).
-            let canonical = match self.resolve_path(&params.0.path) {
+            let resolved = match self.resolve_path(&params.0.path) {
                 Ok(p) => p,
                 Err((code, msg)) => {
                     return (
@@ -2254,8 +2327,7 @@ impl ReconServer {
                 }
             };
             let symbols = {
-                let rel_path = PathBuf::from(&params.0.path);
-                match self.read_pool.symbols_for_path(&rel_path) {
+                match self.read_pool.symbols_for_path(&resolved.rel) {
                     Ok(s) => s,
                     Err(e) => return (tool_error_from(&e), None),
                 }
@@ -2335,18 +2407,17 @@ impl ReconServer {
                 }
             }
 
-            let rel_path = PathBuf::from(&params.0.path);
             let view = ToolOutput::Outline(OutlineView {
-                path: rel_path,
+                path: resolved.rel.clone(),
                 entries,
             });
-            let response = redact_response(
+            let response = self.redact_response(
                 serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
             );
             // Measured baseline: token-cost of reading the file outright.
             // Only computed when `RECON_MEASURED_BASELINES=1` is set;
             // returns None silently when the file is absent or too big.
-            let measured = self.measure_read_baseline(&canonical).await;
+            let measured = self.measure_read_baseline(&resolved.abs).await;
             (response, measured)
         })
         .await
@@ -2360,10 +2431,22 @@ impl ReconServer {
         // Dedup key (#25): file path. Same file twice = one Read alternative.
         let key = params.0.path.clone();
         self.instrumented_measured_deduped("code_skeleton", &key, async move {
-            let rel_path = PathBuf::from(&params.0.path);
+            let resolved = match self.resolve_path(&params.0.path) {
+                Ok(p) => p,
+                Err((code, msg)) => {
+                    return (
+                        tool_error(
+                            code,
+                            msg,
+                            Some(serde_json::json!({ "path": params.0.path })),
+                        ),
+                        None,
+                    );
+                }
+            };
             let symbols = self
                 .read_pool
-                .symbols_for_path(&rel_path)
+                .symbols_for_path(&resolved.rel)
                 .unwrap_or_default();
 
             let mut skeleton = String::with_capacity(symbols.len() * 80);
@@ -2395,34 +2478,22 @@ impl ReconServer {
             // the truncated skeleton output and for the measured baseline.
             let mut measured_from_fallback: Option<u64> = None;
             if skeleton.is_empty() {
-                let abs_path = match self.resolve_path(&params.0.path) {
-                    Ok(p) => p,
-                    Err((code, msg)) => {
-                        return (
-                            tool_error(
-                                code,
-                                msg,
-                                Some(serde_json::json!({ "path": params.0.path })),
-                            ),
-                            None,
-                        );
-                    }
-                };
+                let abs_path = &resolved.abs;
                 // Size cap to prevent OOM on large files (minified bundles, lock files, etc.)
-                match tokio::fs::metadata(&abs_path).await {
-                    Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
+                match tokio::fs::metadata(abs_path).await {
+                    Ok(m) if m.len() > self.read_file_size_limit() => {
                         return (
                             tool_error(
                                 ReconErrorCode::FileTooLarge,
                                 format!(
                                     "file too large ({} MB, max {} MB)",
                                     m.len() / (1024 * 1024),
-                                    MAX_READ_FILE_SIZE / (1024 * 1024)
+                                    self.read_file_size_limit() / (1024 * 1024)
                                 ),
                                 Some(serde_json::json!({
                                     "path": params.0.path,
                                     "size_bytes": m.len(),
-                                    "max_bytes": MAX_READ_FILE_SIZE,
+                                    "max_bytes": self.read_file_size_limit(),
                                 })),
                             ),
                             None,
@@ -2440,7 +2511,7 @@ impl ReconServer {
                     }
                     _ => {}
                 }
-                let content = match tokio::fs::read_to_string(&abs_path).await {
+                let content = match tokio::fs::read_to_string(abs_path).await {
                     Ok(c) => c,
                     Err(e) => {
                         return (
@@ -2454,11 +2525,11 @@ impl ReconServer {
                     }
                 };
                 measured_from_fallback = self
-                    .measure_baseline_for_known_content(&abs_path, &content)
+                    .measure_baseline_for_known_content(abs_path, &content)
                     .await;
                 // Build the truncated preview in one pass to avoid the
                 // intermediate `Vec<&str>` + `join` allocation. `content` is
-                // already bounded by `MAX_READ_FILE_SIZE`, so capping the
+                // already bounded by the configured read-size cap, so capping the
                 // capacity at 8 KB covers the 50-line preview comfortably.
                 let mut buf = String::with_capacity(content.len().min(8 * 1024));
                 for (i, line) in content.lines().take(50).enumerate() {
@@ -2472,11 +2543,11 @@ impl ReconServer {
 
             let token_est = recon_search::tokens::estimate_tokens(&skeleton);
             let view = ToolOutput::Skeleton(SkeletonView {
-                path: Some(rel_path.clone()),
+                path: Some(resolved.rel.clone()),
                 content: skeleton,
                 token_estimate: token_est,
             });
-            let response = redact_response(
+            let response = self.redact_response(
                 serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
             );
             // Measured baseline: full Read of the file. If the fallback
@@ -2485,10 +2556,7 @@ impl ReconServer {
             // — only when the flag is on, gated inside the helper.
             let measured = match measured_from_fallback {
                 Some(m) => Some(m),
-                None => match self.resolve_path(&params.0.path) {
-                    Ok(abs) => self.measure_read_baseline(&abs).await,
-                    Err(_) => None,
-                },
+                None => self.measure_read_baseline(&resolved.abs).await,
             };
             (response, measured)
         })
@@ -2504,7 +2572,7 @@ impl ReconServer {
         // is still one Read alternative, not 39.
         let key = params.0.path.clone();
         self.instrumented_measured_deduped("code_read_symbol", &key, async move {
-            let abs_path = match self.resolve_path(&params.0.path) {
+            let resolved = match self.resolve_path(&params.0.path) {
                 Ok(p) => p,
                 Err((code, msg)) => {
                     return (
@@ -2517,21 +2585,22 @@ impl ReconServer {
                     );
                 }
             };
+            let abs_path = &resolved.abs;
             // Size cap to prevent OOM on large files.
-            match tokio::fs::metadata(&abs_path).await {
-                Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
+            match tokio::fs::metadata(abs_path).await {
+                Ok(m) if m.len() > self.read_file_size_limit() => {
                     return (
                         tool_error(
                             ReconErrorCode::FileTooLarge,
                             format!(
                                 "file too large ({} MB, max {} MB)",
                                 m.len() / (1024 * 1024),
-                                MAX_READ_FILE_SIZE / (1024 * 1024)
+                                self.read_file_size_limit() / (1024 * 1024)
                             ),
                             Some(serde_json::json!({
                                 "path": params.0.path,
                                 "size_bytes": m.len(),
-                                "max_bytes": MAX_READ_FILE_SIZE,
+                                "max_bytes": self.read_file_size_limit(),
                             })),
                         ),
                         None,
@@ -2549,7 +2618,7 @@ impl ReconServer {
                 }
                 _ => {}
             }
-            let content = match tokio::fs::read_to_string(&abs_path).await {
+            let content = match tokio::fs::read_to_string(abs_path).await {
                 Ok(c) => c,
                 Err(e) => {
                     return (
@@ -2570,13 +2639,12 @@ impl ReconServer {
             // that calls `code_outline` then `code_read_symbol` on the
             // same file BPE-encodes once.
             let measured: Option<u64> = self
-                .measure_baseline_for_known_content(&abs_path, &content)
+                .measure_baseline_for_known_content(abs_path, &content)
                 .await;
 
-            let rel_path = PathBuf::from(&params.0.path);
             let symbols = self
                 .read_pool
-                .symbols_for_path(&rel_path)
+                .symbols_for_path(&resolved.rel)
                 .unwrap_or_default();
 
             let target = if let Ok(line) = params.0.symbol_or_line.parse::<u32>() {
@@ -2663,7 +2731,7 @@ impl ReconServer {
                 .collect();
 
             let view = ToolOutput::SymbolCard(SymbolCardView {
-                path: rel_path,
+                path: resolved.rel.clone(),
                 qualified_name: sym.qualified_name.to_string(),
                 kind: sym.kind,
                 signature: sym.signature.as_deref().map(str::to_owned),
@@ -2675,7 +2743,7 @@ impl ReconServer {
                 callees,
                 context: None,
             });
-            let response = redact_response(
+            let response = self.redact_response(
                 serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
             );
             (response, measured)
@@ -2692,18 +2760,19 @@ impl ReconServer {
         // already cached in the agent's context.
         let key = params.0.name.clone();
         self.instrumented_deduped("code_find_symbol", &key, async move {
+            let limit = self.search_result_limit();
             // All reads go through lock-free ReadPool
             // Tier 0: exact match via SQLite index
             let mut results = self
                 .read_pool
-                .find_symbols_exact(&params.0.name, 20)
+                .find_symbols_exact(&params.0.name, limit)
                 .unwrap_or_default();
 
             // Tier 1: Tantivy BM25 structured search. Lock-free ≠ non-blocking —
             // the query parser + top-k collector is CPU-bound, so we offload
             // via `tantivy_search` so the tokio worker isn't held.
             if results.is_empty() {
-                let hits = self.tantivy_search(params.0.name.clone(), 20).await;
+                let hits = self.tantivy_search(params.0.name.clone(), limit).await;
                 for hit in &hits {
                     if let Some(sym) = self
                         .read_pool
@@ -2720,9 +2789,9 @@ impl ReconServer {
             if results.is_empty() {
                 let fts_results = self
                     .read_pool
-                    .search_symbols_fuzzy(&params.0.name, 50)
+                    .search_symbols_fuzzy(&params.0.name, limit.saturating_mul(2))
                     .unwrap_or_default();
-                let ranked = fuzzy::fuzzy_rank(&fts_results, &params.0.name, 20);
+                let ranked = fuzzy::fuzzy_rank(&fts_results, &params.0.name, limit);
                 results = ranked
                     .into_iter()
                     .map(|(i, _): (usize, _)| fts_results[i].clone())
@@ -2751,7 +2820,7 @@ impl ReconServer {
                             }
                         };
                     if !query_vec.is_empty() {
-                        if let Ok(vec_results) = pool.search(query_vec, None, 20) {
+                        if let Ok(vec_results) = pool.search(query_vec, None, limit) {
                             for (id, _dist) in vec_results {
                                 if let Ok(Some(sym)) = self.read_pool.symbol_by_id(id) {
                                     results.push(sym);
@@ -2797,7 +2866,7 @@ impl ReconServer {
 
             // Every retrieval tier caps at 20 — pass the cap so the
             // envelope carries `truncated: true` when a tier hits its limit.
-            hits_response("symbol", entries, 20)
+            self.hits_response("symbol", entries, limit)
         })
         .await
     }
@@ -2871,7 +2940,9 @@ impl ReconServer {
                 unresolved_hint: None,
                 tests: vec![],
             });
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            self.redact_response(
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            )
         })
         .await
     }
@@ -2924,7 +2995,7 @@ impl ReconServer {
                         unresolved_hint: None,
                         tests: vec![],
                     });
-                    redact_response(
+                    self.redact_response(
                         serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
                     )
                 }
@@ -3034,7 +3105,7 @@ impl ReconServer {
 
             let target_idx = matches[0];
             let target = symbols[target_idx as usize].clone();
-            let abs_path = match self.resolve_path(target.path.to_string_lossy().as_ref()) {
+            let resolved = match self.resolve_path(target.path.to_string_lossy().as_ref()) {
                 Ok(p) => p,
                 Err((code, msg)) => {
                     return (
@@ -3047,16 +3118,17 @@ impl ReconServer {
                     );
                 }
             };
+            let abs_path = &resolved.abs;
 
-            let content = match tokio::fs::metadata(&abs_path).await {
-                Ok(m) if m.len() > MAX_READ_FILE_SIZE => {
+            let content = match tokio::fs::metadata(abs_path).await {
+                Ok(m) if m.len() > self.read_file_size_limit() => {
                     return (
                         tool_error(
                             ReconErrorCode::FileTooLarge,
                             format!(
                                 "file too large ({} MB, max {} MB)",
                                 m.len() / (1024 * 1024),
-                                MAX_READ_FILE_SIZE / (1024 * 1024)
+                                self.read_file_size_limit() / (1024 * 1024)
                             ),
                             Some(serde_json::json!({
                                 "path": target.path.to_string_lossy(),
@@ -3076,7 +3148,7 @@ impl ReconServer {
                         None,
                     );
                 }
-                Ok(_) => match tokio::fs::read_to_string(&abs_path).await {
+                Ok(_) => match tokio::fs::read_to_string(abs_path).await {
                     Ok(c) => c,
                     Err(e) => {
                         return (
@@ -3100,7 +3172,7 @@ impl ReconServer {
             // Goes through the shared `(path, mtime)` cache so we
             // BPE-encode at most once per file per session.
             let measured_baseline = self
-                .measure_baseline_for_known_content(&abs_path, &content)
+                .measure_baseline_for_known_content(abs_path, &content)
                 .await;
 
             let line_start = *target.line_range.start() as usize;
@@ -3248,7 +3320,7 @@ impl ReconServer {
                 callees: vec![],
                 context: Some(envelope),
             });
-            let response = redact_response(
+            let response = self.redact_response(
                 serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
             );
             (response, measured_baseline)
@@ -3321,7 +3393,9 @@ impl ReconServer {
                 unresolved_hint: None,
                 tests,
             });
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            self.redact_response(
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            )
         })
         .await
     }
@@ -3381,7 +3455,9 @@ impl ReconServer {
                 content: content.clone(),
                 token_estimate: recon_search::tokens::estimate_tokens(&content),
             });
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            self.redact_response(
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            )
         })
         .await
     }
@@ -3439,7 +3515,9 @@ impl ReconServer {
                 content,
                 token_estimate: tokens,
             });
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            self.redact_response(
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            )
         })
         .await
     }
@@ -3559,7 +3637,9 @@ impl ReconServer {
                 content: content.clone(),
                 token_estimate: recon_search::tokens::estimate_tokens(&content),
             });
-            redact_response(serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")))
+            self.redact_response(
+                serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
+            )
         })
         .await
     }
@@ -3574,6 +3654,7 @@ impl ReconServer {
         // so include mode in the key.
         let key = format!("{}|{}", params.0.mode, params.0.query);
         self.instrumented_measured_deduped("code_search", &key, async move {
+            let limit = self.search_result_limit();
             let paths = self.cached_file_paths();
 
             let abs_paths = self
@@ -3603,7 +3684,7 @@ impl ReconServer {
                             Ok(Err(e)) => return (format!("embed error: {e}"), None),
                             Err(e) => return (format!("embed task join error: {e}"), None),
                         };
-                        let results = match pool.search(query_vec, None, 20) {
+                        let results = match pool.search(query_vec, None, limit) {
                             Ok(r) => r,
                             Err(e) => return (format!("vector search error: {e}"), None),
                         };
@@ -3613,7 +3694,7 @@ impl ReconServer {
                                 |(id, dist)| serde_json::json!({"symbol_id": id, "distance": dist}),
                             )
                             .collect();
-                        return (hits_response("text", entries, 20), None);
+                        return (self.hits_response("text", entries, limit), None);
                     }
                     _ => return (
                         "semantic search requires the embed service — run `recon login <key>`, \
@@ -3628,11 +3709,11 @@ impl ReconServer {
                 // RRF fusion: Tantivy BM25 results + text grep results.
                 // Measured baseline reflects only the grep half — the BM25
                 // half is index-driven with no clean Read+grep alternative.
-                let tantivy_hits = self.tantivy_search(params.0.query.clone(), 20).await;
+                let tantivy_hits = self.tantivy_search(params.0.query.clone(), limit).await;
                 let q = TextQuery {
                     pattern: params.0.query.clone(),
                     is_regex: false,
-                    max_results: 20,
+                    max_results: limit,
                     scope: abs_paths.clone(),
                 };
                 let (text_hits, measured) =
@@ -3683,16 +3764,16 @@ impl ReconServer {
                 let mut sorted: Vec<_> = rrf.into_values().collect();
                 sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 let entries: Vec<serde_json::Value> =
-                    sorted.into_iter().take(30).map(|(_, v)| v).collect();
+                    sorted.into_iter().take(limit).map(|(_, v)| v).collect();
 
-                return (hits_response("text", entries, 30), Some(measured));
+                return (self.hits_response("text", entries, limit), Some(measured));
             }
 
             if params.0.mode == "regex" {
                 let q = TextQuery {
                     pattern: params.0.query.clone(),
                     is_regex: true,
-                    max_results: 30,
+                    max_results: limit,
                     scope: abs_paths,
                 };
                 let (hits, measured) = self.text_searcher.search_measured(&q).unwrap_or_default();
@@ -3705,7 +3786,7 @@ impl ReconServer {
                     })
                     .collect();
 
-                return (hits_response("text", entries, 30), Some(measured));
+                return (self.hits_response("text", entries, limit), Some(measured));
             }
 
             // Exact mode: try Tantivy first (sub-ms), fall back to grep only if empty.
@@ -3715,7 +3796,7 @@ impl ReconServer {
             // that with the file content of the top-2 tantivy hits — same
             // rationale as the v0.3.x static estimate ("Grep + read 2 hit
             // files"), but per-call against real bytes.
-            let tantivy_hits = self.tantivy_search(params.0.query.clone(), 30).await;
+            let tantivy_hits = self.tantivy_search(params.0.query.clone(), limit).await;
             if !tantivy_hits.is_empty() {
                 // Tantivy hits carry symbol_id but no line number; resolve symbol
                 // line_start in one batched query so callers see real line numbers.
@@ -3729,7 +3810,7 @@ impl ReconServer {
 
                 // Measured baseline: sum content tokens of up to 2 unique top
                 // hit files. Reuses `measure_read_baseline` so the read uses
-                // the same MAX_READ_FILE_SIZE cap real Read-shaped tools see.
+                // the same configured read-size cap real Read-shaped tools see.
                 let mut measured: u64 = 0;
                 let mut seen: ahash::AHashSet<&str> = ahash::AHashSet::new();
                 for hit in tantivy_hits.iter() {
@@ -3739,8 +3820,8 @@ impl ReconServer {
                     if !seen.insert(hit.path.as_str()) {
                         continue;
                     }
-                    if let Ok(abs) = self.resolve_path(hit.path.as_str()) {
-                        if let Some(t) = self.measure_read_baseline(&abs).await {
+                    if let Ok(resolved) = self.resolve_path(hit.path.as_str()) {
+                        if let Some(t) = self.measure_read_baseline(&resolved.abs).await {
                             measured = measured.saturating_add(t);
                         }
                     }
@@ -3758,14 +3839,14 @@ impl ReconServer {
                         )
                     })
                     .collect();
-                return (hits_response("text", entries, 30), Some(measured));
+                return (self.hits_response("text", entries, limit), Some(measured));
             }
 
             // Tantivy had no hits — fall back to text grep, which gets a measured baseline.
             let q = TextQuery {
                 pattern: params.0.query.clone(),
                 is_regex: false,
-                max_results: 30,
+                max_results: limit,
                 scope: abs_paths,
             };
             let (hits, measured) = self.text_searcher.search_measured(&q).unwrap_or_default();
@@ -3778,7 +3859,7 @@ impl ReconServer {
                 })
                 .collect();
 
-            (hits_response("text", entries, 30), Some(measured))
+            (self.hits_response("text", entries, limit), Some(measured))
         })
         .await
     }
@@ -3873,8 +3954,8 @@ impl ReconServer {
             // actually read after globbing).
             let mut measured_total: u64 = measured_bytes.div_ceil(4) as u64;
             for rel in &top_paths {
-                if let Ok(abs) = self.resolve_path(rel.to_string_lossy().as_ref()) {
-                    if let Some(t) = self.measure_read_baseline(&abs).await {
+                if let Ok(resolved) = self.resolve_path(rel.to_string_lossy().as_ref()) {
+                    if let Some(t) = self.measure_read_baseline(&resolved.abs).await {
                         measured_total = measured_total.saturating_add(t);
                     }
                 }
@@ -3883,7 +3964,7 @@ impl ReconServer {
             // `code_list` has no built-in row cap (it streams everything that
             // passes the filters), so pass `usize::MAX` as a sentinel — the
             // `truncated` flag is always omitted from the wire.
-            let response = hits_response("file", entries, usize::MAX);
+            let response = self.hits_response("file", entries, usize::MAX);
             (response, measured)
         })
         .await
@@ -3908,7 +3989,11 @@ impl ReconServer {
             .unwrap_or_default();
         self.instrumented_deduped("code_repo_map", &key, async move {
             let focus_files = params.0.focus_files.as_deref().unwrap_or(&[]);
-            let budget = params.0.token_budget;
+            let budget = if params.0.token_budget == 0 {
+                self.config.default_map_budget
+            } else {
+                params.0.token_budget
+            };
 
             // All reads go through lock-free cached accessors
             let (all_symbols, all_refs, cache_key) = {
@@ -3975,7 +4060,7 @@ impl ReconServer {
                 content,
                 token_estimate: token_est,
             });
-            let result = redact_response(
+            let result = self.redact_response(
                 serde_json::to_string(&view).unwrap_or_else(|e| format!("Error: {e}")),
             );
 
@@ -4003,6 +4088,7 @@ impl ReconServer {
         // Dedup key (#25): pattern + kind (literal / comment / both).
         let key = format!("{}|{}", params.0.kind, params.0.pattern);
         self.instrumented_measured_deduped("code_find_strings", &key, async move {
+            let limit = self.search_result_limit();
             let paths = self.cached_file_paths();
 
             let abs_paths = self
@@ -4011,7 +4097,7 @@ impl ReconServer {
             let q = TextQuery {
                 pattern: params.0.pattern.clone(),
                 is_regex: false,
-                max_results: 30,
+                max_results: limit,
                 scope: abs_paths,
             };
             // Measured: total tokens an unbounded grep would have emitted
@@ -4048,7 +4134,7 @@ impl ReconServer {
             // Underlying grep caps `max_results` at 30; that's the truncation
             // signal even after the literal/comment classifier filters out a
             // few hits, since the cap was already applied upstream.
-            let response = hits_response("string", entries, 30);
+            let response = self.hits_response("string", entries, limit);
             (response, Some(measured))
         })
         .await
@@ -4067,6 +4153,7 @@ impl ReconServer {
             sorted.join(",")
         };
         self.instrumented_measured_deduped("code_multi_find", &key, async move {
+        let limit = self.search_result_limit();
         let paths = self.cached_file_paths();
 
         let abs_paths = self
@@ -4075,7 +4162,7 @@ impl ReconServer {
         let pat_refs: Vec<&str> = params.0.patterns.iter().map(|s| s.as_str()).collect();
         let (multi_results, measured) = self
             .text_searcher
-            .multi_search_measured(&pat_refs, &abs_paths, 10)
+            .multi_search_measured(&pat_refs, &abs_paths, limit)
             .unwrap_or_default();
 
         let results: Vec<serde_json::Value> = multi_results
@@ -4094,7 +4181,7 @@ impl ReconServer {
 
         // Multi-find returns one row per pattern; row-cap doesn't apply to
         // the pattern dimension. Pass `usize::MAX` so `truncated` is omitted.
-        let response = hits_response("multi_find", results, usize::MAX);
+        let response = self.hits_response("multi_find", results, usize::MAX);
         (response, Some(measured))
             }).await
     }
@@ -4117,6 +4204,11 @@ impl ReconServer {
             let tantivy = self.tantivy.clone();
             let tantivy_writer = self.tantivy_writer.clone();
             let repo_root = self.repo_root.clone();
+            let index_options = indexer::IndexOptions {
+                max_file_size: self.config.max_file_size,
+                tantivy_heap_bytes: self.config.tantivy_heap_bytes,
+                allow_sensitive: self.config.allow_sensitive,
+            };
 
             // Heavy work runs on a blocking thread — parse locklessly, write in chunks
             let result = tokio::task::spawn_blocking(move || {
@@ -4140,7 +4232,16 @@ impl ReconServer {
                     }
 
                     // Full walk + parse (force path)
-                    let paths = walker::walk_repo(&repo_root);
+                    let paths: Vec<_> =
+                        walker::walk_repo_with_limit(&repo_root, index_options.max_file_size)
+                            .into_iter()
+                            .filter(|p| {
+                                index_options.allow_sensitive
+                                    || !recon_core::redact::is_blocked_path(
+                                        p.strip_prefix(&repo_root).unwrap_or(p),
+                                    )
+                            })
+                            .collect();
                     let pools = std::sync::Arc::new(LanguagePools::new(
                         rayon::current_num_threads().max(4),
                     ));
@@ -4207,11 +4308,12 @@ impl ReconServer {
                 } else {
                     // Incremental reindex: use git diff (or Merkle fallback) to only re-parse changed files
                     let store = write_store.lock();
-                    let result = indexer::index_repo_incremental(
+                    let result = indexer::index_repo_incremental_with_options(
                         &store,
                         Some(&tantivy),
                         &repo_root,
                         tantivy_writer.lock().as_mut(),
+                        index_options,
                     );
                     match result {
                         Ok(stats) => {
@@ -4369,7 +4471,7 @@ impl ReconServer {
                 "tokens_saved": agg.tokens_saved(),
             });
 
-            redact_response(
+            self.redact_response(
                 serde_json::to_string(&serde_json::json!({
                     "files_indexed": file_count,
                     "total_symbols": symbol_count,
@@ -4771,6 +4873,35 @@ mod tests {
                 .is_some_and(|a| a.iter().any(|e| e["name"] == "mul")),
             "should contain 'mul' function"
         );
+    }
+
+    #[tokio::test]
+    async fn path_tools_use_canonical_relative_lookup() {
+        let (server, _tmp) = make_indexed_server().await;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let outline = server
+            .code_outline(Parameters(crate::tools::OutlineParams {
+                path: "src/../src/math.rs".into(),
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&outline).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("Outline"), "{outline}");
+        assert_eq!(json["path"].as_str(), Some("src/math.rs"));
+        assert!(json["entries"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|e| e["name"] == "add")));
+
+        let card = server
+            .code_read_symbol(Parameters(crate::tools::ReadSymbolParams {
+                path: "src/../src/math.rs".into(),
+                symbol_or_line: "add".into(),
+            }))
+            .await;
+        let json: serde_json::Value = serde_json::from_str(&card).unwrap();
+        assert_eq!(json["shape"].as_str(), Some("SymbolCard"), "{card}");
+        assert_eq!(json["path"].as_str(), Some("src/math.rs"));
+        assert_eq!(json["qualified_name"].as_str(), Some("add"));
     }
 
     #[tokio::test]

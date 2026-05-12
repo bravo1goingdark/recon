@@ -5,6 +5,7 @@ use crate::walker;
 use rayon::prelude::*;
 use recon_core::error::Error;
 use recon_core::lang::Language;
+use recon_core::redact;
 use recon_core::symbol::{FileMeta, Ref, Symbol};
 use recon_parser::extract;
 use recon_parser::pool::LanguagePools;
@@ -29,6 +30,32 @@ pub struct ParsedFile {
 /// Path to the persisted Merkle snapshot within the repo.
 const MERKLE_SNAPSHOT_PATH: &str = ".recon/merkle.json";
 
+/// Tunable indexing options loaded from `.recon/config.toml` by callers.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexOptions {
+    /// Maximum source file size to index.
+    pub max_file_size: u64,
+    /// Tantivy writer heap size in bytes.
+    pub tantivy_heap_bytes: usize,
+    /// Whether sensitive paths such as `.env` and private keys may be indexed.
+    pub allow_sensitive: bool,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self {
+            max_file_size: 2_097_152,
+            tantivy_heap_bytes: 50_000_000,
+            allow_sensitive: false,
+        }
+    }
+}
+
+fn is_sensitive_path(path: &Path, repo_root: &Path) -> bool {
+    let rel = path.strip_prefix(repo_root).unwrap_or(path);
+    redact::is_blocked_path(rel)
+}
+
 /// Resolve the merkle snapshot path for a given repo root.
 fn merkle_snapshot_path(repo_root: &Path) -> PathBuf {
     repo_root.join(MERKLE_SNAPSHOT_PATH)
@@ -40,7 +67,18 @@ fn merkle_snapshot_path(repo_root: &Path) -> PathBuf {
 /// generated content, and computes blake3 content hashes. The resulting
 /// snapshot maps relative paths to (content hash, mtime).
 pub fn build_merkle_snapshot(repo_root: &Path) -> MerkleSnapshot {
-    let paths = walker::walk_repo(repo_root);
+    build_merkle_snapshot_with_options(repo_root, IndexOptions::default())
+}
+
+/// Build a MerkleSnapshot with configurable walker limits.
+pub fn build_merkle_snapshot_with_options(
+    repo_root: &Path,
+    options: IndexOptions,
+) -> MerkleSnapshot {
+    let paths: Vec<_> = walker::walk_repo_with_limit(repo_root, options.max_file_size)
+        .into_iter()
+        .filter(|p| options.allow_sensitive || !is_sensitive_path(p, repo_root))
+        .collect();
     let entries: Vec<_> = paths
         .par_iter()
         .filter_map(|path| {
@@ -243,7 +281,28 @@ pub fn index_repo(
     repo_root: &Path,
     shared_writer: Option<&mut tantivy::IndexWriter>,
 ) -> Result<IndexStats, Error> {
-    let paths = walker::walk_repo(repo_root);
+    index_repo_with_options(
+        store,
+        tantivy,
+        repo_root,
+        shared_writer,
+        IndexOptions::default(),
+    )
+}
+
+/// Index all files in a repo using caller-provided config options.
+#[allow(clippy::needless_option_as_deref)]
+pub fn index_repo_with_options(
+    store: &Store,
+    tantivy: Option<&TantivyBackend>,
+    repo_root: &Path,
+    shared_writer: Option<&mut tantivy::IndexWriter>,
+    options: IndexOptions,
+) -> Result<IndexStats, Error> {
+    let paths: Vec<_> = walker::walk_repo_with_limit(repo_root, options.max_file_size)
+        .into_iter()
+        .filter(|p| options.allow_sensitive || !is_sensitive_path(p, repo_root))
+        .collect();
     info!(files = paths.len(), "starting repo indexing");
 
     // Enter high-throughput indexing mode for faster bulk inserts
@@ -349,7 +408,7 @@ pub fn index_repo(
 
     // Tantivy indexing — use shared writer if available, else create a local one
     let mut local_writer = if shared_writer.is_none() {
-        tantivy.and_then(|tb| match tb.writer(50_000_000) {
+        tantivy.and_then(|tb| match tb.writer(options.tantivy_heap_bytes) {
             Ok(w) => Some(w),
             Err(e) => {
                 warn!(
@@ -438,6 +497,25 @@ pub fn index_repo_incremental(
     repo_root: &Path,
     mut shared_writer: Option<&mut tantivy::IndexWriter>,
 ) -> Result<IndexStats, Error> {
+    index_repo_incremental_with_options(
+        store,
+        tantivy,
+        repo_root,
+        shared_writer.as_deref_mut(),
+        IndexOptions::default(),
+    )
+}
+
+/// Incremental index using caller-provided config options.
+#[allow(clippy::needless_option_as_deref)]
+#[instrument(skip(store, tantivy, shared_writer), fields(repo = %repo_root.display()))]
+pub fn index_repo_incremental_with_options(
+    store: &Store,
+    tantivy: Option<&TantivyBackend>,
+    repo_root: &Path,
+    mut shared_writer: Option<&mut tantivy::IndexWriter>,
+    options: IndexOptions,
+) -> Result<IndexStats, Error> {
     use std::collections::HashSet;
 
     let last_commit = store.get_meta("last_indexed_commit")?;
@@ -470,6 +548,7 @@ pub fn index_repo_incremental(
                 tantivy,
                 repo_root,
                 shared_writer.as_deref_mut(),
+                options,
             );
         }
     };
@@ -477,13 +556,24 @@ pub fn index_repo_incremental(
     // Fall back to Merkle diff rather than panic if this invariant is somehow violated.
     let Some(repo) = repo else {
         warn!("git repo handle unexpectedly missing after HEAD was resolved; using merkle diff");
-        return index_repo_merkle_fallback(store, tantivy, repo_root, shared_writer.as_deref_mut());
+        return index_repo_merkle_fallback(
+            store,
+            tantivy,
+            repo_root,
+            shared_writer.as_deref_mut(),
+            options,
+        );
     };
 
     if last_commit.is_none() {
         info!("no previous index, using merkle diff");
-        let stats =
-            index_repo_merkle_fallback(store, tantivy, repo_root, shared_writer.as_deref_mut())?;
+        let stats = index_repo_merkle_fallback(
+            store,
+            tantivy,
+            repo_root,
+            shared_writer.as_deref_mut(),
+            options,
+        )?;
         if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
             warn!("failed to store last_indexed_commit: {e}");
         }
@@ -492,7 +582,13 @@ pub fn index_repo_incremental(
     // `last_commit` is Some because the is_none() branch returned above.
     let Some(last_commit) = last_commit else {
         warn!("last_commit unexpectedly None after non-None check; using merkle diff");
-        return index_repo_merkle_fallback(store, tantivy, repo_root, shared_writer.as_deref_mut());
+        return index_repo_merkle_fallback(
+            store,
+            tantivy,
+            repo_root,
+            shared_writer.as_deref_mut(),
+            options,
+        );
     };
 
     // Get committed changes (tree diff) if HEAD advanced
@@ -516,6 +612,7 @@ pub fn index_repo_incremental(
                     tantivy,
                     repo_root,
                     shared_writer.as_deref_mut(),
+                    options,
                 );
             }
         }
@@ -545,6 +642,7 @@ pub fn index_repo_incremental(
         .filter(|p| {
             Language::from_path(p) != Language::Unknown
                 && !walker::is_vendored(&p.to_string_lossy())
+                && (options.allow_sensitive || !is_sensitive_path(p, repo_root))
         })
         .collect();
     let deleted: Vec<PathBuf> = all_deleted
@@ -578,6 +676,7 @@ pub fn index_repo_incremental(
         &modified,
         &deleted,
         shared_writer.as_deref_mut(),
+        options,
     )?;
 
     if let Err(e) = store.set_meta("last_indexed_commit", &current_head) {
@@ -598,8 +697,9 @@ fn index_repo_merkle_fallback(
     tantivy: Option<&TantivyBackend>,
     repo_root: &Path,
     shared_writer: Option<&mut tantivy::IndexWriter>,
+    options: IndexOptions,
 ) -> Result<IndexStats, Error> {
-    let current_snapshot = build_merkle_snapshot(repo_root);
+    let current_snapshot = build_merkle_snapshot_with_options(repo_root, options);
     let previous_snapshot = load_previous_snapshot(repo_root);
 
     let diff = match &previous_snapshot {
@@ -641,6 +741,7 @@ fn index_repo_merkle_fallback(
         &changed_abs,
         &deleted_abs,
         shared_writer,
+        options,
     )?;
 
     // Save the new snapshot after successful indexing
@@ -658,11 +759,12 @@ fn index_diff(
     changed: &[PathBuf],
     deleted: &[PathBuf],
     shared_writer: Option<&mut tantivy::IndexWriter>,
+    options: IndexOptions,
 ) -> Result<IndexStats, Error> {
     let pools = Arc::new(LanguagePools::new(rayon::current_num_threads().max(4)));
     // Use shared writer if available, else create a local one
     let mut local_writer = if shared_writer.is_none() {
-        tantivy.and_then(|tb| match tb.writer(15_000_000) {
+        tantivy.and_then(|tb| match tb.writer(options.tantivy_heap_bytes) {
             Ok(w) => Some(w),
             Err(e) => {
                 warn!(
@@ -696,6 +798,12 @@ fn index_diff(
     let parsed: Vec<_> = changed
         .par_iter()
         .filter_map(|path| {
+            if !options.allow_sensitive && is_sensitive_path(path, repo_root) {
+                return None;
+            }
+            if std::fs::metadata(path).is_ok_and(|m| m.len() > options.max_file_size) {
+                return None;
+            }
             let content = match std::fs::read(path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -796,12 +904,67 @@ mod tests {
         std::fs::write(dir.path().join("lib.py"), "def foo(): pass").unwrap();
         std::fs::write(dir.path().join("notes.txt"), "just a note").unwrap();
 
-        let store = Store::open_memory().unwrap();
+        let store = Store::open(&dir.path().join("index-a.db")).unwrap();
         let stats = index_repo(&store, None, dir.path(), None).unwrap();
 
         assert_eq!(stats.files_indexed, 2);
         assert!(stats.total_symbols >= 2);
         assert_eq!(stats.errors, 0);
+    }
+
+    #[test]
+    fn index_options_honor_file_size_and_sensitive_toggles() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("large.rs"), "fn oversized() {}\n").unwrap();
+        std::fs::write(dir.path().join("id_rsa.rs"), "fn secret_source() {}").unwrap();
+
+        let store = Store::open(&dir.path().join("index-b.db")).unwrap();
+        let stats = index_repo_with_options(
+            &store,
+            None,
+            dir.path(),
+            None,
+            IndexOptions {
+                max_file_size: 13,
+                allow_sensitive: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert!(store.get_file_hash(Path::new("main.rs")).unwrap().is_some());
+        assert!(store
+            .get_file_hash(Path::new("large.rs"))
+            .unwrap()
+            .is_none());
+        assert!(store
+            .get_file_hash(Path::new("id_rsa.rs"))
+            .unwrap()
+            .is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("large.rs"), "fn oversized() {}\n").unwrap();
+        std::fs::write(dir.path().join("id_rsa.rs"), "fn secret_source() {}").unwrap();
+        let store = Store::open(&dir.path().join("index-b.db")).unwrap();
+        let stats = index_repo_with_options(
+            &store,
+            None,
+            dir.path(),
+            None,
+            IndexOptions {
+                max_file_size: 64,
+                allow_sensitive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.files_indexed, 3);
+        assert!(store
+            .get_file_hash(Path::new("id_rsa.rs"))
+            .unwrap()
+            .is_some());
     }
 
     #[test]

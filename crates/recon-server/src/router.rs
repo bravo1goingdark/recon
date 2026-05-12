@@ -6,6 +6,7 @@
 
 use crate::server::ReconServer;
 use dashmap::DashMap;
+use recon_core::config::Config;
 use recon_indexer::indexer;
 use recon_search::tantivy_backend::TantivyBackend;
 use recon_storage::store::Store;
@@ -422,7 +423,22 @@ impl RepoRouter {
         let tier_name = tier.name();
 
         // Pre-flight: walk the repo and check file count before any indexing
-        let paths = recon_indexer::walker::walk_repo(repo_path);
+        let config = Config::load(repo_path);
+        let index_options = indexer::IndexOptions {
+            max_file_size: config.max_file_size,
+            tantivy_heap_bytes: config.tantivy_heap_bytes,
+            allow_sensitive: config.allow_sensitive,
+        };
+        let paths: Vec<_> =
+            recon_indexer::walker::walk_repo_with_limit(repo_path, config.max_file_size)
+                .into_iter()
+                .filter(|p| {
+                    config.allow_sensitive
+                        || !recon_core::redact::is_blocked_path(
+                            p.strip_prefix(repo_path).unwrap_or(p),
+                        )
+                })
+                .collect();
         let file_count = paths.len();
 
         if file_count > limits.max_files {
@@ -469,7 +485,7 @@ impl RepoRouter {
         let tantivy = TantivyBackend::open(&store_dir.join("tantivy"))
             .map_err(|e| RouterError::Search(e.to_string()))?;
 
-        let mut writer = match tantivy.writer(50_000_000) {
+        let mut writer = match tantivy.writer(config.tantivy_heap_bytes) {
             Ok(w) => Some(w),
             Err(e) => {
                 warn!(
@@ -481,7 +497,13 @@ impl RepoRouter {
                 None
             }
         };
-        match indexer::index_repo_incremental(&store, Some(&tantivy), repo_path, writer.as_mut()) {
+        match indexer::index_repo_incremental_with_options(
+            &store,
+            Some(&tantivy),
+            repo_path,
+            writer.as_mut(),
+            index_options,
+        ) {
             Ok(stats) => {
                 info!(
                     repo = %repo_path.display(),

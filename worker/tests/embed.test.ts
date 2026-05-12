@@ -340,7 +340,9 @@ describe("POST /v1/embed — Modal failure modes", () => {
   });
 
   it("Modal network error → 503 fail-closed", async () => {
-    mockModal(() => Promise.reject(new TypeError("fetch failed")));
+    mockModal(() => {
+      throw new TypeError("fetch failed");
+    });
     const r = await postEmbed("sk-recon-pro", { texts: ["fn x() {}"] });
     expect(r.status).toBe(503);
     expect(r.body).toMatchObject({
