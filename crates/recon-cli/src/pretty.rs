@@ -491,11 +491,14 @@ mod tests {
 
     #[test]
     fn should_use_color_respects_no_color_env() {
-        // When NO_COLOR is set, should_use_color returns false.
-        // We can't easily test the TTY branch, but we can test NO_COLOR.
-        std::env::set_var("NO_COLOR", "1");
+        // Env vars are process-global; serialize access so parallel tests
+        // don't race on the same variable.
+        static NO_COLOR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = NO_COLOR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        unsafe { std::env::set_var("NO_COLOR", "1") };
         assert!(!should_use_color());
-        std::env::remove_var("NO_COLOR");
+        unsafe { std::env::remove_var("NO_COLOR") };
     }
 
     #[test]

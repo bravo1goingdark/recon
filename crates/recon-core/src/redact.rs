@@ -36,6 +36,12 @@ const SECRET_PATTERNS: &[(&str, &str, usize)] = &[
     ("Slack Token", "xapp-", 40),
 ];
 
+/// Prefixes that look like secrets (match a SECRET_PATTERNS entry) but are
+/// actually recon's own identifiers and must NOT be redacted. Checked before
+/// applying the `sk-` pattern so that recon API keys in error messages
+/// ("run `recon login sk-recon-...`") survive redaction intact.
+const SECRET_ALLOWLIST_PREFIXES: &[&str] = &["sk-recon-"];
+
 /// PEM header markers.
 const PEM_MARKERS: &[&str] = &[
     "-----BEGIN RSA PRIVATE KEY-----",
@@ -174,6 +180,16 @@ pub fn redact_secrets(text: &str) -> Option<String> {
         while let Some(pos) = text[search_from..].find(prefix) {
             let abs_pos = search_from + pos;
             let remaining = &text[abs_pos..];
+
+            // Skip tokens on the allowlist (e.g. recon's own sk-recon-* keys).
+            let is_allowed = SECRET_ALLOWLIST_PREFIXES
+                .iter()
+                .any(|allowed| remaining.starts_with(allowed));
+            if is_allowed {
+                search_from = abs_pos + prefix.len();
+                continue;
+            }
+
             let token_end = remaining
                 .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '`' || c == ',')
                 .unwrap_or(remaining.len());
@@ -350,6 +366,21 @@ mod tests {
         let text = "color: sk-blue";
         let result = redact_secrets(text);
         assert!(result.is_none(), "short sk- token must not be redacted");
+    }
+
+    #[test]
+    fn no_false_positive_on_recon_api_key() {
+        // recon's own API keys (sk-recon-*) must never be redacted, even
+        // when they exceed the 40-char min_length threshold.
+        let key = "sk-recon-abcdefghijklmnopqrstuvwxyz0123456789";
+        assert!(key.len() >= 40, "test key must be ≥40 chars");
+        let text = format!("Run `recon login {key}` to authenticate.");
+        let result = redact_secrets(&text);
+        assert!(
+            result.is_none(),
+            "sk-recon-* keys must not be redacted, got: {:?}",
+            result
+        );
     }
 
     #[test]

@@ -124,6 +124,11 @@ pub struct ReconServer {
     /// long-running servers; on overflow we evict the bottom-25 % by
     /// `last_access_secs` so cold entries leave first.
     measured_baseline_cache: Arc<dashmap::DashMap<PathBuf, (i64, u64, i64)>>,
+    /// Per-instance refresh gate — coalesces concurrent watcher-triggered
+    /// cache refreshes into at most one in-flight + one pending re-run.
+    /// Moved from a process-global static so multiple `ReconServer`
+    /// instances (multi-repo mode, tests) don't interfere with each other.
+    refresh_gate: Arc<RefreshGate>,
 }
 
 /// Bound on [`ReconServer::measured_baseline_cache`]. Sized to match
@@ -212,10 +217,14 @@ struct RefreshGate {
     dirty: AtomicBool,
 }
 
-static REFRESH_GATE: RefreshGate = RefreshGate {
-    in_flight: AtomicBool::new(false),
-    dirty: AtomicBool::new(false),
-};
+impl RefreshGate {
+    fn new() -> Self {
+        Self {
+            in_flight: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
+        }
+    }
+}
 
 /// Spawn (or coalesce into) a background snapshot refresh.
 ///
@@ -227,6 +236,7 @@ static REFRESH_GATE: RefreshGate = RefreshGate {
 /// Multiple kicks during an in-flight refresh collapse to one extra run, so
 /// rapid save bursts produce at most two refreshes total.
 fn kick_async_refresh(
+    gate: &Arc<RefreshGate>,
     read_pool: &Arc<ReadPool>,
     cached_paths: &Arc<ArcSwap<Vec<PathBuf>>>,
     cached_file_count: &Arc<AtomicU64>,
@@ -234,8 +244,8 @@ fn kick_async_refresh(
     cached_refs: &Arc<ArcSwap<Vec<recon_core::symbol::Ref>>>,
     cached_call_graph: &Arc<arc_swap::ArcSwapOption<recon_search::graph::CallGraph>>,
 ) {
-    REFRESH_GATE.dirty.store(true, Ordering::Release);
-    if REFRESH_GATE
+    gate.dirty.store(true, Ordering::Release);
+    if gate
         .in_flight
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -244,6 +254,7 @@ fn kick_async_refresh(
         // and re-run after its current snapshot lands.
         return;
     }
+    let gate = gate.clone();
     let read_pool = read_pool.clone();
     let cached_paths = cached_paths.clone();
     let cached_file_count = cached_file_count.clone();
@@ -254,7 +265,7 @@ fn kick_async_refresh(
         loop {
             // Edge-triggered: clear `dirty` before the snapshot so a kick
             // that arrives mid-snapshot retriggers another iteration.
-            REFRESH_GATE.dirty.store(false, Ordering::Release);
+            gate.dirty.store(false, Ordering::Release);
             match read_pool.snapshot_all_for_caches() {
                 Ok((paths, symbols, refs)) => {
                     cached_file_count.store(paths.len() as u64, Ordering::Relaxed);
@@ -268,11 +279,11 @@ fn kick_async_refresh(
             // Release first, then recheck `dirty`. If a kick arrives in this
             // gap and claims `in_flight` before us, we lose the re-claim and
             // exit — its thread will pick up the work.
-            REFRESH_GATE.in_flight.store(false, Ordering::Release);
-            if !REFRESH_GATE.dirty.load(Ordering::Acquire) {
+            gate.in_flight.store(false, Ordering::Release);
+            if !gate.dirty.load(Ordering::Acquire) {
                 break;
             }
-            if REFRESH_GATE
+            if gate
                 .in_flight
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
@@ -443,6 +454,7 @@ impl ReconServer {
             measured_baseline_cache: Arc::new(dashmap::DashMap::with_capacity(
                 MAX_BASELINE_CACHE_ENTRIES,
             )),
+            refresh_gate: Arc::new(RefreshGate::new()),
             embed_service: Arc::new(parking_lot::RwLock::new(None)),
             vec_read_pool: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             vec_writer: Arc::new(Mutex::new(None)),
@@ -1485,6 +1497,7 @@ impl ReconServer {
         let cached_symbols = self.cached_symbols.clone();
         let cached_refs = self.cached_refs.clone();
         let cached_call_graph = self.cached_call_graph.clone();
+        let refresh_gate = self.refresh_gate.clone();
         let shutdown_flag = self.shutdown_flag.clone();
         let shutdown_notify = self.shutdown_notify.clone();
         // Capture the initial file-id of `.recon/index.db` so we can detect
@@ -1801,6 +1814,7 @@ impl ReconServer {
                         // Kick async refresh; keep serving prev snapshot until it lands.
                         if did_delete {
                             kick_async_refresh(
+                                &refresh_gate,
                                 &read_pool,
                                 &cached_paths,
                                 &cached_file_count,
@@ -1968,6 +1982,7 @@ impl ReconServer {
                     // caches and forced the next read to pay ~350 ms of cold
                     // `all_symbols` + `all_refs` synchronously.
                     kick_async_refresh(
+                        &refresh_gate,
                         &read_pool,
                         &cached_paths,
                         &cached_file_count,

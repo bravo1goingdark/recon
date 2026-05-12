@@ -306,21 +306,14 @@ mod tests {
 
     #[test]
     fn from_env_respects_recon_no_embed() {
-        // SAFETY of env mutation: this is a single-thread #[test] —
-        // the cargo test harness does run tests concurrently but the
-        // env var is read once at function entry, and if another test
-        // sets it concurrently the worst case is a flaky pass/fail
-        // here, not memory unsafety. Set + unset around the assertion
-        // to minimize the race window.
-        // SAFETY: see comment above.
-        unsafe {
-            std::env::set_var("RECON_NO_EMBED", "1");
-        }
+        // Env vars are process-global; serialize access so parallel tests
+        // don't race on the same variable.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        unsafe { std::env::set_var("RECON_NO_EMBED", "1") };
         let svc = HostedEmbedService::from_env();
-        // SAFETY: see comment above.
-        unsafe {
-            std::env::remove_var("RECON_NO_EMBED");
-        }
+        unsafe { std::env::remove_var("RECON_NO_EMBED") };
         assert!(svc.is_none(), "RECON_NO_EMBED=1 must disable hosted embed");
     }
 

@@ -850,6 +850,10 @@ mod tests {
     /// failed closed even with valid credentials.
     #[test]
     fn router_load_initializes_embed_service_when_credentials_present() {
+        // Env vars are process-global; serialize access.
+        static ROUTER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ROUTER_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         make_test_repo(&repo);
@@ -862,10 +866,6 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: env mutation. Cargo runs tests concurrently; the worst
-        // case is a flaky pass for another test that happens to read
-        // `RECON_CONFIG_DIR` mid-run (none currently do). Same pattern as
-        // `recon-embed-client::tests::from_env_respects_recon_no_embed`.
         unsafe {
             std::env::set_var("RECON_CONFIG_DIR", &cred_dir);
             std::env::remove_var("RECON_NO_EMBED");
@@ -880,7 +880,6 @@ mod tests {
         ));
         let server = router.get_or_load(&repo).expect("repo loads");
 
-        // SAFETY: see above.
         unsafe {
             std::env::remove_var("RECON_CONFIG_DIR");
         }

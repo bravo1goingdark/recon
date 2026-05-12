@@ -175,9 +175,16 @@ impl MultiRepoService {
         }
     }
 
-    /// Re-load every repo recorded in the previous session. Repos that
-    /// fail to load (path moved, exceeds current tier, etc.) are warned
-    /// and skipped — startup never blocks on a stale session.
+    /// Re-load every repo recorded in the previous session into the
+    /// router for quick switching. Repos that fail to load (path moved,
+    /// exceeds current tier, etc.) are warned and skipped — startup
+    /// never blocks on a stale session.
+    ///
+    /// The active repo is **never** overridden here — the repo passed
+    /// via `--repo` (or the current directory) at startup is always the
+    /// active one. This method only pre-populates the router so that a
+    /// subsequent `code_activate_repo` call is instant rather than
+    /// paying the cold-index cost.
     ///
     /// Returns the count of repos actually re-loaded.
     pub fn restore_session(&self) -> usize {
@@ -210,13 +217,11 @@ impl MultiRepoService {
                 ),
             }
         }
-        // If the saved active was successfully re-loaded and isn't the
-        // current initial, swap it in.
-        if !session.active.is_empty() && Path::new(&session.active) != initial {
-            if let Ok(server) = self.inner.router.get_or_load(Path::new(&session.active)) {
-                self.inner.active.store(Arc::new(server));
-            }
-        }
+        // NOTE: We intentionally do NOT swap the active repo to the
+        // session's saved active. The --repo flag (or cwd) that the user
+        // passed to `recon serve` is the authoritative active repo for
+        // this session. The saved active is only useful as a hint for
+        // which repos to pre-load (handled above).
         loaded
     }
 }
@@ -485,6 +490,8 @@ fn router_error_response(e: &RouterError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use recon_search::tantivy_backend::TantivyBackend;
+    use recon_storage::store::Store;
 
     #[test]
     fn session_state_round_trips() {
@@ -504,5 +511,51 @@ mod tests {
     fn load_session_returns_none_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_session(dir.path()).unwrap().is_none());
+    }
+
+    /// Regression test: `restore_session` must NOT override the active repo.
+    ///
+    /// Scenario: user ran `recon serve` in repo-A last time (sessions.json
+    /// records repo-A as active). Now they run `recon serve --repo repo-B`.
+    /// After `restore_session()`, the active repo must still be repo-B.
+    #[test]
+    fn restore_session_does_not_override_active_repo() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+
+        // Create a server for the "current" repo (repo_dir).
+        let store = Store::open_memory().unwrap();
+        let tantivy = TantivyBackend::open_memory().unwrap();
+        let server = ReconServer::new(repo_dir.path().to_path_buf(), store, tantivy).unwrap();
+
+        // Seed sessions.json with a DIFFERENT repo as the saved active.
+        let fake_other = "/tmp/nonexistent-repo-xyz-12345";
+        let state = SessionState {
+            version: 1,
+            active: fake_other.into(),
+            loaded: vec![fake_other.into()],
+        };
+        save_session(config_dir.path(), &state).unwrap();
+
+        // Build the multi-repo service with our server as the initial active.
+        let router = Arc::new(crate::router::RepoRouter::new(crate::router::Tier::new(
+            "Pro",
+            crate::router::TierLimits::PRO,
+        )));
+        let svc = MultiRepoService::new(router, server.clone(), config_dir.path().to_path_buf());
+
+        // restore_session will try to load the fake repo (and fail), but
+        // must NOT swap the active pointer away from our initial server.
+        let _ = svc.restore_session();
+
+        let active_root = svc.active().repo_root().to_path_buf();
+        assert_eq!(
+            active_root,
+            repo_dir
+                .path()
+                .canonicalize()
+                .unwrap_or_else(|_| repo_dir.path().to_path_buf()),
+            "restore_session must not override the active repo — the --repo flag wins"
+        );
     }
 }
