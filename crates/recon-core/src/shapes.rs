@@ -2,7 +2,7 @@
 
 use crate::symbol::SymbolKind;
 use compact_str::CompactString;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::path::PathBuf;
 
@@ -53,6 +53,7 @@ pub struct ToolErrorView {
 #[derive(Debug, Clone, Serialize)]
 pub struct OutlineView {
     /// File path.
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     /// Top-level symbol entries.
     pub entries: SmallVec<[OutlineEntry; 4]>,
@@ -81,7 +82,10 @@ pub struct OutlineEntry {
 pub struct SkeletonView {
     /// File path, if scoped to a single file. Omitted from JSON when `None`
     /// (e.g. repo-map output that aggregates many files).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_path"
+    )]
     pub path: Option<PathBuf>,
     /// Skeleton content with bodies replaced by `...`.
     pub content: String,
@@ -99,6 +103,7 @@ pub struct SkeletonView {
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolCardView {
     /// File containing this symbol.
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     /// Fully qualified name.
     pub qualified_name: String,
@@ -168,6 +173,7 @@ pub struct ContextEnvelope {
 #[derive(Debug, Clone, Serialize)]
 pub struct RefEntry {
     /// File path.
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     /// Line number (1-indexed).
     pub line: u32,
@@ -245,6 +251,7 @@ pub struct SymbolHop {
     /// Symbol kind — helps the agent disambiguate fn vs method vs trait.
     pub kind: SymbolKind,
     /// Source file containing the symbol.
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     /// Declaration line (1-indexed).
     pub line: u32,
@@ -266,6 +273,23 @@ pub struct RefTier {
 #[inline]
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn serialize_path<S>(path: &PathBuf, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&path.to_string_lossy().replace('\\', "/"))
+}
+
+fn serialize_optional_path<S>(path: &Option<PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match path {
+        Some(path) => serialize_path(path, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Array of search/listing hits.
@@ -305,6 +329,7 @@ pub struct DiagView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagEntry {
     /// File path.
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     /// Line number (1-indexed).
     pub line: u32,
@@ -357,6 +382,19 @@ mod tests {
         });
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"entries\":[]"));
+    }
+
+    #[test]
+    fn response_paths_serialize_with_forward_slashes() {
+        let view = ToolOutput::Outline(OutlineView {
+            path: PathBuf::from(r"src\math.rs"),
+            entries: SmallVec::new(),
+        });
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            json.contains(r#""path":"src/math.rs""#),
+            "repo-relative paths must be platform-neutral: {json}"
+        );
     }
 
     #[test]
