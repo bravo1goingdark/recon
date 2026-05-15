@@ -184,13 +184,12 @@ fn embed_batch_with_retry(
                 let delay = base_delay * (1 << attempt);
                 // Jitter: 0–50 % of delay, derived from current nanos
                 // so concurrent callers get uncorrelated sleep values.
-                let jitter_frac =
-                    (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .subsec_nanos() as u64
-                        % 500)
-                        / 1000;
+                let jitter_frac = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() as u64
+                    % 500)
+                    / 1000;
                 let jitter = delay.mul_f64(jitter_frac as f64);
                 let sleep = delay + jitter;
                 warn!(

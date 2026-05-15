@@ -967,8 +967,6 @@ mod tests {
             .is_some());
     }
 
-
-
     #[test]
     fn index_repo_incremental_stores_commit() {
         let dir = tempfile::tempdir().unwrap();

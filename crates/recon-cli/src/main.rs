@@ -2579,14 +2579,20 @@ mod tests {
     fn write_mcp_config_kiro_creates_parent_dir() {
         let dir = tempdir().unwrap();
         write_mcp_config(&Ide::Kiro, dir.path(), "/usr/bin/recon").unwrap();
-        assert!(dir.path().join(".kiro").join("settings").join("mcp.json").exists());
+        assert!(dir
+            .path()
+            .join(".kiro")
+            .join("settings")
+            .join("mcp.json")
+            .exists());
     }
 
     #[test]
     fn write_mcp_config_kiro_uses_mcp_servers_key() {
         let dir = tempdir().unwrap();
         write_mcp_config(&Ide::Kiro, dir.path(), "/usr/bin/recon").unwrap();
-        let content = fs::read_to_string(dir.path().join(".kiro").join("settings").join("mcp.json")).unwrap();
+        let content =
+            fs::read_to_string(dir.path().join(".kiro").join("settings").join("mcp.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(v["mcpServers"]["recon"].is_object());
     }
@@ -2640,7 +2646,8 @@ mod tests {
     fn write_mcp_config_cline_uses_mcp_servers_key() {
         let dir = tempdir().unwrap();
         write_mcp_config(&Ide::Cline, dir.path(), "/usr/bin/recon").unwrap();
-        let content = fs::read_to_string(dir.path().join(".cline").join("mcp_settings.json")).unwrap();
+        let content =
+            fs::read_to_string(dir.path().join(".cline").join("mcp_settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(v["mcpServers"]["recon"].is_object());
     }
