@@ -2672,8 +2672,13 @@ mod tests {
 
     // ── write_mcp_config — Codex ──────────────────────────────────────────────
 
+    // Codex tests mutate RECON_CODEX_CONFIG_PATH; serialize them so parallel
+    // runs don't race on the env var.
+    static CODEX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn write_mcp_config_codex_creates_toml() {
+        let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let global = tempdir().unwrap();
         let config_path = global.path().join("config.toml");
         std::env::set_var("RECON_CODEX_CONFIG_PATH", &config_path);
@@ -2689,6 +2694,7 @@ mod tests {
 
     #[test]
     fn write_mcp_config_codex_preserves_existing() {
+        let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let global = tempdir().unwrap();
         let config_path = global.path().join("config.toml");
         fs::write(&config_path, "[mcp_servers.github]\ncommand = \"gh-mcp\"\n").unwrap();
