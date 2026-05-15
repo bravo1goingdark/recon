@@ -1493,8 +1493,9 @@ async fn main() -> Result<()> {
                     .into_iter()
                     .filter(|p| {
                         recon_config.allow_sensitive
-                            || !recon_core::redact::is_blocked_path(
+                            || !recon_core::redact::is_blocked_path_in_repo(
                                 p.strip_prefix(&repo).unwrap_or(p),
+                                &repo,
                             )
                     })
                     .collect();

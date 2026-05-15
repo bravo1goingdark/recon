@@ -141,6 +141,32 @@ pub fn is_blocked_path(path: &Path) -> bool {
     false
 }
 
+/// Check a repo-relative path against the blocked-path policy using the
+/// resolved target when possible.
+///
+/// This closes the symlink alias bypass: a path like `safe.rs` that
+/// canonicalizes to `.env` must be treated as blocked even though the
+/// raw path name is innocuous.
+pub fn is_blocked_path_in_repo(path: &Path, repo_root: &Path) -> bool {
+    if is_blocked_path(path) {
+        return true;
+    }
+
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    };
+
+    match abs.canonicalize() {
+        Ok(canonical) => canonical
+            .strip_prefix(repo_root)
+            .ok()
+            .is_some_and(is_blocked_path),
+        Err(_) => false,
+    }
+}
+
 /// Redact secrets from a string, returning the redacted version.
 /// Returns None if no redaction was needed.
 ///
@@ -277,6 +303,20 @@ mod tests {
         // Negative controls: similarly-shaped paths with no sensitive component.
         assert!(!is_blocked_path(Path::new("vault/notes/leaf.json")));
         assert!(!is_blocked_path(Path::new("docs/key-rotation/runbook.md")));
+    }
+
+    #[test]
+    fn symlink_alias_to_sensitive_target_is_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "SECRET=1").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".env", root.join("safe.rs")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(".env", root.join("safe.rs")).unwrap();
+
+        assert!(is_blocked_path_in_repo(Path::new("safe.rs"), root));
     }
 
     #[test]

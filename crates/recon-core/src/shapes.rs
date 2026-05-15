@@ -4,7 +4,7 @@ use crate::symbol::SymbolKind;
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Every tool returns exactly one of these shapes.
 #[derive(Debug, Clone, Serialize)]
@@ -275,7 +275,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-fn serialize_path<S>(path: &PathBuf, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -287,7 +287,7 @@ where
     S: Serializer,
 {
     match path {
-        Some(path) => serialize_path(path, serializer),
+        Some(path) => serialize_path(path.as_path(), serializer),
         None => serializer.serialize_none(),
     }
 }

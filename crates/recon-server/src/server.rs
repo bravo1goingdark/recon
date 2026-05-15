@@ -1897,8 +1897,9 @@ impl ReconServer {
                         .into_iter()
                         .filter_map(|path| {
                             if !allow_sensitive
-                                && recon_core::redact::is_blocked_path(
+                                && recon_core::redact::is_blocked_path_in_repo(
                                     path.strip_prefix(&repo_root).unwrap_or(&path),
+                                    &repo_root,
                                 )
                             {
                                 return None;
@@ -2223,7 +2224,9 @@ impl ReconServer {
     /// Returns `Err((code, message))` so callers can forward the exact
     /// `ReconErrorCode` into their `tool_error` response.
     fn resolve_path(&self, rel: &str) -> Result<ResolvedPath, (ReconErrorCode, String)> {
-        if !self.config.allow_sensitive && redact::is_blocked_path(std::path::Path::new(rel)) {
+        if !self.config.allow_sensitive
+            && redact::is_blocked_path_in_repo(std::path::Path::new(rel), &self.repo_root)
+        {
             return Err((
                 ReconErrorCode::PermissionDenied,
                 format!("access denied: sensitive file: {rel}"),
@@ -2270,7 +2273,7 @@ impl ReconServer {
                     Ok(pf) => pf,
                     Err(e) => {
                         warn!("filter parse error: {e}");
-                        return rel_paths.iter().map(|p| self.repo_root.join(p)).collect();
+                        return Vec::new();
                     }
                 };
                 if pf.git_modified_only {
@@ -3882,12 +3885,12 @@ impl ReconServer {
             let summaries = self.read_pool.file_symbol_summaries().unwrap_or_default();
 
             // Apply filters in memory
-            let filter_parsed = params
-                .0
-                .filter
-                .as_deref()
-                .filter(|f| !f.is_empty())
-                .and_then(|f| filters::parse_filter(f).ok());
+            let filter_input = params.0.filter.as_deref().filter(|f| !f.is_empty());
+            let filter_parsed = filter_input.and_then(|f| filters::parse_filter(f).ok());
+            if filter_input.is_some() && filter_parsed.is_none() {
+                warn!("filter parse error in code_list; returning no rows");
+                return (self.hits_response("file", Vec::new(), usize::MAX), Some(0));
+            }
 
             // Resolve git-modified paths if needed (for code_list paths are relative)
             let git_paths = filter_parsed.as_ref().and_then(|pf| {
@@ -4237,8 +4240,9 @@ impl ReconServer {
                             .into_iter()
                             .filter(|p| {
                                 index_options.allow_sensitive
-                                    || !recon_core::redact::is_blocked_path(
+                                    || !recon_core::redact::is_blocked_path_in_repo(
                                         p.strip_prefix(&repo_root).unwrap_or(p),
+                                        &repo_root,
                                     )
                             })
                             .collect();

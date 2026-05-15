@@ -53,7 +53,7 @@ impl Default for IndexOptions {
 
 fn is_sensitive_path(path: &Path, repo_root: &Path) -> bool {
     let rel = path.strip_prefix(repo_root).unwrap_or(path);
-    redact::is_blocked_path(rel)
+    redact::is_blocked_path_in_repo(rel, repo_root)
 }
 
 /// Resolve the merkle snapshot path for a given repo root.
@@ -966,6 +966,8 @@ mod tests {
             .unwrap()
             .is_some());
     }
+
+
 
     #[test]
     fn index_repo_incremental_stores_commit() {
