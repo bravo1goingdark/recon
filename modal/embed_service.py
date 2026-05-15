@@ -58,6 +58,7 @@ app = modal.App("recon-embed")
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install_from_requirements("requirements.txt")
+    .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
 )
 
 # Deferred imports: only available inside the Modal container, not on
@@ -166,9 +167,13 @@ class EmbedService:
                     status_code=400,
                 )
 
+        # Clear fragmented VRAM from previous requests to avoid OOM
+        import torch
+        torch.cuda.empty_cache()
+
         vectors: List[List[float]] = self.model.encode(
             texts,
-            batch_size=64,
+            batch_size=8,
             normalize_embeddings=True,   # so cosine ~= dot product downstream
             convert_to_tensor=False,     # plain Python lists in the JSON
             show_progress_bar=False,

@@ -49,6 +49,24 @@ enum Ide {
     /// Windsurf — writes `.windsurf/mcp.json`
     #[value(name = "windsurf")]
     Windsurf,
+    /// Kiro — writes `.kiro/settings/mcp.json`
+    #[value(name = "kiro")]
+    Kiro,
+    /// Zed — writes `.zed/mcp.json`
+    #[value(name = "zed")]
+    Zed,
+    /// VS Code (Copilot MCP) — writes `.vscode/mcp.json`
+    #[value(name = "vscode")]
+    VsCode,
+    /// Cline — writes `.cline/mcp_settings.json`
+    #[value(name = "cline")]
+    Cline,
+    /// Roo Code — writes `.roo/mcp.json`
+    #[value(name = "roo")]
+    Roo,
+    /// OpenAI Codex — writes `~/.codex/config.toml`
+    #[value(name = "codex")]
+    Codex,
 }
 
 impl Ide {
@@ -62,6 +80,12 @@ impl Ide {
             Ide::OpenCode => repo.join("opencode.jsonc"),
             Ide::Cursor => repo.join(".cursor").join("mcp.json"),
             Ide::Windsurf => windsurf_global_config(),
+            Ide::Kiro => repo.join(".kiro").join("settings").join("mcp.json"),
+            Ide::Zed => repo.join(".zed").join("mcp.json"),
+            Ide::VsCode => repo.join(".vscode").join("mcp.json"),
+            Ide::Cline => repo.join(".cline").join("mcp_settings.json"),
+            Ide::Roo => repo.join(".roo").join("mcp.json"),
+            Ide::Codex => codex_global_config(),
         }
     }
 
@@ -81,7 +105,7 @@ impl Ide {
                 "type": "local",
                 "command": [recon_bin, "--repo", repo.to_string_lossy().as_ref(), "serve"]
             }),
-            // Claude Code, Cursor, Windsurf: command string + args array.
+            // All others: command string + args array.
             _ => serde_json::json!({
                 "command": recon_bin,
                 "args": ["--repo", repo.to_string_lossy().as_ref(), "serve"]
@@ -128,6 +152,30 @@ impl Ide {
                 path: repo.join(".windsurf").join("rules").join("recon.md"),
                 body: WINDSURF_MD.to_string(),
             },
+            Ide::Kiro => AgentTarget::Shared {
+                path: repo.join("AGENTS.md"),
+                create_if_missing: true,
+            },
+            Ide::Zed => AgentTarget::Dedicated {
+                path: repo.join(".zed").join("rules").join("recon.md"),
+                body: WINDSURF_MD.to_string(),
+            },
+            Ide::VsCode => AgentTarget::Dedicated {
+                path: repo.join(".vscode").join("rules").join("recon.md"),
+                body: WINDSURF_MD.to_string(),
+            },
+            Ide::Cline => AgentTarget::Dedicated {
+                path: repo.join(".cline").join("rules").join("recon.md"),
+                body: WINDSURF_MD.to_string(),
+            },
+            Ide::Roo => AgentTarget::Dedicated {
+                path: repo.join(".roo").join("rules").join("recon.md"),
+                body: WINDSURF_MD.to_string(),
+            },
+            Ide::Codex => AgentTarget::Shared {
+                path: repo.join("AGENTS.md"),
+                create_if_missing: true,
+            },
         }
     }
 }
@@ -158,6 +206,21 @@ fn windsurf_global_config() -> PathBuf {
         .join(".codeium")
         .join("windsurf")
         .join("mcp_config.json")
+}
+
+/// Returns the Codex global config path.
+///
+/// - All platforms: `~/.codex/config.toml`
+///
+/// Override with `RECON_CODEX_CONFIG_PATH` for tests and CI.
+fn codex_global_config() -> PathBuf {
+    if let Ok(p) = std::env::var("RECON_CODEX_CONFIG_PATH") {
+        return PathBuf::from(p);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+        .join("config.toml")
 }
 
 #[derive(Subcommand)]
@@ -918,6 +981,10 @@ fn remove_mcp_entry(ide: &Ide, repo: &Path) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
+    // Codex uses TOML, not JSON.
+    if matches!(ide, Ide::Codex) {
+        return remove_codex_toml_entry(&config_path);
+    }
     let content = std::fs::read_to_string(&config_path)?;
     let mut value: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
@@ -951,6 +1018,11 @@ fn write_mcp_config(ide: &Ide, repo: &Path, recon_bin: &str) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
+    // Codex uses TOML, not JSON.
+    if matches!(ide, Ide::Codex) {
+        return write_codex_toml_config(&config_path, repo, recon_bin);
+    }
+
     let servers_key = ide.servers_key();
     let server_entry = ide.server_entry(repo, recon_bin);
 
@@ -975,6 +1047,81 @@ fn write_mcp_config(ide: &Ide, repo: &Path, recon_bin: &str) -> Result<()> {
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&merged)?)?;
     eprintln!("Wrote {}", config_path.display());
+    Ok(())
+}
+
+/// Write the `[mcp_servers.recon]` section into Codex's TOML config.
+/// Preserves existing content by appending/replacing the recon block.
+fn write_codex_toml_config(config_path: &Path, repo: &Path, recon_bin: &str) -> Result<()> {
+    let block = format!(
+        "\n[mcp_servers.recon]\ncommand = \"{}\"\nargs = [\"--repo\", \"{}\", \"serve\"]\nenabled = true\n",
+        recon_bin.replace('\\', "\\\\").replace('"', "\\\""),
+        repo.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\""),
+    );
+
+    let content = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        String::new()
+    };
+
+    // Replace existing [mcp_servers.recon] block or append.
+    if content.contains("[mcp_servers.recon]") {
+        // Remove old block: from [mcp_servers.recon] to next [section] or EOF.
+        let mut result = String::new();
+        let mut skip = false;
+        for line in content.lines() {
+            if line.trim() == "[mcp_servers.recon]" {
+                skip = true;
+                continue;
+            }
+            if skip && line.starts_with('[') {
+                skip = false;
+            }
+            if !skip {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        result.push_str(&block);
+        std::fs::write(config_path, result)?;
+    } else {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(config_path)?;
+        std::io::Write::write_all(&mut f, block.as_bytes())?;
+    }
+    eprintln!("Wrote {}", config_path.display());
+    Ok(())
+}
+
+/// Remove the `[mcp_servers.recon]` block from Codex's TOML config.
+fn remove_codex_toml_entry(config_path: &Path) -> Result<()> {
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(config_path)?;
+    if !content.contains("[mcp_servers.recon]") {
+        return Ok(());
+    }
+    let mut result = String::new();
+    let mut skip = false;
+    for line in content.lines() {
+        if line.trim() == "[mcp_servers.recon]" {
+            skip = true;
+            continue;
+        }
+        if skip && line.starts_with('[') {
+            skip = false;
+        }
+        if !skip {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    std::fs::write(config_path, result)?;
+    eprintln!("Removed recon entry from {}", config_path.display());
     Ok(())
 }
 
@@ -2168,6 +2315,12 @@ mod tests {
             Ide::OpenCode.config_abs_path(repo.path()),
             Ide::Cursor.config_abs_path(repo.path()),
             Ide::Windsurf.config_abs_path(repo.path()),
+            Ide::Kiro.config_abs_path(repo.path()),
+            Ide::Zed.config_abs_path(repo.path()),
+            Ide::VsCode.config_abs_path(repo.path()),
+            Ide::Cline.config_abs_path(repo.path()),
+            Ide::Roo.config_abs_path(repo.path()),
+            Ide::Codex.config_abs_path(repo.path()),
         ];
         std::env::remove_var("RECON_WINDSURF_CONFIG_PATH");
         let mut seen = std::collections::HashSet::new();
@@ -2416,6 +2569,129 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(v["mcpServers"]["github"].is_object());
         assert!(v["mcpServers"]["recon"].is_object());
+    }
+
+    // ── maybe_migrate_license ─────────────────────────────────────────────────
+
+    // ── write_mcp_config — Kiro ───────────────────────────────────────────────
+
+    #[test]
+    fn write_mcp_config_kiro_creates_parent_dir() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::Kiro, dir.path(), "/usr/bin/recon").unwrap();
+        assert!(dir.path().join(".kiro").join("settings").join("mcp.json").exists());
+    }
+
+    #[test]
+    fn write_mcp_config_kiro_uses_mcp_servers_key() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::Kiro, dir.path(), "/usr/bin/recon").unwrap();
+        let content = fs::read_to_string(dir.path().join(".kiro").join("settings").join("mcp.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(v["mcpServers"]["recon"].is_object());
+    }
+
+    // ── write_mcp_config — Zed ────────────────────────────────────────────────
+
+    #[test]
+    fn write_mcp_config_zed_creates_parent_dir() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::Zed, dir.path(), "/usr/bin/recon").unwrap();
+        assert!(dir.path().join(".zed").join("mcp.json").exists());
+    }
+
+    #[test]
+    fn write_mcp_config_zed_uses_mcp_servers_key() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::Zed, dir.path(), "/usr/bin/recon").unwrap();
+        let content = fs::read_to_string(dir.path().join(".zed").join("mcp.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(v["mcpServers"]["recon"].is_object());
+    }
+
+    // ── write_mcp_config — VS Code ────────────────────────────────────────────
+
+    #[test]
+    fn write_mcp_config_vscode_creates_parent_dir() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::VsCode, dir.path(), "/usr/bin/recon").unwrap();
+        assert!(dir.path().join(".vscode").join("mcp.json").exists());
+    }
+
+    #[test]
+    fn write_mcp_config_vscode_uses_mcp_servers_key() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::VsCode, dir.path(), "/usr/bin/recon").unwrap();
+        let content = fs::read_to_string(dir.path().join(".vscode").join("mcp.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(v["mcpServers"]["recon"].is_object());
+    }
+
+    // ── write_mcp_config — Cline ──────────────────────────────────────────────
+
+    #[test]
+    fn write_mcp_config_cline_creates_parent_dir() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::Cline, dir.path(), "/usr/bin/recon").unwrap();
+        assert!(dir.path().join(".cline").join("mcp_settings.json").exists());
+    }
+
+    #[test]
+    fn write_mcp_config_cline_uses_mcp_servers_key() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::Cline, dir.path(), "/usr/bin/recon").unwrap();
+        let content = fs::read_to_string(dir.path().join(".cline").join("mcp_settings.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(v["mcpServers"]["recon"].is_object());
+    }
+
+    // ── write_mcp_config — Roo ────────────────────────────────────────────────
+
+    #[test]
+    fn write_mcp_config_roo_creates_parent_dir() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::Roo, dir.path(), "/usr/bin/recon").unwrap();
+        assert!(dir.path().join(".roo").join("mcp.json").exists());
+    }
+
+    #[test]
+    fn write_mcp_config_roo_uses_mcp_servers_key() {
+        let dir = tempdir().unwrap();
+        write_mcp_config(&Ide::Roo, dir.path(), "/usr/bin/recon").unwrap();
+        let content = fs::read_to_string(dir.path().join(".roo").join("mcp.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(v["mcpServers"]["recon"].is_object());
+    }
+
+    // ── write_mcp_config — Codex ──────────────────────────────────────────────
+
+    #[test]
+    fn write_mcp_config_codex_creates_toml() {
+        let global = tempdir().unwrap();
+        let config_path = global.path().join("config.toml");
+        std::env::set_var("RECON_CODEX_CONFIG_PATH", &config_path);
+        let repo = tempdir().unwrap();
+        write_mcp_config(&Ide::Codex, repo.path(), "/usr/bin/recon").unwrap();
+        std::env::remove_var("RECON_CODEX_CONFIG_PATH");
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("[mcp_servers.recon]"));
+        assert!(content.contains("command = \"/usr/bin/recon\""));
+        assert!(content.contains("serve"));
+        assert!(content.contains("enabled = true"));
+    }
+
+    #[test]
+    fn write_mcp_config_codex_preserves_existing() {
+        let global = tempdir().unwrap();
+        let config_path = global.path().join("config.toml");
+        fs::write(&config_path, "[mcp_servers.github]\ncommand = \"gh-mcp\"\n").unwrap();
+        std::env::set_var("RECON_CODEX_CONFIG_PATH", &config_path);
+        let repo = tempdir().unwrap();
+        write_mcp_config(&Ide::Codex, repo.path(), "/usr/bin/recon").unwrap();
+        std::env::remove_var("RECON_CODEX_CONFIG_PATH");
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("[mcp_servers.github]"));
+        assert!(content.contains("[mcp_servers.recon]"));
     }
 
     // ── maybe_migrate_license ─────────────────────────────────────────────────

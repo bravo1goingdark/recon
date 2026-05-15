@@ -161,6 +161,51 @@ fn text_hit_json(
     serde_json::Value::Object(map)
 }
 
+/// Retry `embed_batch` with exponential backoff + jitter.
+///
+/// Transient failures (Modal cold-start, 503, network blip) get up to
+/// `max_retries` attempts. Each attempt sleeps `base_delay * 2^attempt`
+/// plus 0–50 % jitter derived from the current timestamp, so concurrent
+/// servers don't thunder-herd.
+fn embed_batch_with_retry(
+    svc: &dyn recon_core::embed::EmbedService,
+    texts: Vec<String>,
+    max_retries: u32,
+    base_delay: std::time::Duration,
+) -> Result<Vec<Vec<f32>>, recon_core::error::Error> {
+    let mut attempt = 0u32;
+    loop {
+        match svc.embed_batch(texts.clone()) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt >= max_retries {
+                    return Err(e);
+                }
+                let delay = base_delay * (1 << attempt);
+                // Jitter: 0–50 % of delay, derived from current nanos
+                // so concurrent callers get uncorrelated sleep values.
+                let jitter_frac =
+                    (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .subsec_nanos() as u64
+                        % 500)
+                        / 1000;
+                let jitter = delay.mul_f64(jitter_frac as f64);
+                let sleep = delay + jitter;
+                warn!(
+                    attempt,
+                    max_retries,
+                    delay_ms = sleep.as_millis(),
+                    "embed_batch failed, retrying: {e}"
+                );
+                std::thread::sleep(sleep);
+                attempt += 1;
+            }
+        }
+    }
+}
+
 struct ResolvedPath {
     abs: PathBuf,
     rel: PathBuf,
@@ -1739,10 +1784,15 @@ impl ReconServer {
                                             .iter()
                                             .map(|(_, text)| text.clone())
                                             .collect();
-                                        let vecs = match svc.embed_batch(texts) {
+                                        let vecs = match embed_batch_with_retry(
+                                            svc.as_ref(),
+                                            texts,
+                                            3,
+                                            std::time::Duration::from_secs(2),
+                                        ) {
                                             Ok(v) => v,
                                             Err(e) => {
-                                                warn!("embed catch-up: embed_batch: {e}");
+                                                warn!("embed catch-up: embed_batch (after retries): {e}");
                                                 continue;
                                             }
                                         };
@@ -2074,10 +2124,15 @@ impl ReconServer {
 
                                     // Channel send (local) or HTTP round-trip (hosted) —
                                     // no lock either way; the trait abstracts both.
-                                    let vecs = match svc.embed_batch(texts) {
+                                    let vecs = match embed_batch_with_retry(
+                                        svc.as_ref(),
+                                        texts,
+                                        3,
+                                        std::time::Duration::from_secs(2),
+                                    ) {
                                         Ok(v) => v,
                                         Err(e) => {
-                                            warn!("embed: embed_batch: {e}");
+                                            warn!("embed: embed_batch (after retries): {e}");
                                             continue;
                                         }
                                     };

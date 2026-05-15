@@ -225,7 +225,7 @@
       justify-content:center;color:var(--ink-3);transition:border-color .15s,color .15s;
       font-size:14px;
     "><span id="theme-icon">◑</span></button>
-    <div class="ship">v0.3.2 · <span>shipping</span></div>
+    <div class="ship">v0.5.6 · <span>shipping</span></div>
     <button class="nav-burger" id="nav-burger" aria-label="Open menu" aria-controls="nav-sheet" aria-expanded="false">
       <span class="bars"><span></span></span>
     </button>
@@ -317,7 +317,7 @@ recon login <span class="h">sk-recon-your-key</span>
 cd your-project
 recon init --mcp <span class="h">cc</span>        <span class="c"># Claude Code</span></pre>
 
-    <p>Restart your IDE. The 12 <code>code_*</code> tools are now available. <code>recon serve</code> is auto-spawned over stdio — you never run it by hand.</p>
+    <p>Restart your IDE. The 18 <code>code_*</code> tools are now available. <code>recon serve</code> is auto-spawned over stdio — you never run it by hand.</p>
 
     <div class="callout">
       <div class="tag">Verify</div>
@@ -336,7 +336,7 @@ curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 iwr https://mcprecon.pages.dev/install.ps1 | iex
 
 <span class="c"># pin a specific version</span>
-VERSION=v0.3.2 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+VERSION=v0.5.6 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
 <span class="c"># upgrade in place (lands the latest published release)</span>
 recon update</pre>
@@ -476,10 +476,10 @@ Released server-side repo slot</pre>
     <h3 id="cmd-doctor"><code>recon doctor [--json]</code></h3>
     <p>Run a battery of probes covering every surface a stuck install can fail on. Exit code is 1 if anything's broken — wire it into CI to catch regressions.</p>
 <pre>$ recon doctor
-recon doctor — 0.3.2 (x86_64-unknown-linux-gnu)
+recon doctor — 0.5.6 (x86_64-unknown-linux-gnu)
 repo: /home/me/proj
 
-[OK]    binary                        recon 0.3.2 (x86_64-unknown-linux-gnu)
+[OK]    binary                        recon 0.5.6 (x86_64-unknown-linux-gnu)
 [OK]    repo dir                      /home/me/proj writable
 [OK]    global config                 /home/me/.config/recon writable
 [OK]    license                       Pro (expires unix=1798761600)
@@ -499,13 +499,13 @@ Summary: 9 ok, 3 warn, 0 fail</pre>
     <h3 id="cmd-update"><code>recon update [--check] [--force]</code></h3>
     <p>Self-upgrade to the latest published release. Verifies the SHA-256 manifest and (with cosign present) the sigstore signature before swapping the binary.</p>
 <pre>$ recon update --check
-Latest: v0.3.2  (you're on v0.3.1)
+Latest: v0.5.6  (you're on v0.5.5)
 
 $ recon update
 Downloading recon-x86_64-unknown-linux-gnu.tar.gz...
 Verifying signature... OK
 Replacing /usr/local/bin/recon... OK
-Now on v0.3.2.</pre>
+Now on v0.5.6.</pre>
 
     <h3 id="cmd-version"><code>recon version</code></h3>
     <p>Print the binary's semver tag. Identical to <code>recon --version</code>; provided for shell scripts that want a stable subcommand.</p>
@@ -711,6 +711,198 @@ $ recon query code_context '{"symbol":"render_map","token_budget":2000}'</pre>
 
     <p>The <span class="badge">measured</span> badge marks tools whose token-savings are computed per-call against the in-process Read/grep equivalent. Tools without the badge use conservative static estimates (the 6 graph/ranking tools have no clean grep alternative, so a measured baseline would be synthetic). Both categories feed the same daily rollups on <code>recon savings push</code> and the dashboard.</p>
 
+    <h3 id="tool-params">Tool parameter reference</h3>
+
+    <p>Every tool accepts a JSON object. Required parameters are marked <b>✓</b>.</p>
+
+    <h3><code>code_outline</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>path</code></td><td>string</td><td>✓</td><td>File path relative to repo root</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_skeleton</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>path</code></td><td>string</td><td>✓</td><td>—</td><td>File path relative to repo root</td></tr>
+        <tr><td><code>depth</code></td><td>u32</td><td></td><td>2</td><td>Nesting depth to show</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_read_symbol</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>path</code></td><td>string</td><td>✓</td><td>File path relative to repo root</td></tr>
+        <tr><td><code>symbol_or_line</code></td><td>string</td><td>✓</td><td>Symbol name or line number</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_find_symbol</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>string</td><td>✓</td><td>Symbol name (fuzzy matching)</td></tr>
+        <tr><td><code>kind</code></td><td>string</td><td></td><td>Filter by kind: fn, struct, class, trait, enum, method</td></tr>
+        <tr><td><code>lang</code></td><td>string</td><td></td><td>Filter by language</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_find_refs</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>symbol</code></td><td>string</td><td>✓</td><td>Symbol name or qualified name</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_search</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>query</code></td><td>string</td><td>✓</td><td>—</td><td>Search query</td></tr>
+        <tr><td><code>mode</code></td><td>string</td><td></td><td>exact</td><td>exact, regex, hybrid, or semantic</td></tr>
+        <tr><td><code>filter</code></td><td>string</td><td></td><td>—</td><td>Filter DSL expression</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_list</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>glob</code></td><td>string</td><td></td><td>Glob pattern to filter files</td></tr>
+        <tr><td><code>lang</code></td><td>string</td><td></td><td>Language filter</td></tr>
+        <tr><td><code>filter</code></td><td>string</td><td></td><td>Filter DSL expression</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_repo_map</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>focus_files</code></td><td>string[]</td><td></td><td>—</td><td>Files to boost in the ranking</td></tr>
+        <tr><td><code>token_budget</code></td><td>usize</td><td></td><td>2000</td><td>Max tokens for the output</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_find_strings</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>pattern</code></td><td>string</td><td>✓</td><td>—</td><td>Pattern to search in string literals/comments</td></tr>
+        <tr><td><code>kind</code></td><td>string</td><td></td><td>both</td><td>literal, comment, or both</td></tr>
+        <tr><td><code>filter</code></td><td>string</td><td></td><td>—</td><td>Filter DSL expression</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_multi_find</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>patterns</code></td><td>string[]</td><td>✓</td><td>Multiple patterns to search simultaneously</td></tr>
+        <tr><td><code>filter</code></td><td>string</td><td></td><td>Filter DSL expression</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_reindex</code></h3>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>force</code></td><td>bool</td><td></td><td>false</td><td>Force full re-index even if hashes match</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_path</code></h3>
+    <p>Shortest call-graph path from <code>src</code> to <code>dst</code>. Bidirectional BFS over the cached reference graph; total-visit cap 50,000 nodes. Replaces chained <code>code_find_refs</code> calls.</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>src</code></td><td>string</td><td>✓</td><td>—</td><td>Source symbol (bare or fully qualified)</td></tr>
+        <tr><td><code>dst</code></td><td>string</td><td>✓</td><td>—</td><td>Destination symbol (bare or fully qualified)</td></tr>
+        <tr><td><code>max_hops</code></td><td>u32</td><td></td><td>8</td><td>Maximum hops to explore (hard cap 16)</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_callers</code></h3>
+    <p>Transitive callers up to <code>depth</code> rings. Cycle-safe; per-tier fan-out capped at 50; total-visit cap 50,000. Each symbol emitted at its minimum depth only.</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>symbol</code></td><td>string</td><td>✓</td><td>—</td><td>Symbol name (bare or fully qualified)</td></tr>
+        <tr><td><code>depth</code></td><td>u32</td><td></td><td>1</td><td>Depth rings to explore (hard cap 6)</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_callees</code></h3>
+    <p>Transitive callees — what does this symbol call? Mirror of <code>code_callers</code>. Same caps and cycle safety.</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>symbol</code></td><td>string</td><td>✓</td><td>—</td><td>Symbol name (bare or fully qualified)</td></tr>
+        <tr><td><code>depth</code></td><td>u32</td><td></td><td>1</td><td>Depth rings to explore (hard cap 6)</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_context</code></h3>
+    <p>One-shot bundle: signature + body + callers + callees + types + tests. Replaces the canonical 4-call understand-X loop. Drops sections under token pressure in order: tests → callees → types → callers.</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>symbol</code></td><td>string</td><td>✓</td><td>—</td><td>Symbol name — bare, qualified, or fuzzy</td></tr>
+        <tr><td><code>token_budget</code></td><td>usize</td><td></td><td>2000</td><td>Token budget for the bundled response</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_impact</code></h3>
+    <p>Blast radius — transitive callers plus tests that exercise the symbol. Use to answer "what might break if I change X?"</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>symbol</code></td><td>string</td><td>✓</td><td>—</td><td>Symbol name (bare or fully qualified)</td></tr>
+        <tr><td><code>depth</code></td><td>u32</td><td></td><td>4</td><td>Maximum tier depth (hard cap 6)</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_subsystems</code></h3>
+    <p>List the natural subsystems of the repo — weakly-connected components of the reference graph. Sorted by symbol count descending.</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>limit</code></td><td>usize</td><td></td><td>50</td><td>Maximum subsystems to return</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_subsystem</code></h3>
+    <p>Drill into one subsystem (by id from <code>code_subsystems</code>). Returns a skeleton of all symbols in the component.</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>u32</td><td>✓</td><td>—</td><td>Subsystem id from <code>code_subsystems</code></td></tr>
+        <tr><td><code>token_budget</code></td><td>usize</td><td></td><td>1500</td><td>Token budget for the subsystem skeleton</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_activate_repo</code></h3>
+    <p>Switch the active repository for subsequent tool calls. Tier-limit aware; persists across restarts. Use in multi-repo setups.</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>path</code></td><td>string</td><td>✓</td><td>Absolute path to the repo to activate</td></tr>
+      </tbody>
+    </table>
+
+    <h3><code>code_list_repos</code></h3>
+    <p>List loaded repos with file count, symbol count, and active flag. Pairs with <code>code_activate_repo</code>.</p>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td colspan="4"><em>No parameters</em></td></tr>
+      </tbody>
+    </table>
+
     <!-- FILTER DSL -->
     <h2 id="filter-dsl"><span class="no">09</span>Filter DSL</h2>
 
@@ -724,12 +916,24 @@ $ recon query code_context '{"symbol":"render_map","token_budget":2000}'</pre>
         <tr><td><code>status:modified</code></td><td>git status flag</td><td><code>status:modified</code> or <code>status:staged</code></td></tr>
         <tr><td><code>!test</code></td><td>negative path-substring</td><td><code>!test</code> — excludes paths containing "test"</td></tr>
         <tr><td><code>/src/</code></td><td>positive path-segment</td><td><code>/crates/recon-server/</code></td></tr>
+        <tr><td><code>size:&gt;1mb</code> / <code>size:&lt;10kb</code></td><td>file size comparison</td><td><code>size:&gt;100kb</code> — files larger than 100 KB</td></tr>
+        <tr><td><code>mtime:&lt;2d</code> / <code>mtime:&gt;1w</code></td><td>modification time recency</td><td><code>mtime:&lt;1d</code> — modified in the last day</td></tr>
       </tbody>
     </table>
 
     <p>Terms compose with whitespace (logical AND):</p>
 <pre>recon search "TODO" --filter "<span class="h">*.rs status:modified !test</span>"
-<span class="c"># → TODOs in modified Rust files outside test/ paths</span></pre>
+<span class="c"># → TODOs in modified Rust files outside test/ paths</span>
+
+recon ls --filter "<span class="h">size:&gt;50kb mtime:&lt;7d type:rust</span>"
+<span class="c"># → large Rust files modified in the last week</span></pre>
+
+    <p><b>Size units:</b> <code>b</code>, <code>kb</code>, <code>mb</code>, <code>gb</code> (case-insensitive). <b>Time units:</b> <code>s</code> (seconds), <code>m</code> (minutes), <code>h</code> (hours), <code>d</code> (days), <code>w</code> (weeks).</p>
+
+    <div class="callout">
+      <div class="tag">Fail-closed</div>
+      <p>If the filter string fails to parse, tools return <b>zero results</b> rather than ignoring the filter. This prevents accidental data leakage from a typo in the filter expression.</p>
+    </div>
 
     <!-- CONFIGURATION -->
     <h2 id="configuration"><span class="no">10</span>Configuration</h2>
@@ -741,8 +945,17 @@ $ recon query code_context '{"symbol":"render_map","token_budget":2000}'</pre>
 <span class="c"># Additional ignore patterns (on top of .gitignore)</span>
 ignore_patterns = [<span class="h">"*.generated.*"</span>, <span class="h">"dist/"</span>]
 
-<span class="c"># Max file size to index (default 2 MB)</span>
-max_file_size = <span class="h">2097152</span>
+<span class="c"># Max file size to index (default 1 MB)</span>
+max_file_size = <span class="h">1048576</span>
+
+<span class="c"># Max file size for embedding pipeline (default 100 KB)</span>
+max_embed_size = <span class="h">102400</span>
+
+<span class="c"># File watcher debounce interval in ms (default 250)</span>
+watcher_debounce_ms = <span class="h">250</span>
+
+<span class="c"># Tantivy writer heap size (default 50 MB)</span>
+tantivy_heap_bytes = <span class="h">50000000</span>
 
 <span class="c"># Max search results per tool call (default 30)</span>
 max_search_results = <span class="h">30</span>
@@ -754,6 +967,27 @@ default_map_budget = <span class="h">2000</span>
 redact_secrets = <span class="h">true</span>
 allow_sensitive = <span class="h">false</span></pre>
 
+    <h3>All options</h3>
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>ignore_patterns</code></td><td>string[]</td><td><code>[]</code></td><td>Additional path patterns to ignore (on top of .gitignore)</td></tr>
+        <tr><td><code>max_file_size</code></td><td>u64</td><td><code>1048576</code></td><td>Maximum file size to index (bytes)</td></tr>
+        <tr><td><code>max_embed_size</code></td><td>u64</td><td><code>102400</code></td><td>Maximum file size for embedding pipeline (bytes)</td></tr>
+        <tr><td><code>watcher_debounce_ms</code></td><td>u64</td><td><code>250</code></td><td>File watcher debounce interval (ms)</td></tr>
+        <tr><td><code>tantivy_heap_bytes</code></td><td>usize</td><td><code>50000000</code></td><td>Tantivy writer heap size (bytes)</td></tr>
+        <tr><td><code>max_search_results</code></td><td>usize</td><td><code>30</code></td><td>Maximum results per search tool call</td></tr>
+        <tr><td><code>default_map_budget</code></td><td>usize</td><td><code>2000</code></td><td>Default token budget for <code>code_repo_map</code></td></tr>
+        <tr><td><code>redact_secrets</code></td><td>bool</td><td><code>true</code></td><td>Scan tool responses for secrets and redact them</td></tr>
+        <tr><td><code>allow_sensitive</code></td><td>bool</td><td><code>false</code></td><td>Allow access to sensitive files (.env, .pem, etc.)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <div class="tag">Important</div>
+      <p>Product tiers and config are separate concerns. Tiers control account limits (max repos, files, LOC). Config controls local indexing behavior (file-size caps, secret redaction, sensitive-file access). You cannot raise tier limits via config.</p>
+    </div>
+
     <h3>Environment variables</h3>
     <p>Two supported user-facing knobs. Other <code>RECON_*</code> variables exist in the source as internal escape hatches for tests and operations — they're not part of the public API and may be renamed or removed without a deprecation cycle.</p>
     <table>
@@ -761,6 +995,8 @@ allow_sensitive = <span class="h">false</span></pre>
       <tbody>
         <tr><td><code>RECON_LOG_FORMAT</code></td><td>Set to <code>json</code> to emit structured logs on stderr (one JSON object per event). Default is human-readable text. Useful when piping into a log aggregator.</td></tr>
         <tr><td><code>RECON_NO_EMBED</code></td><td>Set to <code>1</code> (or <code>true</code>/<code>yes</code>/<code>on</code>) to disable the embed service entirely. Semantic search (<code>code_search mode=semantic</code>) is skipped and falls back to lexical-only; everything else is unaffected. Use when you don't want any chunk text to leave your machine and don't need a local-only rebuild via <code>--features local-embed</code>. <span class="badge">v0.4.2+</span></td></tr>
+        <tr><td><code>RECON_API_URL</code></td><td>Override the default worker endpoint. Useful behind a corporate proxy or for staging environments. <span class="badge">v0.2.0+</span></td></tr>
+        <tr><td><code>RECON_REQUEST_TIMEOUT_SECS</code></td><td>Per-tool request timeout in seconds. Default <code>30</code>. Increase for very large repos where graph tools may need more time. <span class="badge">v0.4.0+</span></td></tr>
       </tbody>
     </table>
 
@@ -861,10 +1097,13 @@ Removed a3f1c8b2e6d4710f from your account</pre>
       </li>
       <li><b>Credentials chmod 0600.</b> The raw API key is stored at <code>~/.config/recon/credentials.json</code> with mode 0600 on Unix. <code>recon doctor</code> verifies the mode.</li>
       <li><b>Secret redaction.</b> Every tool response that includes file bytes is scanned for AWS keys, OpenAI keys, PEM blocks, and 10+ other patterns before being returned. Override only with explicit <code>allow_sensitive = true</code>.</li>
-      <li><b>Path traversal guard.</b> Every tool call canonicalizes its path argument and prefix-checks against the repo root.</li>
+      <li><b>Path traversal guard.</b> Every tool call canonicalizes its path argument and prefix-checks against the repo root. Escape attempts return <code>PathTraversal (-32007)</code>.</li>
       <li><b>Sensitive file gate.</b> <code>.env*</code>, <code>*.pem</code>, <code>*.key</code>, <code>id_rsa*</code> are skipped by default — they don't get indexed or embedded.</li>
+      <li><b>Symlink alias protection.</b> <span class="badge">v0.5.6+</span> Paths are canonicalized before the sensitive-file check. A symlink like <code>safe.rs → .env</code> is resolved to its target and blocked — the raw path name cannot bypass the policy.</li>
+      <li><b>Filter parse errors fail closed.</b> <span class="badge">v0.5.6+</span> If a filter DSL string fails to parse, tools return <b>zero results</b> instead of ignoring the filter and returning unfiltered data. This prevents accidental data leakage from typos.</li>
       <li><b>Stdout hygiene.</b> All logging goes to stderr; a CI test spawns the server and rejects any stray <code>println!</code>.</li>
       <li><b>Signed binaries.</b> Every release ships a SHA-256 manifest signed via cosign keyless against our GitHub Actions release workflow.</li>
+      <li><b>Worker rate limits fail closed.</b> If the rate-limit binding is missing in production, requests are rejected (fail-closed). In local/test environments, requests pass through (fail-open) for development convenience.</li>
     </ul>
 
     <!-- PERFORMANCE -->
@@ -904,7 +1143,17 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <!-- CHANGELOG -->
     <h2 id="changelog"><span class="no">15</span>Changelog</h2>
 
+    <p><b>v0.5.6</b> — Security hardening: symlink alias bypass closed (paths canonicalized before sensitive-file check), filter parse errors now fail closed (zero results instead of unfiltered data), Windows response path normalization. <a href="/changelog#v0-5-6">Full notes →</a></p>
+    <p><b>v0.5.5</b> — Router-loaded repos now initialize the hosted embed service. Bug fixes for multi-repo embed initialization. <a href="/changelog#v0-5-5">Full notes →</a></p>
+    <p><b>v0.5.4</b> — CI release matrix timeout bump for Windows cold builds. No user-facing changes. <a href="/changelog#v0-5-4">Full notes →</a></p>
+    <p><b>v0.5.3</b> — Hosted semantic search wired into the default-features binary (no longer feature-gated). Schema V5 with compound <code>(path, byte_start)</code> index. Cold bulk index drops FTS triggers and rebuilds in one batched pass. Single-flight gate on <code>cached_call_graph</code> (no more concurrent CSR rebuild races). Single-segment Tantivy commit on cold index. Bounded watcher channel; prepared-statement cache cap raised to 128. <a href="/changelog#v0-5-3">Full notes →</a></p>
+    <p><b>v0.5.2</b> — Test stability: poll-assert watcher delete/rename tests to eliminate self-hosted CI flakes. <a href="/changelog#v0-5-2">Full notes →</a></p>
+    <p><b>v0.5.1</b> — Honest savings: per-process baseline dedupe kills per-call double-counting (a 160-call session was over-reporting ~3.5×). First call against a <code>(tool, dedup_key)</code> pair credits the full alternative; repeats credit 0. Dollar conversion added to dashboard and CLI. <a href="/changelog#v0-5-1">Full notes →</a></p>
+    <p><b>v0.5.0</b> — Multi-repo MCP service: <code>code_activate_repo</code> + <code>code_list_repos</code>. Canonical Hits envelope for the 5 row-oriented tools. Session-end savings receipt to stderr. Latency savings end-to-end (dashboard shows "X faster than Read+Grep loop"). Hot-path performance: telemetry hash lookup, newline-index cache, token-count cache by <code>(path, mtime)</code>. Hosted embeddings (Modal + Worker + recon-embed-client). <code>RECON_AUTO_PUSH_SAVINGS</code> default-on with hybrid telemetry flush. <a href="/changelog#v0-5-0">Full notes →</a></p>
+    <p><b>v0.4.1</b> — Measured baselines fix: <code>code_search</code> exact mode now correctly credits savings on the dashboard (was zero). Worker-side rollup merge corrected. <a href="/changelog#v0-4-1">Full notes →</a></p>
     <p><b>v0.4.0</b> — Per-call <b>measured</b> token-savings replace static estimates for 8 tools (<code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code>, <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>) — the dashboard now reflects what the agent's Read+grep alternative would have actually cost, not a hand-tuned guess. The 10 graph/ranking tools keep documented static estimates (no clean grep equivalent for fuzzy ranking, transitive callers, or PageRank). <code>code_stats</code> and <code>code_savings</code> dropped from the MCP surface — operator diagnostics now live in <code>recon stats</code> / <code>recon savings show</code> CLI, not in the agent's tool list. <a href="/changelog#v0-4-0">Full notes →</a></p>
+    <p><b>v0.3.4</b> — Windows compatibility fix: use <code>file-id</code> crate instead of unstable <code>MetadataExt::file_index()</code>. <a href="/changelog#v0-3-4">Full notes →</a></p>
+    <p><b>v0.3.3</b> — Per-repo savings aggregation: CLI sends <code>repo_fingerprint</code> with each push, dashboard shows per-repo breakdown. Honest labels on the savings chart. <a href="/changelog#v0-3-3">Full notes →</a></p>
     <p><b>v0.3.2</b> — Pro/Team savings dashboard: <code>recon savings push/show</code> CLI subcommand, dashboard "Savings" tab with per-day sparkline, <code>POST /v1/account/savings</code> + <code>GET /v1/dashboard/savings</code> worker routes, D1 migration <code>0009_usage_rollups</code>. Plus lifecycle hardening: <code>recon serve</code> now exits cleanly on license revocation / account deletion / <code>recon logout</code> against a running session, not just signals + transport close. <a href="/changelog#v0-3-2">Full notes →</a></p>
     <p><b>v0.3.1</b> — Multi-language parser parity (Python, JS/TS, Go, Java, C/C++ extractors now walk function/class/struct bodies for identifier refs, so the call graph is meaningfully populated for every supported language). Token-savings counter: new <code>code_savings</code> tool, lock-free atomic counters with SQLite-backed lifetime persistence, telemetry block on <code>code_stats</code>. Model-agnostic — reports tokens saved, leaves dollar conversion to your provider's rate sheet. <a href="/changelog#v0-3-1">Full notes →</a></p>
     <p><b>v0.3.0</b> — Seven graph-traversal tools: <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_context</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>. Built on a forward+reverse CSR call graph cached alongside <code>code_repo_map</code>'s symbol set. Replaces the canonical chained-<code>code_find_refs</code> agent loop with a single bounded BFS. Also fixes the parser/storage parser-local-id remap that silently mis-attributed refs across files. <a href="/changelog#v0-3-0">Full notes →</a></p>

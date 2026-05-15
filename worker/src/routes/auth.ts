@@ -141,7 +141,7 @@ authRoutes.get("/github/callback", async (c) => {
   // SameSite=Lax allows the cookie on GitHub's top-level redirect back to
   // us but blocks cross-site POSTs (CSRF protection).
   const token = await createSession(db, userId);
-  const frontendUrl = c.env.FRONTEND_URL || "https://mcprecon.pages.dev";
+  const frontendUrl = browserOrigin(c);
   return new Response(null, {
     status: 302,
     headers: {
