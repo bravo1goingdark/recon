@@ -4180,6 +4180,7 @@ dependencies = [
  "blake3",
  "crossbeam-queue",
  "gix",
+ "globset",
  "ignore",
  "notify",
  "notify-debouncer-full",

@@ -429,16 +429,17 @@ impl RepoRouter {
             tantivy_heap_bytes: config.tantivy_heap_bytes,
             allow_sensitive: config.allow_sensitive,
         };
-        let paths: Vec<_> =
-            recon_indexer::walker::walk_repo_with_limit(repo_path, config.max_file_size)
-                .into_iter()
-                .filter(|p| {
-                    config.allow_sensitive
-                        || !recon_core::redact::is_blocked_path(
-                            p.strip_prefix(repo_path).unwrap_or(p),
-                        )
-                })
-                .collect();
+        let paths: Vec<_> = recon_indexer::walker::walk_repo_with_ignores(
+            repo_path,
+            config.max_file_size,
+            &config.ignore_patterns,
+        )
+        .into_iter()
+        .filter(|p| {
+            config.allow_sensitive
+                || !recon_core::redact::is_blocked_path(p.strip_prefix(repo_path).unwrap_or(p))
+        })
+        .collect();
         let file_count = paths.len();
 
         if file_count > limits.max_files {
@@ -817,6 +818,59 @@ mod tests {
         let err = result.err().unwrap().to_string();
         assert!(err.contains("source files"), "unexpected error: {err}");
         assert!(err.contains("Upgrade"), "should suggest upgrade: {err}");
+    }
+
+    #[test]
+    fn file_limit_ignores_configured_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("ignored_repo");
+        std::fs::create_dir_all(repo.join("ignored_src/pkg")).unwrap();
+
+        std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+        for i in 0..10 {
+            std::fs::write(
+                repo.join(format!("ignored_src/pkg/file_{i}.rs")),
+                format!("pub fn ignored_{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+
+        let cfg = Config {
+            ignore_patterns: vec!["ignored_src".into()],
+            ..Default::default()
+        };
+        cfg.save(&repo).unwrap();
+
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+
+        let tiny_tier = Tier::new(
+            "Free",
+            TierLimits {
+                max_repos: 1,
+                max_files: 5,
+                max_loc: 1_000_000,
+            },
+        );
+        let router = RepoRouter::new(tiny_tier);
+        let result = router.get_or_load(&repo);
+        assert!(
+            result.is_ok(),
+            "ignored files should not count against file gate"
+        );
     }
 
     #[test]
