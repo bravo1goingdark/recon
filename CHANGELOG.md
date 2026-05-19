@@ -4,10 +4,14 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.5.7] — 2026-05-19
 
 ### Added
 
+- Passive update notices: every CLI command (except `serve`, `update`,
+  and `doctor --json`) checks for a newer release in the background and
+  prints a one-line stderr hint when one is available. The check is
+  cached for 24 hours; suppressed under `--json`.
 - `recon update` now prints a stderr reminder to restart any running
   MCP/IDE session after the binary is replaced, and to run `recon
   reindex` in existing repos when the new version changes indexing

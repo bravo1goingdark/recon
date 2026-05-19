@@ -158,12 +158,17 @@ pub fn is_blocked_path_in_repo(path: &Path, repo_root: &Path) -> bool {
         repo_root.join(path)
     };
 
+    let canon_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+
     match abs.canonicalize() {
         Ok(canonical) => canonical
-            .strip_prefix(repo_root)
+            .strip_prefix(&canon_root)
             .ok()
             .is_some_and(is_blocked_path),
-        Err(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
     }
 }
 
