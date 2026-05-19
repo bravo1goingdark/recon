@@ -6,6 +6,13 @@ project uses [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `recon update` now prints a stderr reminder to restart any running
+  MCP/IDE session after the binary is replaced, and to run `recon
+  reindex` in existing repos when the new version changes indexing
+  behavior.
+
 ### Fixed
 
 - Sensitive-path blocking now canonicalizes symlink targets before
