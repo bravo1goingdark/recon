@@ -102,6 +102,21 @@ pub fn walk_repo_with_ignores(
         return paths;
     }
 
+    paths
+        .into_iter()
+        .filter(|path| !path_matches_ignore_patterns(path, root, ignore_patterns))
+        .collect()
+}
+
+/// Return true if `path` matches a configured ignore pattern.
+pub fn path_matches_ignore_patterns(path: &Path, root: &Path, ignore_patterns: &[String]) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    rel_str_matches_ignore_patterns(&rel_str, ignore_patterns)
+}
+
+/// Return true if a normalized repo-relative path matches configured ignores.
+pub fn rel_str_matches_ignore_patterns(path: &str, ignore_patterns: &[String]) -> bool {
     let patterns: Vec<String> = ignore_patterns
         .iter()
         .map(|p| p.trim())
@@ -109,19 +124,13 @@ pub fn walk_repo_with_ignores(
         .map(|p| p.replace('\\', "/"))
         .collect();
     if patterns.is_empty() {
-        return paths;
+        return false;
     }
 
+    let path = path.trim_start_matches("./");
     let globset = build_ignore_globset(&patterns);
-    paths
-        .into_iter()
-        .filter(|path| {
-            let rel = path.strip_prefix(root).unwrap_or(path);
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            let glob_match = globset.as_ref().is_some_and(|set| set.is_match(&rel_str));
-            !glob_match && !patterns.iter().any(|pat| ignore_match(&rel_str, pat))
-        })
-        .collect()
+    let glob_match = globset.as_ref().is_some_and(|set| set.is_match(path));
+    glob_match || patterns.iter().any(|pat| ignore_match(path, pat))
 }
 
 fn build_ignore_globset(patterns: &[String]) -> Option<globset::GlobSet> {

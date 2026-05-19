@@ -1249,6 +1249,7 @@ impl ReconServer {
                     max_file_size: self.config.max_file_size,
                     tantivy_heap_bytes: self.config.tantivy_heap_bytes,
                     allow_sensitive: self.config.allow_sensitive,
+                    ignore_patterns: self.config.ignore_patterns.clone(),
                 },
             )?
         }; // Both locks released here.
@@ -4261,10 +4262,12 @@ impl ReconServer {
             let tantivy = self.tantivy.clone();
             let tantivy_writer = self.tantivy_writer.clone();
             let repo_root = self.repo_root.clone();
+            let recon_config = Config::load(&repo_root);
             let index_options = indexer::IndexOptions {
-                max_file_size: self.config.max_file_size,
-                tantivy_heap_bytes: self.config.tantivy_heap_bytes,
-                allow_sensitive: self.config.allow_sensitive,
+                max_file_size: recon_config.max_file_size,
+                tantivy_heap_bytes: recon_config.tantivy_heap_bytes,
+                allow_sensitive: recon_config.allow_sensitive,
+                ignore_patterns: recon_config.ignore_patterns.clone(),
             };
 
             // Heavy work runs on a blocking thread — parse locklessly, write in chunks
@@ -4289,17 +4292,20 @@ impl ReconServer {
                     }
 
                     // Full walk + parse (force path)
-                    let paths: Vec<_> =
-                        walker::walk_repo_with_limit(&repo_root, index_options.max_file_size)
-                            .into_iter()
-                            .filter(|p| {
-                                index_options.allow_sensitive
-                                    || !recon_core::redact::is_blocked_path_in_repo(
-                                        p.strip_prefix(&repo_root).unwrap_or(p),
-                                        &repo_root,
-                                    )
-                            })
-                            .collect();
+                    let paths: Vec<_> = walker::walk_repo_with_ignores(
+                        &repo_root,
+                        index_options.max_file_size,
+                        &index_options.ignore_patterns,
+                    )
+                    .into_iter()
+                    .filter(|p| {
+                        index_options.allow_sensitive
+                            || !recon_core::redact::is_blocked_path_in_repo(
+                                p.strip_prefix(&repo_root).unwrap_or(p),
+                                &repo_root,
+                            )
+                    })
+                    .collect();
                     let pools = std::sync::Arc::new(LanguagePools::new(
                         rayon::current_num_threads().max(4),
                     ));
@@ -4355,6 +4361,20 @@ impl ReconServer {
                     }
 
                     let total_symbols = write_store.lock().symbol_count().unwrap_or(0);
+                    {
+                        let store = write_store.lock();
+                        let patterns = {
+                            let mut patterns = index_options.ignore_patterns.clone();
+                            patterns.iter_mut().for_each(|p| {
+                                *p = p.trim().replace('\\', "/");
+                            });
+                            patterns.retain(|p| !p.is_empty());
+                            patterns.sort();
+                            patterns.dedup();
+                            serde_json::to_string(&patterns).unwrap_or_else(|_| "[]".to_string())
+                        };
+                        let _ = store.set_meta("config.ignore_patterns.v1", &patterns);
+                    }
 
                     serde_json::json!({
                         "status": "ok",

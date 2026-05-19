@@ -29,9 +29,10 @@ pub struct ParsedFile {
 
 /// Path to the persisted Merkle snapshot within the repo.
 const MERKLE_SNAPSHOT_PATH: &str = ".recon/merkle.json";
+const IGNORE_PATTERNS_META_KEY: &str = "config.ignore_patterns.v1";
 
 /// Tunable indexing options loaded from `.recon/config.toml` by callers.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct IndexOptions {
     /// Maximum source file size to index.
     pub max_file_size: u64,
@@ -39,6 +40,8 @@ pub struct IndexOptions {
     pub tantivy_heap_bytes: usize,
     /// Whether sensitive paths such as `.env` and private keys may be indexed.
     pub allow_sensitive: bool,
+    /// Additional ignore patterns from `.recon/config.toml`.
+    pub ignore_patterns: Vec<String>,
 }
 
 impl Default for IndexOptions {
@@ -47,6 +50,7 @@ impl Default for IndexOptions {
             max_file_size: 2_097_152,
             tantivy_heap_bytes: 50_000_000,
             allow_sensitive: false,
+            ignore_patterns: Vec::new(),
         }
     }
 }
@@ -75,10 +79,11 @@ pub fn build_merkle_snapshot_with_options(
     repo_root: &Path,
     options: IndexOptions,
 ) -> MerkleSnapshot {
-    let paths: Vec<_> = walker::walk_repo_with_limit(repo_root, options.max_file_size)
-        .into_iter()
-        .filter(|p| options.allow_sensitive || !is_sensitive_path(p, repo_root))
-        .collect();
+    let paths: Vec<_> =
+        walker::walk_repo_with_ignores(repo_root, options.max_file_size, &options.ignore_patterns)
+            .into_iter()
+            .filter(|p| options.allow_sensitive || !is_sensitive_path(p, repo_root))
+            .collect();
     let entries: Vec<_> = paths
         .par_iter()
         .filter_map(|path| {
@@ -193,6 +198,52 @@ fn delete_indexed_paths(store: &Store, paths: &[PathBuf]) -> Result<(), Error> {
     }
     let rel_paths: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     store.delete_files_cascade(&rel_paths)
+}
+
+fn normalized_ignore_patterns_json(ignore_patterns: &[String]) -> String {
+    let mut patterns: Vec<String> = ignore_patterns
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.replace('\\', "/"))
+        .collect();
+    patterns.sort();
+    patterns.dedup();
+    serde_json::to_string(&patterns).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn purge_paths_matching_changed_ignores(
+    store: &Store,
+    tantivy: Option<&TantivyBackend>,
+    tantivy_writer: Option<&mut tantivy::IndexWriter>,
+    options: &IndexOptions,
+) -> Result<usize, Error> {
+    let current = normalized_ignore_patterns_json(&options.ignore_patterns);
+    let previous = store.get_meta(IGNORE_PATTERNS_META_KEY)?;
+    if previous.as_deref() == Some(current.as_str()) {
+        return Ok(0);
+    }
+
+    let ignored_paths: Vec<PathBuf> = store
+        .all_file_paths()?
+        .into_iter()
+        .filter(|path| {
+            let path_str = path.to_string_lossy().replace('\\', "/");
+            walker::rel_str_matches_ignore_patterns(&path_str, &options.ignore_patterns)
+        })
+        .collect();
+
+    delete_indexed_paths(store, &ignored_paths)?;
+    if let (Some(tb), Some(writer)) = (tantivy, tantivy_writer) {
+        for path in &ignored_paths {
+            tb.delete_path(writer, path);
+        }
+        if let Err(e) = tb.commit(writer) {
+            warn!("tantivy commit error after ignored-path purge: {e}");
+        }
+    }
+    store.set_meta(IGNORE_PATTERNS_META_KEY, &current)?;
+    Ok(ignored_paths.len())
 }
 
 /// Index a single file: read once, hash, parse, store in SQLite + Tantivy.
@@ -315,10 +366,11 @@ pub fn index_repo_with_options(
     shared_writer: Option<&mut tantivy::IndexWriter>,
     options: IndexOptions,
 ) -> Result<IndexStats, Error> {
-    let paths: Vec<_> = walker::walk_repo_with_limit(repo_root, options.max_file_size)
-        .into_iter()
-        .filter(|p| options.allow_sensitive || !is_sensitive_path(p, repo_root))
-        .collect();
+    let paths: Vec<_> =
+        walker::walk_repo_with_ignores(repo_root, options.max_file_size, &options.ignore_patterns)
+            .into_iter()
+            .filter(|p| options.allow_sensitive || !is_sensitive_path(p, repo_root))
+            .collect();
     info!(files = paths.len(), "starting repo indexing");
 
     // Enter high-throughput indexing mode for faster bulk inserts
@@ -493,6 +545,12 @@ pub fn index_repo_with_options(
             warn!("tantivy commit error: {e}");
         }
     }
+    if let Err(e) = store.set_meta(
+        IGNORE_PATTERNS_META_KEY,
+        &normalized_ignore_patterns_json(&options.ignore_patterns),
+    ) {
+        warn!("failed to store ignore pattern fingerprint: {e}");
+    }
     save_snapshot(repo_root, &new_snapshot);
 
     // Restore safe SQLite defaults and flush WAL
@@ -546,6 +604,16 @@ pub fn index_repo_incremental_with_options(
     options: IndexOptions,
 ) -> Result<IndexStats, Error> {
     use std::collections::HashSet;
+
+    let purged_ignored = purge_paths_matching_changed_ignores(
+        store,
+        tantivy,
+        shared_writer.as_deref_mut(),
+        &options,
+    )?;
+    if purged_ignored > 0 {
+        info!(count = purged_ignored, "purged newly ignored indexed files");
+    }
 
     let last_commit = store.get_meta("last_indexed_commit")?;
 
@@ -671,6 +739,11 @@ pub fn index_repo_incremental_with_options(
         .filter(|p| {
             Language::from_path(p) != Language::Unknown
                 && !walker::is_vendored(&p.to_string_lossy())
+                && !walker::path_matches_ignore_patterns(
+                    &repo_root.join(p),
+                    repo_root,
+                    &options.ignore_patterns,
+                )
                 && (options.allow_sensitive || !is_sensitive_path(p, repo_root))
         })
         .collect();
@@ -728,7 +801,7 @@ fn index_repo_merkle_fallback(
     shared_writer: Option<&mut tantivy::IndexWriter>,
     options: IndexOptions,
 ) -> Result<IndexStats, Error> {
-    let current_snapshot = build_merkle_snapshot_with_options(repo_root, options);
+    let current_snapshot = build_merkle_snapshot_with_options(repo_root, options.clone());
     let previous_snapshot = load_previous_snapshot(repo_root);
 
     let diff = match &previous_snapshot {
@@ -828,6 +901,9 @@ fn index_diff(
         .par_iter()
         .map(|path| {
             let rel_path = path.strip_prefix(repo_root).unwrap_or(path).to_path_buf();
+            if walker::path_matches_ignore_patterns(path, repo_root, &options.ignore_patterns) {
+                return (None, Some(rel_path));
+            }
             if !options.allow_sensitive && is_sensitive_path(path, repo_root) {
                 return (None, Some(rel_path));
             }
@@ -1081,6 +1157,49 @@ mod tests {
     }
 
     #[test]
+    fn incremental_reindex_purges_newly_ignored_paths() {
+        let dir = init_test_repo(&[
+            ("main.rs", "pub fn kept() {}"),
+            ("ignored_src/lib.rs", "pub fn stale_ignored() {}"),
+        ]);
+        let store = Store::open_memory().unwrap();
+
+        let stats = index_repo_incremental_with_options(
+            &store,
+            None,
+            dir.path(),
+            None,
+            IndexOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(stats.files_indexed, 2);
+        assert!(store.get_file_hash(Path::new("main.rs")).unwrap().is_some());
+        assert!(store
+            .get_file_hash(Path::new("ignored_src/lib.rs"))
+            .unwrap()
+            .is_some());
+
+        let stats = index_repo_incremental_with_options(
+            &store,
+            None,
+            dir.path(),
+            None,
+            IndexOptions {
+                ignore_patterns: vec!["ignored_src".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.files_indexed, 0);
+        assert!(store.get_file_hash(Path::new("main.rs")).unwrap().is_some());
+        assert!(store
+            .get_file_hash(Path::new("ignored_src/lib.rs"))
+            .unwrap()
+            .is_none());
+        assert_eq!(stats.total_symbols, store.symbol_count().unwrap());
+    }
+
+    #[test]
     fn index_repo_incremental_stores_commit() {
         let dir = tempfile::tempdir().unwrap();
         // Initialize a git repo with a file
@@ -1165,6 +1284,9 @@ mod tests {
         git(dir.path(), &["config", "user.email", "test@test.com"]);
         git(dir.path(), &["config", "user.name", "Test"]);
         for (name, content) in files {
+            if let Some(parent) = std::path::Path::new(name).parent() {
+                std::fs::create_dir_all(dir.path().join(parent)).unwrap();
+            }
             std::fs::write(dir.path().join(name), content).unwrap();
         }
         git(dir.path(), &["add", "."]);

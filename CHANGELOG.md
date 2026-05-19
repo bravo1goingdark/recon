@@ -14,6 +14,9 @@ project uses [SemVer](https://semver.org/).
 - `recon serve` file-count startup checks now honor
   `.recon/config.toml` `ignore_patterns`, so configured ignored paths do
   not count against tier limits.
+- Incremental reindex now detects changed `ignore_patterns` and
+  cascade-deletes symbols/refs for already-indexed paths that are newly
+  ignored, preventing stale search and repo-map entries.
 - OAuth state handling and stale index cleanup were fixed in the web
   auth flow, including the related index maintenance path from the
   latest merged PR.
