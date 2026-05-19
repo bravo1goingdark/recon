@@ -25,13 +25,18 @@
 //! integrity gate.
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Where latest.json and the release tree live. Single source so tests
 /// and release.yml only need to agree on one hostname.
 const ORIGIN: &str = "https://mcprecon.pages.dev";
+
+/// How long passive update checks stay fresh on disk.
+const UPDATE_NOTICE_TTL_SECS: u64 = 86_400;
 
 /// Resolve the release-artifact target triple for the binary we are.
 /// Must match the `target:` entries in `.github/workflows/release.yml`.
@@ -91,6 +96,75 @@ fn binary_name() -> &'static str {
     } else {
         "recon"
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdateNoticeCache {
+    checked_at: u64,
+    latest_version: String,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn update_notice_cache_path() -> PathBuf {
+    recon_server::license::global_config_dir().join("update-check.json")
+}
+
+fn read_update_notice_cache(path: &Path) -> Option<UpdateNoticeCache> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let cache: UpdateNoticeCache = serde_json::from_str(&raw).ok()?;
+    if now_secs().saturating_sub(cache.checked_at) <= UPDATE_NOTICE_TTL_SECS {
+        Some(cache)
+    } else {
+        None
+    }
+}
+
+fn write_update_notice_cache(path: &Path, latest_version: &str) {
+    let cache = UpdateNoticeCache {
+        checked_at: now_secs(),
+        latest_version: latest_version.to_string(),
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(body) = serde_json::to_string(&cache) {
+        let _ = std::fs::write(path, body);
+    }
+}
+
+fn cached_or_latest_version(cache_path: &Path) -> Option<String> {
+    if let Some(cache) = read_update_notice_cache(cache_path) {
+        return Some(cache.latest_version);
+    }
+    let latest = fetch_latest_version().ok()?;
+    write_update_notice_cache(cache_path, &latest);
+    Some(latest)
+}
+
+fn update_notice_message(current: &semver::Version, latest: &semver::Version) -> Option<String> {
+    (latest > current).then(|| {
+        format!(
+            "Update available: v{} → v{}. Run `recon update` to upgrade.",
+            current, latest
+        )
+    })
+}
+
+/// Spawn a detached passive update check.
+pub fn spawn_update_notice() -> tokio::task::JoinHandle<Option<String>> {
+    tokio::task::spawn_blocking(|| {
+        let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+        let cache_path = update_notice_cache_path();
+        let latest_raw = cached_or_latest_version(&cache_path)?;
+        let latest = semver::Version::parse(&latest_raw).ok()?;
+        update_notice_message(&current, &latest)
+    })
 }
 
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
@@ -311,6 +385,7 @@ pub fn run(check: bool, force: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn sha256_matches_manifest_line() {
@@ -323,6 +398,34 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  recon-x86_64-u
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
         );
         assert_eq!(sha256_for(manifest, "nonexistent.tar.gz"), None);
+    }
+
+    #[test]
+    fn update_notice_message_formats_upgrade_hint() {
+        let current = semver::Version::parse("0.5.6").unwrap();
+        let latest = semver::Version::parse("0.5.7").unwrap();
+        assert_eq!(
+            update_notice_message(&current, &latest).as_deref(),
+            Some("Update available: v0.5.6 → v0.5.7. Run `recon update` to upgrade.")
+        );
+        assert!(update_notice_message(&latest, &current).is_none());
+    }
+
+    #[test]
+    fn update_notice_cache_roundtrip_and_ttl() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("update-check.json");
+        write_update_notice_cache(&path, "0.5.7");
+
+        let cache = read_update_notice_cache(&path).expect("fresh cache");
+        assert_eq!(cache.latest_version, "0.5.7");
+
+        let stale = UpdateNoticeCache {
+            checked_at: now_secs().saturating_sub(UPDATE_NOTICE_TTL_SECS + 1),
+            latest_version: "0.5.8".into(),
+        };
+        std::fs::write(&path, serde_json::to_string(&stale).unwrap()).unwrap();
+        assert!(read_update_notice_cache(&path).is_none());
     }
 
     #[test]

@@ -1346,6 +1346,16 @@ fn install_panic_hook() {
 
 // ── main ───────────────────────────────────────────────────────────────────────
 
+fn should_spawn_update_notice(raw_json: bool, command: &Command) -> bool {
+    if raw_json {
+        return false;
+    }
+    !matches!(
+        command,
+        Command::Serve { .. } | Command::Update { .. } | Command::Doctor { json: true }
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     install_panic_hook();
@@ -1354,8 +1364,13 @@ async fn main() -> Result<()> {
     let repo = cli.repo;
     let raw_json = cli.json;
     let out = |s: &str| pretty::print_output(s, raw_json);
+    let update_notice = if should_spawn_update_notice(raw_json, &cli.command) {
+        Some(update::spawn_update_notice())
+    } else {
+        None
+    };
 
-    match cli.command {
+    let result = match cli.command {
         // ── Authentication ────────────────────────────────────────────────────
         Command::Login { key } => {
             let config_dir = recon_server::license::global_config_dir();
@@ -2241,6 +2256,23 @@ async fn main() -> Result<()> {
             SavingsAction::Push { repo: r } => savings::push(r),
             SavingsAction::Show { repo: r } => savings::show(r),
         },
+    };
+
+    match result {
+        Ok(()) => {
+            if let Some(handle) = update_notice {
+                if let Ok(Some(message)) = handle.await {
+                    eprintln!("{message}");
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(handle) = update_notice {
+                handle.abort();
+            }
+            Err(e)
+        }
     }
 }
 
@@ -2269,6 +2301,31 @@ mod tests {
             Ide::ClaudeCode.config_abs_path(dir.path()),
             dir.path().join(".mcp.json")
         );
+    }
+
+    #[test]
+    fn update_notice_skip_rules_cover_json_and_serve() {
+        assert!(!should_spawn_update_notice(true, &Command::Version));
+        assert!(!should_spawn_update_notice(
+            false,
+            &Command::Serve {
+                log: "info".to_string(),
+                port: None,
+                host: "127.0.0.1".to_string(),
+            }
+        ));
+        assert!(!should_spawn_update_notice(
+            false,
+            &Command::Update {
+                check: false,
+                force: false,
+            }
+        ));
+        assert!(!should_spawn_update_notice(
+            false,
+            &Command::Doctor { json: true }
+        ));
+        assert!(should_spawn_update_notice(false, &Command::Version));
     }
 
     #[test]
