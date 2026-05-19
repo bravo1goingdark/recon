@@ -300,6 +300,11 @@ pub fn run(check: bool, force: bool) -> Result<()> {
 
     replace_running(&staged, &current_exe)?;
     eprintln!("Updated recon: {} -> {}", current, latest);
+    eprintln!(
+        "Restart any running MCP/IDE session to use the new binary. \
+         If this update changes indexing behavior, run `recon reindex` \
+         in existing repos after restart."
+    );
     Ok(())
 }
 
