@@ -140,7 +140,12 @@ pub fn is_generated_content(content: &[u8]) -> bool {
 /// against all vendor path segments and file suffixes.
 pub fn is_vendored(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    vendored_ac().is_match(&normalized)
+    let wrapped = if normalized.starts_with('/') {
+        normalized
+    } else {
+        format!("/{normalized}")
+    };
+    vendored_ac().is_match(&wrapped)
 }
 
 #[cfg(test)]
@@ -150,7 +155,9 @@ mod tests {
     #[test]
     fn vendored_detection() {
         assert!(is_vendored("/foo/node_modules/bar.js"));
+        assert!(is_vendored("node_modules/bar.js"));
         assert!(is_vendored("/foo/target/debug/thing.rs"));
+        assert!(is_vendored("target/debug/thing.rs"));
         assert!(!is_vendored("/src/main.rs"));
     }
 

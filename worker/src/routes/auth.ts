@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { getCookie } from "hono/cookie";
 import { exchangeCodeForToken, fetchGitHubUser } from "../lib/github";
-import { sha256Hex, generateApiKey, generateSessionToken } from "../lib/crypto";
+import { sha256Hex, generateApiKey, generateSessionToken, timingSafeEqual } from "../lib/crypto";
 import { createSession, destroySession, sessionCookie, clearSessionCookie } from "../lib/session";
 import { getTierConfig } from "../lib/tiers";
 import { requireAuth } from "../middleware/auth";
@@ -12,6 +12,11 @@ export const authRoutes = new Hono<{
   Bindings: Env;
   Variables: { user: AuthUser };
 }>();
+
+type AuthContext = Context<{
+  Bindings: Env;
+  Variables: { user: AuthUser };
+}>;
 
 /**
  * Compute the browser-visible origin for this request.
@@ -29,13 +34,46 @@ export const authRoutes = new Hono<{
  * Falls back to the request URL's own origin when the header is absent
  * (direct-hit path) so local dev / curl smoke tests still work.
  */
-function browserOrigin(c: Context): string {
+const OAUTH_STATE_COOKIE = "__Host-oauth-state";
+const OAUTH_STATE_MAX_AGE_SECS = 600;
+
+function allowedOriginHosts(c: AuthContext): Set<string> {
+  const hosts = new Set<string>();
+  for (const raw of c.env.ALLOWED_ORIGINS.split(",")) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      hosts.add(new URL(trimmed).host);
+    } catch {
+      // Ignore malformed config entries; CORS will ignore them too.
+    }
+  }
+  if (c.env.FRONTEND_URL) {
+    try {
+      hosts.add(new URL(c.env.FRONTEND_URL).host);
+    } catch {
+      // Optional safety net only.
+    }
+  }
+  return hosts;
+}
+
+function browserOrigin(c: AuthContext): string {
   const fwdHost = c.req.header("x-forwarded-host");
   const fwdProto = c.req.header("x-forwarded-proto") || "https";
-  if (fwdHost) {
-    return `${fwdProto}://${fwdHost}`;
+  if (fwdHost && allowedOriginHosts(c).has(fwdHost)) {
+    const proto = fwdProto === "http" ? "http" : "https";
+    return `${proto}://${fwdHost}`;
   }
   return new URL(c.req.url).origin;
+}
+
+function oauthStateCookie(state: string): string {
+  return `${OAUTH_STATE_COOKIE}=${state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${OAUTH_STATE_MAX_AGE_SECS}`;
+}
+
+function clearOauthStateCookie(): string {
+  return `${OAUTH_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
 }
 
 /** GET /v1/auth/github — redirect to GitHub OAuth. */
@@ -55,7 +93,13 @@ authRoutes.get("/github", (c) => {
   url.searchParams.set("scope", "read:user user:email");
   url.searchParams.set("state", state);
 
-  return c.redirect(url.toString());
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: url.toString(),
+      "Set-Cookie": oauthStateCookie(state),
+    },
+  });
 });
 
 /** GET /v1/auth/github/callback — handle OAuth callback. */
@@ -63,6 +107,17 @@ authRoutes.get("/github/callback", async (c) => {
   const code = c.req.query("code");
   if (!code) {
     return c.json({ error: "Missing code parameter" }, 400);
+  }
+  const state = c.req.query("state");
+  const expectedState = getCookie(c, OAUTH_STATE_COOKIE);
+  if (!state || !expectedState || !timingSafeEqual(state, expectedState)) {
+    return new Response(JSON.stringify({ error: "Invalid OAuth state" }), {
+      status: 400,
+      headers: {
+        "Content-Type": "application/json",
+        "Set-Cookie": clearOauthStateCookie(),
+      },
+    });
   }
 
   // Must match exactly what was sent in the authorize request — that
@@ -142,12 +197,12 @@ authRoutes.get("/github/callback", async (c) => {
   // us but blocks cross-site POSTs (CSRF protection).
   const token = await createSession(db, userId);
   const frontendUrl = browserOrigin(c);
+  const headers = new Headers({ Location: `${frontendUrl}/dashboard` });
+  headers.append("Set-Cookie", sessionCookie(token));
+  headers.append("Set-Cookie", clearOauthStateCookie());
   return new Response(null, {
     status: 302,
-    headers: {
-      Location: `${frontendUrl}/dashboard`,
-      "Set-Cookie": sessionCookie(token),
-    },
+    headers,
   });
 });
 
