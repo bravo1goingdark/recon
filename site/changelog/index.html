@@ -50,6 +50,7 @@
     <li><a href="/">Home</a></li>
     <li><a href="/docs">Docs</a></li>
     <li><a href="/pricing">Pricing</a></li>
+    <li><a class="active" href="/changelog">Changelog</a></li>
   </ul>
   <div class="right">
     <span id="nav-auth"><a href="/login" class="btn sm ghost">Sign in</a></span>
@@ -72,7 +73,7 @@
 <main class="legal">
   <div class="eyebrow">Release notes</div>
   <h1>Change<em>log</em></h1>
-  <div class="meta">Newest first · binaries published at <a href="https://github.com/bravo1goingdark/recon/releases">github.com/bravo1goingdark/recon/releases</a></div>
+  <div class="meta">Newest first · update an existing install with <code>recon update</code></div>
 
   <div class="callout">
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
@@ -101,6 +102,81 @@
     <ul>
       <li>CLI and server now use the same ignore-aware repository walker for file-count gating.</li>
       <li>Repo startup and indexing flows thread configured file-size, sensitive-path, and ignore-pattern rules through the same validation paths.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-5-6">
+    <header>
+      <h2>v0.5.6</h2>
+      <span class="when">2026-05-12</span>
+    </header>
+    <span class="tag">Per-repo calibration · session restore fix · Windows paths</span>
+    <p><b>Added.</b></p>
+    <ul>
+      <li><b>Per-repo baseline calibration</b> (closes #29) — after indexing, recon runs an async calibration pass that simulates the Read+Grep alternative against the repo's actual source files and persists per-tool median token counts. Session 1 uses static baselines; session 2+ uses repo-calibrated values (20–80× higher on large repos). Re-calibrates when file count changes by &gt;25% or on force reindex.</li>
+    </ul>
+    <p><b>Fixed.</b></p>
+    <ul>
+      <li><code>restore_session()</code> no longer overrides the active repo — the <code>--repo</code> flag passed to <code>recon serve</code> is now always respected; session restore only pre-loads other repos into the router.</li>
+      <li><code>RefreshGate</code> moved from process-global static to per-<code>ReconServer</code> instance so multiple servers in multi-repo mode refresh caches independently.</li>
+      <li><code>sk-recon-*</code> keys added to the secret redaction allowlist so recon's own API keys in error messages are not garbled.</li>
+      <li>Response paths normalized for Windows (forward-slash consistency).</li>
+      <li>Mutex guards added to env-var-mutating tests to prevent race conditions under parallel execution.</li>
+    </ul>
+    <p><b>Changed.</b></p>
+    <ul>
+      <li>Automatic savings push removed — users push explicitly via <code>recon savings push</code>.</li>
+      <li>Indexing config and worker rate limits hardened.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-5-5">
+    <header>
+      <h2>v0.5.5</h2>
+      <span class="when">2026-05-02</span>
+    </header>
+    <span class="tag fix">Hosted embeddings fix</span>
+    <ul>
+      <li><code>embed-client</code> <code>DEFAULT_API_URL</code> now points at the deployed worker host (was localhost placeholder).</li>
+      <li>Hosted embeddings correctly wired for router-loaded repos in multi-repo mode.</li>
+    </ul>
+  </article>
+
+  <article class="release" id="v0-5-4">
+    <header>
+      <h2>v0.5.4</h2>
+      <span class="when">2026-05-02</span>
+    </header>
+    <span class="tag">Telemetry credibility pass</span>
+    <p><b>Measured baselines, sampled response BPE, persisted dedup.</b></p>
+    <ul>
+      <li>Static <code>BASELINES</code> (9 non-migrated tools) now derive from a <code>bench-baselines</code> binary that simulates the literal Read+Grep alternative against a fixture repo and BPE-counts the result. Previous values under-claimed by 2–5×.</li>
+      <li>Encoder version bumps to <code>bpe-v2-baselines-measured</code> so old cumulative counters reset cleanly on first hydrate.</li>
+      <li>Measured-baseline path bounded at 32 KB with linear extrapolation (<code>count_tokens_capped</code>); runs off the tokio executor via <code>spawn_blocking</code>.</li>
+      <li><code>Telemetry::sample_response</code> runs a fire-and-forget BPE sample on 1-in-64 calls (responses ≥ 1 KB) to track a BPE/heuristic ratio; <code>code_savings</code> applies it to display corrected tokens_saved.</li>
+      <li>Per-process dedup persists to SQLite with a 24 h sliding TTL — a <code>recon serve</code> restart no longer re-credits every file's baseline.</li>
+      <li>LRU eviction (true LRU by <code>last_access_secs</code>) replaces iteration-order eviction in <code>measured_baseline_cache</code>.</li>
+      <li>New <code>Baseline</code> fields: <code>range_low_tokens</code>, <code>range_high_tokens</code>, <code>derivation</code>. <code>code_savings</code> emits a methodology trailer for audit.</li>
+    </ul>
+    <p><b>Also:</b> watcher test timeouts bumped for self-hosted CI runners; CI release matrix timeout raised 30→45 min for cold Windows builds.</p>
+  </article>
+
+  <article class="release" id="v0-5-3">
+    <header>
+      <h2>v0.5.3</h2>
+      <span class="when">2026-04-30</span>
+    </header>
+    <span class="tag">Cold-index performance + hosted semantic search</span>
+    <p>A performance-focused release targeting cold-index latency and steady-state query throughput.</p>
+    <ul>
+      <li><b>FTS triggers dropped during cold bulk index</b> — re-created after commit; eliminates per-row trigger overhead on initial parse.</li>
+      <li><b>Single-flight gate on <code>cached_call_graph</code></b> — concurrent graph-tool calls no longer rebuild the adjacency structure in parallel.</li>
+      <li><b>Compound index <code>(path, byte_start)</code></b> — schema V5; accelerates <code>code_read_symbol</code> lookups on large files.</li>
+      <li><b>Interim Tantivy commits dropped during cold index</b> — single commit at the end instead of per-batch.</li>
+      <li><b>Flush guard released before SQLite writes</b> — telemetry persistence no longer holds the lock across I/O.</li>
+      <li><b>Watcher channel bounded to 64 batches</b> — backpressure instead of unbounded memory growth on rapid file changes.</li>
+      <li><b>Prepared-statement cache raised to 128</b> — reduces re-prepare overhead on hot read paths.</li>
+      <li><b>Hosted semantic search wired in default release build.</b></li>
     </ul>
   </article>
 
@@ -221,7 +297,7 @@
     <p><b>Measured per-call baselines.</b> Eight tools now compute their "what Read+grep would have cost" figure from real bytes touched on the call, not a hard-coded constant. The dashboard sums those measurements into the per-day rollup; <code>recon savings show</code> reflects the same numbers locally.</p>
     <ul>
       <li><b>Migrated to measured</b> — <code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code> (regex / grep paths only — tantivy and semantic modes pass <code>None</code>), <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>. Each handler reuses already-warm bytes — no extra I/O, no extra grep passes — so latency stays under the 100 ms p99 budget.</li>
-      <li><b>Worst-case mitigation</b> — the running-sum search path caps match-bytes scanned at 1 MiB per call, then extrapolates by the unscanned-file ratio. Bounded wall-time on regexes that match every line of a giant repo. <a href="https://github.com/bravo1goingdark/recon/blob/main/crates/recon-search/src/fff_backend.rs">[code]</a></li>
+      <li><b>Worst-case mitigation</b> — the running-sum search path caps match-bytes scanned at 1 MiB per call, then extrapolates by the unscanned-file ratio. Bounded wall-time on regexes that match every line of a giant repo.</li>
       <li><b>Static-only, with rationale</b> — 10 tools keep documented static estimates because their alternative is fuzzy ranking, transitive call-graph traversal, or PageRank — none of which a single-pass grep replicates honestly. <code>code_find_symbol</code>, <code>code_find_refs</code>, <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>, <code>code_repo_map</code>, <code>code_reindex</code>.</li>
       <li><b>Calibration harness</b> — <code>cargo xtask measured-baselines-corpus --repo &lt;path&gt;</code> runs every migrated tool against a real repo, prints (static_estimate, measured, response, divergence) as TSV, and gates a PASS/FAIL on a 15 % divergence threshold. Will run in CI on PRs touching the measured handlers.</li>
     </ul>

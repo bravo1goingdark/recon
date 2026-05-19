@@ -217,6 +217,7 @@
     <li><a href="index.html#benchmarks">Benchmarks</a></li>
     <li><a href="index.html#install">Install</a></li>
     <li><a class="active" href="Docs.html">Docs</a></li>
+    <li><a href="/changelog">Changelog</a></li>
   </ul>
   <div style="display:flex;align-items:center;gap:16px">
     <button id="theme-toggle" aria-label="Toggle theme" style="
@@ -288,7 +289,6 @@
     <details class="group" open>
       <summary><h4>Project</h4></summary>
     <ul>
-      <li><a href="#changelog">Changelog</a></li>
       <li><a href="#license">License</a></li>
     </ul>
     </details>
@@ -1151,40 +1151,8 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <p>A typical "find and fix a bug" task: <b>~3.2K tokens</b> with recon vs <b>~100K+</b> with Read/Grep/Glob.</p>
 
     <!-- CHANGELOG -->
-    <h2 id="changelog"><span class="no">15</span>Changelog</h2>
-
-    <p><b>v0.5.7</b> — Passive update notices on every CLI command (24 h cache, stderr-only). <code>recon update</code> prints a restart hint. Incremental reindex purges stale entries when <code>ignore_patterns</code> change. <code>recon serve</code> file-count gate honors configured ignore patterns. OAuth state and stale-index cleanup fix. <a href="/changelog#v0-5-7">Full notes →</a></p>
-    <p><b>v0.5.6</b> — Security hardening: symlink alias bypass closed (paths canonicalized before sensitive-file check), filter parse errors now fail closed (zero results instead of unfiltered data), Windows response path normalization. <a href="/changelog#v0-5-6">Full notes →</a></p>
-    <p><b>v0.5.5</b> — Router-loaded repos now initialize the hosted embed service. Bug fixes for multi-repo embed initialization. <a href="/changelog#v0-5-5">Full notes →</a></p>
-    <p><b>v0.5.4</b> — CI release matrix timeout bump for Windows cold builds. No user-facing changes. <a href="/changelog#v0-5-4">Full notes →</a></p>
-    <p><b>v0.5.3</b> — Hosted semantic search wired into the default-features binary (no longer feature-gated). Schema V5 with compound <code>(path, byte_start)</code> index. Cold bulk index drops FTS triggers and rebuilds in one batched pass. Single-flight gate on <code>cached_call_graph</code> (no more concurrent CSR rebuild races). Single-segment Tantivy commit on cold index. Bounded watcher channel; prepared-statement cache cap raised to 128. <a href="/changelog#v0-5-3">Full notes →</a></p>
-    <p><b>v0.5.2</b> — Test stability: poll-assert watcher delete/rename tests to eliminate self-hosted CI flakes. <a href="/changelog#v0-5-2">Full notes →</a></p>
-    <p><b>v0.5.1</b> — Honest savings: per-process baseline dedupe kills per-call double-counting (a 160-call session was over-reporting ~3.5×). First call against a <code>(tool, dedup_key)</code> pair credits the full alternative; repeats credit 0. Dollar conversion added to dashboard and CLI. <a href="/changelog#v0-5-1">Full notes →</a></p>
-    <p><b>v0.5.0</b> — Multi-repo MCP service: <code>code_activate_repo</code> + <code>code_list_repos</code>. Canonical Hits envelope for the 5 row-oriented tools. Session-end savings receipt to stderr. Latency savings end-to-end (dashboard shows "X faster than Read+Grep loop"). Hot-path performance: telemetry hash lookup, newline-index cache, token-count cache by <code>(path, mtime)</code>. Hosted embeddings (Modal + Worker + recon-embed-client). <code>RECON_AUTO_PUSH_SAVINGS</code> default-on with hybrid telemetry flush. <a href="/changelog#v0-5-0">Full notes →</a></p>
-    <p><b>v0.4.1</b> — Measured baselines fix: <code>code_search</code> exact mode now correctly credits savings on the dashboard (was zero). Worker-side rollup merge corrected. <a href="/changelog#v0-4-1">Full notes →</a></p>
-    <p><b>v0.4.0</b> — Per-call <b>measured</b> token-savings replace static estimates for 8 tools (<code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code>, <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>) — the dashboard now reflects what the agent's Read+grep alternative would have actually cost, not a hand-tuned guess. The remaining 12 tools keep documented static estimates (graph/ranking, reindex, and multi-repo have no clean grep equivalent). <code>code_stats</code> and <code>code_savings</code> dropped from the MCP surface — operator diagnostics now live in <code>recon stats</code> / <code>recon savings show</code> CLI, not in the agent's tool list. <a href="/changelog#v0-4-0">Full notes →</a></p>
-    <p><b>v0.3.4</b> — Windows compatibility fix: use <code>file-id</code> crate instead of unstable <code>MetadataExt::file_index()</code>. <a href="/changelog#v0-3-4">Full notes →</a></p>
-    <p><b>v0.3.3</b> — Per-repo savings aggregation: CLI sends <code>repo_fingerprint</code> with each push, dashboard shows per-repo breakdown. Honest labels on the savings chart. <a href="/changelog#v0-3-3">Full notes →</a></p>
-    <p><b>v0.3.2</b> — Pro/Team savings dashboard: <code>recon savings push/show</code> CLI subcommand, dashboard "Savings" tab with per-day sparkline, <code>POST /v1/account/savings</code> + <code>GET /v1/dashboard/savings</code> worker routes, D1 migration <code>0009_usage_rollups</code>. Plus lifecycle hardening: <code>recon serve</code> now exits cleanly on license revocation / account deletion / <code>recon logout</code> against a running session, not just signals + transport close. <a href="/changelog#v0-3-2">Full notes →</a></p>
-    <p><b>v0.3.1</b> — Multi-language parser parity (Python, JS/TS, Go, Java, C/C++ extractors now walk function/class/struct bodies for identifier refs, so the call graph is meaningfully populated for every supported language). Token-savings counter: new <code>code_savings</code> tool, lock-free atomic counters with SQLite-backed lifetime persistence, telemetry block on <code>code_stats</code>. Model-agnostic — reports tokens saved, leaves dollar conversion to your provider's rate sheet. <a href="/changelog#v0-3-1">Full notes →</a></p>
-    <p><b>v0.3.0</b> — Seven graph-traversal tools: <code>code_path</code>, <code>code_callers</code>, <code>code_callees</code>, <code>code_context</code>, <code>code_impact</code>, <code>code_subsystems</code>, <code>code_subsystem</code>. Built on a forward+reverse CSR call graph cached alongside <code>code_repo_map</code>'s symbol set. Replaces the canonical chained-<code>code_find_refs</code> agent loop with a single bounded BFS. Also fixes the parser/storage parser-local-id remap that silently mis-attributed refs across files. <a href="/changelog#v0-3-0">Full notes →</a></p>
-    <p><b>v0.2.4</b> — CI-only test skip on macOS so the <code>watcher_delete</code> integration tests don't keep the test binary alive past the workflow timeout. The watcher fix from v0.2.3 is unchanged. <a href="/changelog#v0-2-4">Full notes →</a></p>
-    <p><b>v0.2.3</b> — MCP tool fixes across <code>recon-parser</code>, <code>recon-server</code>, <code>recon-search</code>; resolved a macOS pipeline hang caused by a blocking <code>Watcher::recv()</code>. <a href="/changelog#v0-2-3">Full notes →</a></p>
-    <p><b>v0.2.2</b> — Watcher overhaul (file save → queryable in &lt; 1 s, deletes/renames cascade in Phase 0), tier-1 token diet on tool responses, deterministic <code>code_search</code> hybrid mode. <a href="/changelog#v0-2-2">Full notes →</a></p>
-    <p><b>v0.2.1</b> — <code>recon init --mcp &lt;ide&gt;</code> now smoke-tests <code>recon serve</code> after writing the IDE config. <a href="/changelog#v0-2-1">Full notes →</a></p>
-    <p><b>v0.2.0</b> — Server-side repo enforcement.</p>
-    <ul class="bul">
-      <li>Server-side <code>max_repos</code>: <code>recon init</code> now registers each repo's canonical-path SHA-256 fingerprint with the worker via atomic <code>POST /v1/account/repos</code>.</li>
-      <li><code>recon repos list / remove</code> for managing slots.</li>
-      <li><code>recon doctor [--json]</code> — health check across binary, license, credentials, worker reachability, index, MCP wiring, and agent rules.</li>
-      <li><code>recon purge --mcp &lt;ide&gt;</code> now also frees the server-side slot.</li>
-    </ul>
-    <p><b>v0.1.1</b> — Fixed license HMAC secret mismatch between CLI and worker.</p>
-    <p><b>v0.1.0</b> — Initial release. 12 tools, 9 languages, small signed Rust binary.</p>
-    <p style="margin-top:14px"><a href="/changelog">See the full changelog →</a></p>
-
     <!-- LICENSE -->
-    <h2 id="license"><span class="no">16</span>License</h2>
+    <h2 id="license"><span class="no">15</span>License</h2>
 
     <p><b>recon</b> is proprietary software. © 2026. All rights reserved. Use is governed by the recon Terms of Service.</p>
 
