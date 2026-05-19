@@ -225,7 +225,7 @@
       justify-content:center;color:var(--ink-3);transition:border-color .15s,color .15s;
       font-size:14px;
     "><span id="theme-icon">◑</span></button>
-    <div class="ship">v0.5.6 · <span>shipping</span></div>
+    <div class="ship"><span data-version>v0.5.7</span> · <span>shipping</span></div>
     <button class="nav-burger" id="nav-burger" aria-label="Open menu" aria-controls="nav-sheet" aria-expanded="false">
       <span class="bars"><span></span></span>
     </button>
@@ -336,7 +336,7 @@ curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 iwr https://mcprecon.pages.dev/install.ps1 | iex
 
 <span class="c"># pin a specific version</span>
-VERSION=v0.5.6 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
+VERSION=v0.5.7 curl -fsSL https://mcprecon.pages.dev/install.sh | bash
 
 <span class="c"># upgrade in place (lands the latest published release)</span>
 recon update</pre>
@@ -482,10 +482,10 @@ Released server-side repo slot</pre>
     <h3 id="cmd-doctor"><code>recon doctor [--json]</code></h3>
     <p>Run a battery of probes covering every surface a stuck install can fail on. Exit code is 1 if anything's broken — wire it into CI to catch regressions.</p>
 <pre>$ recon doctor
-recon doctor — 0.5.6 (x86_64-unknown-linux-gnu)
+recon doctor — 0.5.7 (x86_64-unknown-linux-gnu)
 repo: /home/me/proj
 
-[OK]    binary                        recon 0.5.6 (x86_64-unknown-linux-gnu)
+[OK]    binary                        recon 0.5.7 (x86_64-unknown-linux-gnu)
 [OK]    repo dir                      /home/me/proj writable
 [OK]    global config                 /home/me/.config/recon writable
 [OK]    license                       Pro (expires unix=1798761600)
@@ -506,13 +506,13 @@ Summary: 9 ok, 3 warn, 0 fail</pre>
     <h3 id="cmd-update"><code>recon update [--check] [--force]</code></h3>
     <p>Self-upgrade to the latest published release. Verifies the SHA-256 manifest and (with cosign present) the sigstore signature before swapping the binary.</p>
 <pre>$ recon update --check
-Latest: v0.5.6  (you're on v0.5.5)
+Latest: v0.5.7  (you're on v0.5.6)
 
 $ recon update
 Downloading recon-x86_64-unknown-linux-gnu.tar.gz...
 Verifying signature... OK
 Replacing /usr/local/bin/recon... OK
-Now on v0.5.6.</pre>
+Now on v0.5.7.</pre>
     <p>After the binary swap, restart any running MCP/IDE session so it loads the new executable. If the release changes indexing behavior, run <code>recon reindex</code> in existing repos.</p>
     <p><b>Passive update notices.</b> Every CLI command (except <code>serve</code>, <code>update</code>, and <code>doctor --json</code>) checks for a newer release in the background and prints a one-line stderr hint when one is available. The check result is cached for 24 hours in <code>~/.config/recon/update-check.json</code>; no network request is made while the cache is fresh. The notice is suppressed when <code>--json</code> output is active.</p>
 
@@ -1204,6 +1204,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
 
 <script src="/js/docs-toc.js"></script>
 <script src="/js/theme.js"></script>
+<script src="/js/version.js"></script>
 <script src="/js/copy-buttons.js"></script>
 <script src="/js/nav-menu.js"></script>
 
