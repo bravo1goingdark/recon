@@ -109,6 +109,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Ensure cross-compile target is installed
+        run: rustup target add ${{ matrix.target }}
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
