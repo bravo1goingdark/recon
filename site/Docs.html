@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>recon docs — Local-first MCP server · Tools · Filter DSL · Benchmarks</title>
-<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 20 agent-facing tools (12 base + 6 graph-traversal + 2 multi-repo), 5 search tiers, PageRank repo map, weakly-connected-component subsystems, multi-repo activation, per-call measured token-savings, 7 languages, filter DSL, incremental indexing, secret redaction." />
+<meta name="description" content="Technical documentation for recon — a local-first MCP server distributed as a signed Rust binary. 20 agent-facing tools (12 base + 6 graph-traversal + 2 multi-repo), 5 search tiers, PageRank repo map, weakly-connected-component subsystems, multi-repo activation, per-call measured token-savings, 9 languages, filter DSL, incremental indexing, secret redaction." />
 <link rel="canonical" href="https://mcprecon.pages.dev/Docs.html" />
 <meta property="og:title" content="recon docs — Local-first MCP server" />
 <meta property="og:description" content="20 symbol-aware MCP tools — graph-aware navigation, multi-repo activation, per-call measured token-savings. Small signed Rust binary. SQLite + Tantivy + fff-grep search tiers. Your code stays on your machine." />
@@ -317,7 +317,7 @@ recon login <span class="h">sk-recon-your-key</span>
 cd your-project
 recon init --mcp <span class="h">cc</span>        <span class="c"># Claude Code</span></pre>
 
-    <p>Restart your IDE. The 18 <code>code_*</code> tools are now available. <code>recon serve</code> is auto-spawned over stdio — you never run it by hand.</p>
+    <p>Restart your IDE. The 20 <code>code_*</code> tools are now available. <code>recon serve</code> is auto-spawned over stdio — you never run it by hand.</p>
 
     <div class="callout">
       <div class="tag">Verify</div>
@@ -355,6 +355,12 @@ recon update</pre>
         <tr><td>OpenCode</td><td><code>--mcp oc</code></td><td><code>./opencode.jsonc</code></td><td><code>./AGENTS.md</code> (created or appended)</td></tr>
         <tr><td>Cursor</td><td><code>--mcp cursor</code></td><td><code>./.cursor/mcp.json</code></td><td><code>./.cursor/rules/recon.mdc</code></td></tr>
         <tr><td>Windsurf</td><td><code>--mcp windsurf</code></td><td><code>~/.codeium/windsurf/mcp_config.json</code></td><td><code>./.windsurf/rules/recon.md</code></td></tr>
+        <tr><td>Kiro</td><td><code>--mcp kiro</code></td><td><code>./.kiro/settings/mcp.json</code></td><td><code>./AGENTS.md</code> (created or appended)</td></tr>
+        <tr><td>Zed</td><td><code>--mcp zed</code></td><td><code>./.zed/mcp.json</code></td><td><code>./.zed/rules/recon.md</code></td></tr>
+        <tr><td>VS Code</td><td><code>--mcp vscode</code></td><td><code>./.vscode/mcp.json</code></td><td><code>./.vscode/rules/recon.md</code></td></tr>
+        <tr><td>Cline</td><td><code>--mcp cline</code></td><td><code>./.cline/mcp_settings.json</code></td><td><code>./.cline/rules/recon.md</code></td></tr>
+        <tr><td>Roo Code</td><td><code>--mcp roo</code></td><td><code>./.roo/mcp.json</code></td><td><code>./.roo/rules/recon.md</code></td></tr>
+        <tr><td>OpenAI Codex</td><td><code>--mcp codex</code></td><td><code>~/.codex/config.toml</code></td><td><code>./AGENTS.md</code> (created or appended)</td></tr>
       </tbody>
     </table>
 
@@ -449,7 +455,7 @@ code_path          18     2200             90000     87800         3.80
 
     <h3 id="cmd-init"><code>recon init [--mcp &lt;ide&gt;]</code></h3>
     <p>The setup command. Builds the index, registers the repo with your account, and (with <code>--mcp</code>) writes the IDE's MCP config and agent rules. Idempotent — re-running on the same project refreshes the index without burning a slot.</p>
-    <p><b>Flags.</b> <code>--mcp &lt;cc|oc|cursor|windsurf&gt;</code> picks the IDE wiring; omit to index only.</p>
+    <p><b>Flags.</b> <code>--mcp &lt;cc|oc|cursor|windsurf|kiro|zed|vscode|cline|roo|codex&gt;</code> picks the IDE wiring; omit to index only.</p>
     <p><b>What it does, in order.</b> Validate the cached license → register the repo fingerprint with the worker (rejects if you're at <code>max_repos</code>) → walk the tree and build the SQLite + Tantivy index → on <code>--mcp</code>, write the IDE config + strict-policy rules and smoke-test <code>recon serve</code> (4-second window; stderr surfaced if the child exits early) → append <code>.recon/</code> to <code>.gitignore</code>.</p>
 <pre>$ recon init --mcp cc
 Registered repo with recon (new/5 on Pro)
@@ -494,6 +500,7 @@ repo: /home/me/proj
 [WARN]  AGENTS.md rules               /home/me/proj/AGENTS.md not present
 
 Summary: 9 ok, 3 warn, 0 fail</pre>
+    <p>This sample is abridged; <code>recon doctor</code> checks the supported MCP wiring targets and agent-rule files, so unconfigured targets show up as <code>WARN</code> rather than <code>FAIL</code>.</p>
     <p><code>--json</code> emits the same data as a structured envelope — feed it to <code>jq</code> or pipe it into a monitoring script. The probes that aren't your IDE turning into <code>WARN</code> is expected; only <code>FAIL</code> blocks your install.</p>
 
     <h3 id="cmd-update"><code>recon update [--check] [--force]</code></h3>
@@ -506,6 +513,8 @@ Downloading recon-x86_64-unknown-linux-gnu.tar.gz...
 Verifying signature... OK
 Replacing /usr/local/bin/recon... OK
 Now on v0.5.6.</pre>
+    <p>After the binary swap, restart any running MCP/IDE session so it loads the new executable. If the release changes indexing behavior, run <code>recon reindex</code> in existing repos.</p>
+    <p><b>Passive update notices.</b> Every CLI command (except <code>serve</code>, <code>update</code>, and <code>doctor --json</code>) checks for a newer release in the background and prints a one-line stderr hint when one is available. The check result is cached for 24 hours in <code>~/.config/recon/update-check.json</code>; no network request is made while the cache is fresh. The notice is suppressed when <code>--json</code> output is active.</p>
 
     <h3 id="cmd-version"><code>recon version</code></h3>
     <p>Print the binary's semver tag. Identical to <code>recon --version</code>; provided for shell scripts that want a stable subcommand.</p>
@@ -543,6 +552,7 @@ recon serve --port 7777 --log debug</pre>
 
     <h3 id="cmd-reindex"><code>recon reindex</code></h3>
     <p>Force a full re-index, discarding the Merkle snapshot. Use when the index is corrupt, after a major upgrade that bumps the schema, or when symbols seem stale despite the live watcher.</p>
+    <p>Incremental reindex detects changes to <code>ignore_patterns</code> in <code>.recon/config.toml</code>. Paths that are newly ignored are cascade-deleted from the index (symbols, references, and Tantivy docs), preventing stale entries from appearing in search results or the repo map.</p>
 <pre>$ recon reindex
 Cleared snapshot
 Indexed 1834 files, 87421 symbols (0 errors)</pre>
@@ -709,7 +719,7 @@ $ recon query code_context '{"symbol":"render_map","token_budget":2000}'</pre>
       <div class="card"><div class="t">code_list_repos</div><div class="d">List loaded repos with files / symbols / active flag. Pairs with code_activate_repo.</div></div>
     </div>
 
-    <p>The <span class="badge">measured</span> badge marks tools whose token-savings are computed per-call against the in-process Read/grep equivalent. Tools without the badge use conservative static estimates (the 6 graph/ranking tools have no clean grep alternative, so a measured baseline would be synthetic). Both categories feed the same daily rollups on <code>recon savings push</code> and the dashboard.</p>
+    <p>The <span class="badge">measured</span> badge marks tools whose token-savings are computed per-call against the in-process Read/grep equivalent. Tools without the badge use conservative static estimates (graph/ranking, multi-repo, and reindex have no clean Read/Grep/Glob alternative, so a measured baseline would be synthetic). Both categories feed the same daily rollups on <code>recon savings push</code> and the dashboard.</p>
 
     <h3 id="tool-params">Tool parameter reference</h3>
 
@@ -1143,6 +1153,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <!-- CHANGELOG -->
     <h2 id="changelog"><span class="no">15</span>Changelog</h2>
 
+    <p><b>Unreleased</b> — Passive update notices on every CLI command (24 h cache, stderr-only). <code>recon update</code> prints a restart hint. Incremental reindex purges stale entries when <code>ignore_patterns</code> change. <code>recon serve</code> file-count gate honors configured ignore patterns. OAuth state and stale-index cleanup fix. <a href="/changelog#unreleased">Full notes →</a></p>
     <p><b>v0.5.6</b> — Security hardening: symlink alias bypass closed (paths canonicalized before sensitive-file check), filter parse errors now fail closed (zero results instead of unfiltered data), Windows response path normalization. <a href="/changelog#v0-5-6">Full notes →</a></p>
     <p><b>v0.5.5</b> — Router-loaded repos now initialize the hosted embed service. Bug fixes for multi-repo embed initialization. <a href="/changelog#v0-5-5">Full notes →</a></p>
     <p><b>v0.5.4</b> — CI release matrix timeout bump for Windows cold builds. No user-facing changes. <a href="/changelog#v0-5-4">Full notes →</a></p>
@@ -1151,7 +1162,7 @@ Removed a3f1c8b2e6d4710f from your account</pre>
     <p><b>v0.5.1</b> — Honest savings: per-process baseline dedupe kills per-call double-counting (a 160-call session was over-reporting ~3.5×). First call against a <code>(tool, dedup_key)</code> pair credits the full alternative; repeats credit 0. Dollar conversion added to dashboard and CLI. <a href="/changelog#v0-5-1">Full notes →</a></p>
     <p><b>v0.5.0</b> — Multi-repo MCP service: <code>code_activate_repo</code> + <code>code_list_repos</code>. Canonical Hits envelope for the 5 row-oriented tools. Session-end savings receipt to stderr. Latency savings end-to-end (dashboard shows "X faster than Read+Grep loop"). Hot-path performance: telemetry hash lookup, newline-index cache, token-count cache by <code>(path, mtime)</code>. Hosted embeddings (Modal + Worker + recon-embed-client). <code>RECON_AUTO_PUSH_SAVINGS</code> default-on with hybrid telemetry flush. <a href="/changelog#v0-5-0">Full notes →</a></p>
     <p><b>v0.4.1</b> — Measured baselines fix: <code>code_search</code> exact mode now correctly credits savings on the dashboard (was zero). Worker-side rollup merge corrected. <a href="/changelog#v0-4-1">Full notes →</a></p>
-    <p><b>v0.4.0</b> — Per-call <b>measured</b> token-savings replace static estimates for 8 tools (<code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code>, <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>) — the dashboard now reflects what the agent's Read+grep alternative would have actually cost, not a hand-tuned guess. The 10 graph/ranking tools keep documented static estimates (no clean grep equivalent for fuzzy ranking, transitive callers, or PageRank). <code>code_stats</code> and <code>code_savings</code> dropped from the MCP surface — operator diagnostics now live in <code>recon stats</code> / <code>recon savings show</code> CLI, not in the agent's tool list. <a href="/changelog#v0-4-0">Full notes →</a></p>
+    <p><b>v0.4.0</b> — Per-call <b>measured</b> token-savings replace static estimates for 8 tools (<code>code_outline</code>, <code>code_skeleton</code>, <code>code_read_symbol</code>, <code>code_search</code>, <code>code_find_strings</code>, <code>code_multi_find</code>, <code>code_list</code>, <code>code_context</code>) — the dashboard now reflects what the agent's Read+grep alternative would have actually cost, not a hand-tuned guess. The remaining 12 tools keep documented static estimates (graph/ranking, reindex, and multi-repo have no clean grep equivalent). <code>code_stats</code> and <code>code_savings</code> dropped from the MCP surface — operator diagnostics now live in <code>recon stats</code> / <code>recon savings show</code> CLI, not in the agent's tool list. <a href="/changelog#v0-4-0">Full notes →</a></p>
     <p><b>v0.3.4</b> — Windows compatibility fix: use <code>file-id</code> crate instead of unstable <code>MetadataExt::file_index()</code>. <a href="/changelog#v0-3-4">Full notes →</a></p>
     <p><b>v0.3.3</b> — Per-repo savings aggregation: CLI sends <code>repo_fingerprint</code> with each push, dashboard shows per-repo breakdown. Honest labels on the savings chart. <a href="/changelog#v0-3-3">Full notes →</a></p>
     <p><b>v0.3.2</b> — Pro/Team savings dashboard: <code>recon savings push/show</code> CLI subcommand, dashboard "Savings" tab with per-day sparkline, <code>POST /v1/account/savings</code> + <code>GET /v1/dashboard/savings</code> worker routes, D1 migration <code>0009_usage_rollups</code>. Plus lifecycle hardening: <code>recon serve</code> now exits cleanly on license revocation / account deletion / <code>recon logout</code> against a running session, not just signals + transport close. <a href="/changelog#v0-3-2">Full notes →</a></p>

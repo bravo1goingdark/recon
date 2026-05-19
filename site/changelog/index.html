@@ -78,6 +78,32 @@
     Update an existing install with <code>recon update</code>. Versions are tagged on git; release artefacts are signed and verifiable with <code>cosign</code>.
   </div>
 
+  <article class="release" id="unreleased">
+    <header>
+      <h2><em>Unreleased</em></h2>
+      <span class="when">on feat/update-notifier</span>
+    </header>
+    <span class="tag">Passive update notices · reindex purge · serve file gate · OAuth fix</span>
+    <p><b>Added.</b></p>
+    <ul>
+      <li>Passive update notices — every CLI command (except <code>serve</code>, <code>update</code>, <code>doctor --json</code>) prints a one-line stderr hint when a newer release is available. The check is cached for 24 h; suppressed under <code>--json</code>.</li>
+      <li><code>recon update</code> now prints a restart reminder after the binary swap, and suggests <code>recon reindex</code> when the new version changes indexing behavior.</li>
+    </ul>
+    <p><b>Fixed.</b></p>
+    <ul>
+      <li>Sensitive-path blocking now canonicalizes symlink targets before applying the denylist, closing alias-based bypasses.</li>
+      <li><code>recon serve</code> file-count startup checks now honor <code>.recon/config.toml</code> <code>ignore_patterns</code>, so configured ignored paths do not count against tier limits.</li>
+      <li>Incremental reindex detects changed <code>ignore_patterns</code> and cascade-deletes symbols/refs for already-indexed paths that are newly ignored.</li>
+      <li>OAuth state handling and stale index cleanup fixed in the web auth flow.</li>
+      <li>Parallel test flakes from shared Codex environment variables serialized for CI stability.</li>
+    </ul>
+    <p><b>Changed.</b></p>
+    <ul>
+      <li>CLI and server now use the same ignore-aware repository walker for file-count gating.</li>
+      <li>Repo startup and indexing flows thread configured file-size, sensitive-path, and ignore-pattern rules through the same validation paths.</li>
+    </ul>
+  </article>
+
   <article class="release" id="v0-5-2">
     <header>
       <h2>v0.5.2</h2>

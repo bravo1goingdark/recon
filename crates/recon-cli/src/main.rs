@@ -40,13 +40,13 @@ enum Ide {
     /// Claude Code — writes `.mcp.json`
     #[value(name = "cc")]
     ClaudeCode,
-    /// OpenCode — writes `.opencode/mcp.json`
+    /// OpenCode — writes `opencode.jsonc`
     #[value(name = "oc")]
     OpenCode,
     /// Cursor — writes `.cursor/mcp.json`
     #[value(name = "cursor")]
     Cursor,
-    /// Windsurf — writes `.windsurf/mcp.json`
+    /// Windsurf — writes `~/.codeium/windsurf/mcp_config.json`
     #[value(name = "windsurf")]
     Windsurf,
     /// Kiro — writes `.kiro/settings/mcp.json`
@@ -72,8 +72,9 @@ enum Ide {
 impl Ide {
     /// Absolute path to the MCP config file for this IDE.
     ///
-    /// Project-local IDEs (Claude Code, OpenCode, Cursor) resolve relative to
-    /// `repo`.  Windsurf writes to a machine-global path regardless of `repo`.
+    /// Project-local IDEs (Claude Code, OpenCode, Cursor, Kiro, Zed, VS Code,
+    /// Cline, Roo) resolve relative to `repo`. Windsurf and Codex write to
+    /// machine-global paths regardless of `repo`.
     fn config_abs_path(&self, repo: &Path) -> PathBuf {
         match self {
             Ide::ClaudeCode => repo.join(".mcp.json"),
@@ -236,7 +237,7 @@ enum Command {
     License,
     /// Index the repo and optionally set up an IDE MCP config
     Init {
-        /// Write MCP config for the given IDE (cc | oc | cursor | windsurf)
+        /// Write MCP config for the given IDE (cc | oc | cursor | windsurf | kiro | zed | vscode | cline | roo | codex)
         #[arg(long, value_enum)]
         mcp: Option<Ide>,
     },
@@ -370,7 +371,7 @@ enum Command {
     /// and frees this repo's slot in the global tracking registry — i.e. the
     /// symmetric inverse of `recon init --mcp <ide>`.
     Purge {
-        /// Tear down wiring for the given IDE (cc | oc | cursor | windsurf)
+        /// Tear down wiring for the given IDE (cc | oc | cursor | windsurf | kiro | zed | vscode | cline | roo | codex)
         #[arg(long, value_enum)]
         mcp: Option<Ide>,
     },
@@ -478,8 +479,8 @@ async fn shutdown_with_timeout(server: &recon_server::server::ReconServer) {
 
 /// Print a one-block savings summary to stderr at the end of every
 /// `recon serve` session. The IDE's MCP debug log captures stderr, so
-/// users see it in Claude Code / Cursor / Windsurf without having to
-/// remember `recon savings show` or visit the dashboard.
+/// users see it in their connected MCP client without having to remember
+/// `recon savings show` or visit the dashboard.
 ///
 /// Output shape:
 ///
@@ -610,13 +611,13 @@ fn validate_license_or_die() -> Result<recon_server::license::ValidatedLicense> 
 /// Spawn `recon serve` against the given repo, wait briefly, and surface
 /// any startup failure to the caller.
 ///
-/// The MCP transport in Claude Code / opencode / Cursor pipes the child
-/// process's stderr to the IDE's debug log (where most users never look)
-/// and surfaces only `MCP error -32000: connection closed` when the
-/// child exits before the JSON-RPC `initialize` reply. That's
-/// uninformative — failures from license rejection, over-tier repos,
-/// panics during indexing, or a missing credentials file all collapse
-/// into the same opaque message.
+/// The MCP transport in the supported IDEs pipes the child process's
+/// stderr to the IDE's debug log (where most users never look) and
+/// surfaces only `MCP error -32000: connection closed` when the child
+/// exits before the JSON-RPC `initialize` reply. That's uninformative —
+/// failures from license rejection, over-tier repos, panics during
+/// indexing, or a missing credentials file all collapse into the same
+/// opaque message.
 ///
 /// `recon init --mcp <ide>` calls this right after writing the IDE's
 /// MCP config so the *same* command + binary path the IDE will use gets
@@ -1401,9 +1402,15 @@ async fn main() -> Result<()> {
             eprintln!("Next steps:");
             eprintln!("  cd your-project");
             eprintln!("  recon init --mcp cc      # Claude Code");
+            eprintln!("  recon init --mcp oc      # OpenCode");
             eprintln!("  recon init --mcp cursor  # Cursor");
             eprintln!("  recon init --mcp windsurf  # Windsurf");
-            eprintln!("  recon init --mcp oc      # OpenCode");
+            eprintln!("  recon init --mcp kiro    # Kiro");
+            eprintln!("  recon init --mcp zed     # Zed");
+            eprintln!("  recon init --mcp vscode  # VS Code");
+            eprintln!("  recon init --mcp cline   # Cline");
+            eprintln!("  recon init --mcp roo     # Roo Code");
+            eprintln!("  recon init --mcp codex   # OpenAI Codex");
             Ok(())
         }
 
@@ -1585,12 +1592,11 @@ async fn main() -> Result<()> {
                 write_agent_rules(ide, &repo)?;
 
                 // Smoke-test the server before declaring success. The MCP
-                // client (Claude Code / opencode / Cursor) swallows the
-                // child's stderr and surfaces failures as a generic
-                // `MCP error -32000: connection closed`. By spawning the
-                // same binary with the same args here we can capture that
-                // stderr ourselves and surface the real cause to the user
-                // — license rejected, over-tier, panic during init, etc.
+                // client swallows the child's stderr and surfaces failures as a
+                // generic `MCP error -32000: connection closed`. By spawning
+                // the same binary with the same args here we can capture that
+                // stderr ourselves and surface the real cause to the user —
+                // license rejected, over-tier, panic during init, etc.
                 smoke_test_serve(&recon_bin, &repo_path_str)?;
             }
 
@@ -1894,10 +1900,10 @@ async fn main() -> Result<()> {
                 print_session_receipt(&server);
                 result
             } else {
-                // Stdio MCP: the IDE (Claude Code, Cursor, Windsurf, OpenCode)
-                // spawns us as a subprocess. When the IDE exits it closes our
-                // stdio pipes; we must notice that as a shutdown trigger, not
-                // just SIGINT/SIGTERM. So select on both: signal *or* the
+                // Stdio MCP: the connected IDE spawns us as a subprocess. When
+                // the IDE exits it closes our stdio pipes; we must notice that
+                // as a shutdown trigger, not just SIGINT/SIGTERM. So select on
+                // both: signal *or* the
                 // MCP service loop terminating on its own.
                 let (stdin, stdout) = rmcp::transport::io::stdio();
                 let service = mcp_service.clone().serve((stdin, stdout)).await?;

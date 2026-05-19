@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>recon — 35× fewer tokens for AI coding agents | Local-first MCP server</title>
-<meta name="description" content="Local-first MCP server for AI coding agents. A small Rust binary that replaces Read, Grep, and Glob with 20 symbol-aware tools — graph-aware navigation across 7 languages, multi-repo activation, 15–30× token reduction, 8 ms queries on 320K symbols, per-call measured token-savings telemetry. Source files stay on your machine." />
+<meta name="description" content="Local-first MCP server for AI coding agents. A small Rust binary that replaces Read, Grep, and Glob with 20 symbol-aware tools — graph-aware navigation across 9 languages, multi-repo activation, 15–30× token reduction, 8 ms queries on 320K symbols, per-call measured token-savings telemetry. Source files stay on your machine." />
 <meta name="keywords" content="MCP server, code intelligence, AI coding, token reduction, Claude Code, symbol search, tree-sitter, PageRank, code exploration, developer tools" />
 <meta name="author" content="bravo1goingdark" />
 <link rel="canonical" href="https://mcprecon.pages.dev/" />
@@ -32,7 +32,7 @@
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="recon — 35× fewer tokens for AI coding agents" />
-<meta name="twitter:description" content="Local-first MCP server. Small Rust binary. 20 tools — graph-aware navigation across 7 languages, multi-repo activation, per-call measured token-savings telemetry. 8 ms queries. Source files stay on your machine." />
+<meta name="twitter:description" content="Local-first MCP server. Small Rust binary. 20 tools — graph-aware navigation across 9 languages, multi-repo activation, per-call measured token-savings telemetry. 8 ms queries. Source files stay on your machine." />
 <meta name="twitter:image" content="https://mcprecon.pages.dev/og.png" />
 
 <!-- Favicon — light/dark via media query -->
@@ -326,7 +326,7 @@
   .os-pane.active{display:block}
 
   /* ─────── IDE MATRIX (works with any agent) ─────── */
-  .ides{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft);margin-top:32px}
+  .ides{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft);margin-top:32px}
   @media (max-width:900px){ .ides{grid-template-columns:repeat(2,1fr)} }
   @media (max-width:500px){ .ides{grid-template-columns:1fr} }
   .ide{background:var(--paper);padding:24px 22px;display:flex;flex-direction:column;gap:8px;transition:background .15s}
@@ -467,7 +467,7 @@
           with <b>20 symbol-aware tools</b>. <b>15–30× fewer tokens</b> on typical exploration.
         </p>
         <ul class="lede-points">
-          <li><b>Graph-aware navigation</b> — call paths, callers, callees, blast-radius. Across <b>seven languages</b>.</li>
+          <li><b>Graph-aware navigation</b> — call paths, callers, callees, blast-radius. Across <b>nine languages</b>.</li>
           <li><b>Multi-repo activation</b> — switch repos at runtime via <code>code_activate_repo</code>; <code>code_list_repos</code> shows what's loaded. Sessions persist across restarts.</li>
           <li><b>Measured token-savings</b> — per-call against the Read+Grep alternative, so you can prove the win to finance.</li>
           <li><b>Privacy-first</b> — source stays local. Only chunk text (no logs, no storage) travels for embedding; rebuild with <code>--features local-embed</code> for offline inference.</li>
@@ -581,6 +581,60 @@
         <div class="meta">
           MCP: <b>~/.codeium/windsurf/mcp_config.json</b><br/>
           Rules: <b>./.windsurf/rules/recon.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">ki</div>
+        <h3 class="name">Kiro</h3>
+        <div class="flag" data-copy="recon init --mcp kiro">recon init --mcp kiro</div>
+        <div class="meta">
+          MCP: <b>./.kiro/settings/mcp.json</b><br/>
+          Rules: <b>./AGENTS.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">zed</div>
+        <h3 class="name">Zed</h3>
+        <div class="flag" data-copy="recon init --mcp zed">recon init --mcp zed</div>
+        <div class="meta">
+          MCP: <b>./.zed/mcp.json</b><br/>
+          Rules: <b>./.zed/rules/recon.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">vscode</div>
+        <h3 class="name">VS Code</h3>
+        <div class="flag" data-copy="recon init --mcp vscode">recon init --mcp vscode</div>
+        <div class="meta">
+          MCP: <b>./.vscode/mcp.json</b><br/>
+          Rules: <b>./.vscode/rules/recon.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">cline</div>
+        <h3 class="name">Cline</h3>
+        <div class="flag" data-copy="recon init --mcp cline">recon init --mcp cline</div>
+        <div class="meta">
+          MCP: <b>./.cline/mcp_settings.json</b><br/>
+          Rules: <b>./.cline/rules/recon.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">roo</div>
+        <h3 class="name">Roo Code</h3>
+        <div class="flag" data-copy="recon init --mcp roo">recon init --mcp roo</div>
+        <div class="meta">
+          MCP: <b>./.roo/mcp.json</b><br/>
+          Rules: <b>./.roo/rules/recon.md</b>
+        </div>
+      </div>
+      <div class="ide">
+        <div class="glyph">codex</div>
+        <h3 class="name">OpenAI Codex</h3>
+        <div class="flag" data-copy="recon init --mcp codex">recon init --mcp codex</div>
+        <div class="meta">
+          MCP: <b>~/.codex/config.toml</b><br/>
+          Rules: <b>./AGENTS.md</b>
         </div>
       </div>
     </div>
@@ -705,7 +759,7 @@
     <p style="margin-top:18px;font-size:13px;color:var(--ink-3);max-width:72ch">
       Token-savings telemetry runs alongside every call — per-call <b>measured</b> against
       the in-process Read/grep equivalent for the 8 direct file/grep tools, conservative
-      <b>static</b> estimates for the 10 graph/ranking tools. Operator surfaces:
+      <b>static</b> estimates for the remaining 12 tools. Operator surfaces:
       <code>recon stats</code> and <code>recon savings show</code> in the CLI; daily rollups
       on the dashboard.
     </p>
@@ -996,7 +1050,13 @@
 <pre>recon init --mcp cc        <span class="c"># Claude Code</span>
 recon init --mcp oc        <span class="c"># OpenCode</span>
 recon init --mcp cursor    <span class="c"># Cursor</span>
-recon init --mcp windsurf  <span class="c"># Windsurf</span></pre>
+recon init --mcp windsurf  <span class="c"># Windsurf</span>
+recon init --mcp kiro      <span class="c"># Kiro</span>
+recon init --mcp zed       <span class="c"># Zed</span>
+recon init --mcp vscode    <span class="c"># VS Code</span>
+recon init --mcp cline     <span class="c"># Cline</span>
+recon init --mcp roo       <span class="c"># Roo Code</span>
+recon init --mcp codex     <span class="c"># OpenAI Codex</span></pre>
       </div>
 
       <div class="step">
@@ -1037,7 +1097,7 @@ recon init --mcp windsurf  <span class="c"># Windsurf</span></pre>
 
       <div>
         <h3 style="font-family:var(--serif);font-size:26px;font-weight:400;letter-spacing:-0.02em;margin-bottom:12px;line-height:1.15">Which IDEs and agents work with recon?</h3>
-        <p style="color:var(--ink-2);max-width:480px">Any MCP-compatible client. <code>recon init</code> writes config for Claude Code, Cursor, Windsurf, and OpenCode out of the box. Anything that speaks the MCP stdio spec will work too.</p>
+        <p style="color:var(--ink-2);max-width:480px">Any MCP-compatible client. <code>recon init</code> writes config for Claude Code, OpenCode, Cursor, Windsurf, Kiro, Zed, VS Code Copilot MCP, Cline, Roo Code, and OpenAI Codex out of the box. Anything that speaks the MCP stdio spec will work too.</p>
       </div>
 
       <div>

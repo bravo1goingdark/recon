@@ -29,11 +29,13 @@ Recon currently exposes 20 MCP tools:
 |---|---|
 | File and symbol views | `code_outline`, `code_skeleton`, `code_read_symbol` |
 | Search | `code_find_symbol`, `code_find_refs`, `code_search`, `code_find_strings`, `code_multi_find` |
-| Repo orientation | `code_list`, `code_repo_map`, `code_stats`, `code_reindex` |
+| Repo orientation | `code_list`, `code_repo_map`, `code_reindex` |
 | Graph navigation | `code_path`, `code_callers`, `code_callees`, `code_context`, `code_impact`, `code_subsystems`, `code_subsystem` |
-| Telemetry | `code_savings` |
+| Multi-repo | `code_activate_repo`, `code_list_repos` |
 
 Supported parser languages include Rust, Python, JavaScript, TypeScript, TSX, Go, Java, C, and C++.
+
+Operator-only telemetry stays in the CLI (`recon stats`, `recon savings show`).
 
 ## Quick Start
 
@@ -58,6 +60,8 @@ recon init --mcp cursor    # Cursor: .cursor/mcp.json
 recon init --mcp windsurf  # Windsurf: ~/.codeium/windsurf/mcp_config.json
 ```
 
+Supported wiring targets also include Kiro, Zed, VS Code Copilot MCP, Cline, Roo Code, and OpenAI Codex.
+
 For indexing only:
 
 ```bash
@@ -79,6 +83,8 @@ recon purge --mcp cc      # remove index and Claude Code wiring
 recon update              # update to latest release
 recon logout              # remove cached license
 ```
+
+After `recon update`, restart any running MCP/IDE session so it picks up the new binary; if the release changes indexing behavior, re-run `recon reindex` in existing repos.
 
 ## Configuration
 
