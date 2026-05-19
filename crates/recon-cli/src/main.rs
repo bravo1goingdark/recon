@@ -1635,17 +1635,20 @@ async fn main() -> Result<()> {
 
             // Pre-flight: check repo size against license limits before indexing.
             let recon_config = Config::load(&repo);
-            let paths: Vec<_> =
-                recon_indexer::walker::walk_repo_with_limit(&repo, recon_config.max_file_size)
-                    .into_iter()
-                    .filter(|p| {
-                        recon_config.allow_sensitive
-                            || !recon_core::redact::is_blocked_path_in_repo(
-                                p.strip_prefix(&repo).unwrap_or(p),
-                                &repo,
-                            )
-                    })
-                    .collect();
+            let paths: Vec<_> = recon_indexer::walker::walk_repo_with_ignores(
+                &repo,
+                recon_config.max_file_size,
+                &recon_config.ignore_patterns,
+            )
+            .into_iter()
+            .filter(|p| {
+                recon_config.allow_sensitive
+                    || !recon_core::redact::is_blocked_path_in_repo(
+                        p.strip_prefix(&repo).unwrap_or(p),
+                        &repo,
+                    )
+            })
+            .collect();
             if paths.len() > limits.max_files {
                 return Err(anyhow::anyhow!(
                     "Repository has {} source files — exceeds your {} plan limit of {} files.\n\

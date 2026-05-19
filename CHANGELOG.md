@@ -4,6 +4,34 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project uses [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Sensitive-path blocking now canonicalizes symlink targets before
+  applying the denylist, closing alias-based bypasses and making blocked
+  path checks fail closed when canonicalization or parsing fails.
+- `recon serve` file-count startup checks now honor
+  `.recon/config.toml` `ignore_patterns`, so configured ignored paths do
+  not count against tier limits.
+- OAuth state handling and stale index cleanup were fixed in the web
+  auth flow, including the related index maintenance path from the
+  latest merged PR.
+- Parallel test flakes caused by shared Codex environment variables were
+  serialized to keep CI stable.
+
+### Changed
+
+- Repo startup and indexing flows now thread the configured file-size,
+  sensitive-path, and ignore-pattern rules through the same validation
+  paths.
+- The CLI and server now use the same ignore-aware repository walker for
+  file-count gating, keeping serve-time behavior consistent.
+- Modal embed reliability improved with smaller batches, allocator
+  tuning, retry backoff with jitter, and supporting CLI/site updates.
+- Rust toolchain metadata now includes `rustfmt` and `clippy`
+  components for CI and local checks.
+
 ## [0.5.6] — 2026-05-12
 
 Operational hardening release. This patch closes the main regressions

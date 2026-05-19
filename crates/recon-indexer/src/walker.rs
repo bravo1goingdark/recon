@@ -88,6 +88,89 @@ pub fn walk_repo_with_limit(root: &Path, max_file_size: u64) -> Vec<PathBuf> {
     paths
 }
 
+/// Walk a directory and apply extra ignore patterns from `.recon/config.toml`.
+///
+/// This keeps the serve/startup file gate aligned with the indexer walk:
+/// gitignore + built-in vendor filters + user-configured ignore patterns.
+pub fn walk_repo_with_ignores(
+    root: &Path,
+    max_file_size: u64,
+    ignore_patterns: &[String],
+) -> Vec<PathBuf> {
+    let paths = walk_repo_with_limit(root, max_file_size);
+    if ignore_patterns.is_empty() {
+        return paths;
+    }
+
+    let patterns: Vec<String> = ignore_patterns
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.replace('\\', "/"))
+        .collect();
+    if patterns.is_empty() {
+        return paths;
+    }
+
+    let globset = build_ignore_globset(&patterns);
+    paths
+        .into_iter()
+        .filter(|path| {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let glob_match = globset.as_ref().is_some_and(|set| set.is_match(&rel_str));
+            !glob_match && !patterns.iter().any(|pat| ignore_match(&rel_str, pat))
+        })
+        .collect()
+}
+
+fn build_ignore_globset(patterns: &[String]) -> Option<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut added = false;
+    for pattern in patterns {
+        let trimmed = pattern.trim_matches('/');
+        let candidates: Vec<String> = if has_glob_meta(pattern) {
+            vec![pattern.to_string()]
+        } else if pattern.contains('/') {
+            vec![pattern.to_string(), trimmed.to_string()]
+        } else {
+            vec![pattern.to_string(), format!("**/{trimmed}/**")]
+        };
+        for candidate in candidates {
+            if let Ok(glob) = globset::Glob::new(&candidate) {
+                builder.add(glob);
+                added = true;
+            }
+        }
+    }
+    added.then(|| builder.build().ok()).flatten()
+}
+
+fn has_glob_meta(pattern: &str) -> bool {
+    pattern
+        .as_bytes()
+        .iter()
+        .any(|b| matches!(b, b'*' | b'?' | b'[' | b']' | b'{' | b'}'))
+}
+
+fn ignore_match(path: &str, pattern: &str) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+    let path = path.trim_start_matches("./");
+    let pattern = pattern.trim_start_matches("./").trim_matches('/');
+    if path == pattern {
+        return true;
+    }
+    if path.starts_with(pattern) {
+        if let Some(next) = path.as_bytes().get(pattern.len()) {
+            return *next == b'/' || *next == b'.';
+        }
+        return true;
+    }
+    path.split('/').any(|part| part == pattern)
+}
+
 /// Check if a path looks like a generated file by scanning first 8 lines.
 pub fn is_generated(path: &Path) -> bool {
     use std::io::{BufRead, BufReader};
@@ -218,5 +301,51 @@ mod tests {
         assert!(names.contains(&"main.rs"), "missing main.rs: {names:?}");
         assert!(names.contains(&"lib.py"), "missing lib.py: {names:?}");
         assert!(!names.contains(&"readme.md"), "should skip .md: {names:?}");
+    }
+
+    #[test]
+    fn walk_applies_ignore_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::create_dir_all(dir.path().join("ignored_src/pkg")).unwrap();
+        std::fs::write(
+            dir.path().join("ignored_src/pkg/index.js"),
+            "export const x = 1;",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("ignored_src/pkg/lib.rs"),
+            "pub fn ignored() {}",
+        )
+        .unwrap();
+
+        let paths = walk_repo_with_ignores(dir.path(), 2_097_152, &["ignored_src".to_string()]);
+        let names: Vec<&str> = paths
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str())
+            .collect();
+        assert!(names.contains(&"main.rs"));
+        assert!(!paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("ignored_src")));
+    }
+
+    #[test]
+    fn walk_applies_glob_ignore_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(
+            dir.path().join("schema.generated.rs"),
+            "pub fn generated() {}",
+        )
+        .unwrap();
+
+        let paths = walk_repo_with_ignores(dir.path(), 2_097_152, &["*.generated.rs".to_string()]);
+        let names: Vec<&str> = paths
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str())
+            .collect();
+        assert!(names.contains(&"main.rs"));
+        assert!(!names.contains(&"schema.generated.rs"));
     }
 }
