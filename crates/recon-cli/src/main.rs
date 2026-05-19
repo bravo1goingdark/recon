@@ -1525,6 +1525,7 @@ async fn main() -> Result<()> {
                 max_file_size: recon_config.max_file_size,
                 tantivy_heap_bytes: recon_config.tantivy_heap_bytes,
                 allow_sensitive: recon_config.allow_sensitive,
+                ignore_patterns: recon_config.ignore_patterns.clone(),
             };
             let mut writer = match tantivy.writer(recon_config.tantivy_heap_bytes) {
                 Ok(w) => Some(w),
@@ -1932,6 +1933,7 @@ async fn main() -> Result<()> {
                 max_file_size: recon_config.max_file_size,
                 tantivy_heap_bytes: recon_config.tantivy_heap_bytes,
                 allow_sensitive: recon_config.allow_sensitive,
+                ignore_patterns: recon_config.ignore_patterns.clone(),
             };
             let mut writer = match tantivy.writer(recon_config.tantivy_heap_bytes) {
                 Ok(w) => Some(w),

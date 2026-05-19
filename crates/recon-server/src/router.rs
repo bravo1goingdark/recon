@@ -428,6 +428,7 @@ impl RepoRouter {
             max_file_size: config.max_file_size,
             tantivy_heap_bytes: config.tantivy_heap_bytes,
             allow_sensitive: config.allow_sensitive,
+            ignore_patterns: config.ignore_patterns.clone(),
         };
         let paths: Vec<_> = recon_indexer::walker::walk_repo_with_ignores(
             repo_path,
