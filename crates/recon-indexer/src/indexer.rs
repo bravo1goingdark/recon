@@ -187,6 +187,14 @@ pub fn mtime_of(path: &Path) -> i64 {
         .as_millis() as i64
 }
 
+fn delete_indexed_paths(store: &Store, paths: &[PathBuf]) -> Result<(), Error> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let rel_paths: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    store.delete_files_cascade(&rel_paths)
+}
+
 /// Index a single file: read once, hash, parse, store in SQLite + Tantivy.
 ///
 /// Returns `Ok(true)` if the file was actually indexed, `Ok(false)` if skipped
@@ -194,7 +202,7 @@ pub fn mtime_of(path: &Path) -> i64 {
 pub fn index_file(
     store: &Store,
     tantivy: Option<&TantivyBackend>,
-    tantivy_writer: Option<&mut tantivy::IndexWriter>,
+    mut tantivy_writer: Option<&mut tantivy::IndexWriter>,
     path: &Path,
     repo_root: &Path,
     pools: Option<&LanguagePools>,
@@ -202,11 +210,19 @@ pub fn index_file(
     let rel_path = path.strip_prefix(repo_root).unwrap_or(path);
     let lang = Language::from_path(path);
     if lang == Language::Unknown {
+        store.delete_file_cascade(rel_path)?;
+        if let (Some(tb), Some(writer)) = (tantivy, tantivy_writer.as_deref_mut()) {
+            tb.delete_path(writer, rel_path);
+        }
         return Ok(false);
     }
 
     let content = std::fs::read(path)?;
     if walker::is_generated_content(&content) {
+        store.delete_file_cascade(rel_path)?;
+        if let (Some(tb), Some(writer)) = (tantivy, tantivy_writer.as_deref_mut()) {
+            tb.delete_path(writer, rel_path);
+        }
         return Ok(false);
     }
     let content_hash = hash::blake3_bytes(&content);
@@ -406,42 +422,7 @@ pub fn index_repo_with_options(
         }
     }
 
-    // Tantivy indexing — use shared writer if available, else create a local one
-    let mut local_writer = if shared_writer.is_none() {
-        tantivy.and_then(|tb| match tb.writer(options.tantivy_heap_bytes) {
-            Ok(w) => Some(w),
-            Err(e) => {
-                warn!(
-                    %e,
-                    "tantivy writer creation failed during full reindex; \
-                     BM25 docs will not be updated this run"
-                );
-                None
-            }
-        })
-    } else {
-        None
-    };
-    let writer_ref = shared_writer.or(local_writer.as_mut());
-
-    if let (Some(tb), Some(writer)) = (tantivy, writer_ref) {
-        // Single commit at the end. Tantivy's writer heap (50 MB above)
-        // already flushes internal segments when full; an explicit
-        // interim commit only adds visible segments to the index, and
-        // every extra segment costs query latency at search time. One
-        // commit at the end produces ~1–2 segments for a 300K-symbol
-        // cold index instead of ~15 with interim commits every 20K docs.
-        for r in &all_results {
-            if let Some(ref pf) = r.parsed {
-                let _ = tb.index_symbols(writer, &pf.meta.path, &pf.symbols);
-            }
-        }
-        if let Err(e) = tb.commit(writer) {
-            warn!("tantivy commit error: {e}");
-        }
-    }
-
-    // Build and save the new Merkle snapshot from Phase 1 data — no second full read.
+    // Build the new Merkle snapshot from Phase 1 data — no second full read.
     let new_snapshot = {
         let mut entries = Vec::with_capacity(all_results.len());
         for r in &all_results {
@@ -464,6 +445,54 @@ pub fn index_repo_with_options(
         }
         MerkleSnapshot::build(entries)
     };
+    let stale_paths = previous_snapshot
+        .as_ref()
+        .map(|prev| new_snapshot.diff(prev).deleted)
+        .unwrap_or_default();
+    if !stale_paths.is_empty() {
+        if let Err(e) = delete_indexed_paths(store, &stale_paths) {
+            warn!(count = stale_paths.len(), "stale file cleanup error: {e}");
+            stats.errors += stale_paths.len();
+        }
+    }
+
+    // Tantivy indexing — use shared writer if available, else create a local one
+    let mut local_writer = if shared_writer.is_none() {
+        tantivy.and_then(|tb| match tb.writer(options.tantivy_heap_bytes) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(
+                    %e,
+                    "tantivy writer creation failed during full reindex; \
+                     BM25 docs will not be updated this run"
+                );
+                None
+            }
+        })
+    } else {
+        None
+    };
+    let writer_ref = shared_writer.or(local_writer.as_mut());
+
+    if let (Some(tb), Some(writer)) = (tantivy, writer_ref) {
+        for rel_path in &stale_paths {
+            tb.delete_path(writer, rel_path);
+        }
+        // Single commit at the end. Tantivy's writer heap (50 MB above)
+        // already flushes internal segments when full; an explicit
+        // interim commit only adds visible segments to the index, and
+        // every extra segment costs query latency at search time. One
+        // commit at the end produces ~1–2 segments for a 300K-symbol
+        // cold index instead of ~15 with interim commits every 20K docs.
+        for r in &all_results {
+            if let Some(ref pf) = r.parsed {
+                let _ = tb.index_symbols(writer, &pf.meta.path, &pf.symbols);
+            }
+        }
+        if let Err(e) = tb.commit(writer) {
+            warn!("tantivy commit error: {e}");
+        }
+    }
     save_snapshot(repo_root, &new_snapshot);
 
     // Restore safe SQLite defaults and flush WAL
@@ -783,42 +812,61 @@ fn index_diff(
     let mut stats = IndexStats::default();
 
     // Delete removed files in one transaction (BEGIN/COMMIT once instead of N).
+    let deleted_rel: Vec<PathBuf> = deleted
+        .iter()
+        .map(|p| p.strip_prefix(repo_root).unwrap_or(p).to_path_buf())
+        .collect();
     if !deleted.is_empty() {
-        let rel_paths: Vec<&Path> = deleted
-            .iter()
-            .map(|p| p.strip_prefix(repo_root).unwrap_or(p))
-            .collect();
-        if let Err(e) = store.delete_files_cascade(&rel_paths) {
-            warn!(count = rel_paths.len(), "delete cascade error: {e}");
-            stats.errors += rel_paths.len();
+        if let Err(e) = delete_indexed_paths(store, &deleted_rel) {
+            warn!(count = deleted_rel.len(), "delete cascade error: {e}");
+            stats.errors += deleted_rel.len();
         }
     }
 
     // Parse and index changed files (parallel parse, sequential store)
-    let parsed: Vec<_> = changed
+    let processed: Vec<_> = changed
         .par_iter()
-        .filter_map(|path| {
+        .map(|path| {
+            let rel_path = path.strip_prefix(repo_root).unwrap_or(path).to_path_buf();
             if !options.allow_sensitive && is_sensitive_path(path, repo_root) {
-                return None;
+                return (None, Some(rel_path));
             }
             if std::fs::metadata(path).is_ok_and(|m| m.len() > options.max_file_size) {
-                return None;
+                return (None, Some(rel_path));
             }
             let content = match std::fs::read(path) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(?path, "read error: {e}");
-                    return None;
+                    return (None, Some(rel_path));
                 }
             };
             if walker::is_generated_content(&content) {
-                return None;
+                return (None, Some(rel_path));
             }
             let content_hash = hash::blake3_bytes(&content);
             let mtime = mtime_of(path);
-            parse_file_with_content(&content, path, repo_root, &pools, content_hash, mtime)
+            match parse_file_with_content(&content, path, repo_root, &pools, content_hash, mtime) {
+                Some(parsed) => (Some(parsed), None),
+                None => (None, Some(rel_path)),
+            }
         })
         .collect();
+    let mut parsed = Vec::new();
+    let mut skipped_rel = Vec::new();
+    for (parsed_file, skipped) in processed {
+        if let Some(parsed_file) = parsed_file {
+            parsed.push(parsed_file);
+        }
+        if let Some(skipped) = skipped {
+            skipped_rel.push(skipped);
+        }
+    }
+
+    if let Err(e) = delete_indexed_paths(store, &skipped_rel) {
+        warn!(count = skipped_rel.len(), "skipped file cleanup error: {e}");
+        stats.errors += skipped_rel.len();
+    }
 
     for parsed_file in &parsed {
         match store.batch_index_file(&parsed_file.meta, &parsed_file.symbols, &parsed_file.refs) {
@@ -836,6 +884,9 @@ fn index_diff(
     }
 
     if let (Some(tb), Some(writer)) = (tantivy, tantivy_writer.as_deref_mut()) {
+        for rel_path in deleted_rel.iter().chain(skipped_rel.iter()) {
+            tb.delete_path(writer, rel_path);
+        }
         if let Err(e) = tb.commit(writer) {
             warn!("tantivy commit error: {e}");
         }
@@ -965,6 +1016,68 @@ mod tests {
             .get_file_hash(Path::new("id_rsa.rs"))
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn full_reindex_drops_generated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("main.rs");
+        std::fs::write(&src, "pub fn hello() {}").unwrap();
+
+        let store = Store::open(&dir.path().join("index.db")).unwrap();
+        let stats = index_repo_with_options(
+            &store,
+            None,
+            dir.path(),
+            None,
+            IndexOptions {
+                max_file_size: 1024,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert!(store.get_file_hash(Path::new("main.rs")).unwrap().is_some());
+
+        std::fs::write(
+            &src,
+            "// Code generated by tool. DO NOT EDIT.\npub fn hello() {}",
+        )
+        .unwrap();
+        let stats = index_repo_with_options(
+            &store,
+            None,
+            dir.path(),
+            None,
+            IndexOptions {
+                max_file_size: 1024,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.files_indexed, 0);
+        assert!(store.get_file_hash(Path::new("main.rs")).unwrap().is_none());
+        assert_eq!(store.symbol_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn incremental_reindex_drops_skipped_changed_files() {
+        let dir = init_test_repo(&[("main.rs", "pub fn hello() {}")]);
+        let store = Store::open_memory().unwrap();
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
+        assert!(stats.files_indexed >= 1);
+        assert!(store.get_file_hash(Path::new("main.rs")).unwrap().is_some());
+
+        std::fs::write(
+            dir.path().join("main.rs"),
+            "// Code generated by tool. DO NOT EDIT.\npub fn hello() {}",
+        )
+        .unwrap();
+
+        let stats = index_repo_incremental(&store, None, dir.path(), None).unwrap();
+        assert_eq!(stats.files_indexed, 0);
+        assert!(store.get_file_hash(Path::new("main.rs")).unwrap().is_none());
+        assert_eq!(store.symbol_count().unwrap(), 0);
     }
 
     #[test]
