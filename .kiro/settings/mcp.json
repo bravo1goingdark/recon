@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "recon": {
+      "args": [
+        "--repo",
+        "/home/bravo1goingdark/RustroverProjects/intel",
+        "serve"
+      ],
+      "command": "/home/bravo1goingdark/.local/bin/recon"
+    }
+  }
+}

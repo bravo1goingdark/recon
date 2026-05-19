@@ -70,7 +70,12 @@ struct RankGraph {
 impl RankGraph {
     /// Build the graph from symbols and refs, applying Aider-style weight heuristics.
     /// Pass `edge_weights` to override Aider defaults for ablation studies.
-    fn build(symbols: &[Symbol], refs: &[Ref], focus_symbols: &[usize], edge_weights: Option<&EdgeWeights>) -> Self {
+    fn build(
+        symbols: &[Symbol],
+        refs: &[Ref],
+        focus_symbols: &[usize],
+        edge_weights: Option<&EdgeWeights>,
+    ) -> Self {
         let n = symbols.len();
 
         // Build name → index map for target resolution
