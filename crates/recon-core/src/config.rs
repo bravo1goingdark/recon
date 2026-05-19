@@ -36,6 +36,44 @@ pub struct Config {
 
     /// Allow access to sensitive files (.env, .pem, etc) (default false).
     pub allow_sensitive: bool,
+
+    /// Edge weight configuration for PPR graph construction.
+    /// When absent, Aider-style defaults are used.
+    pub edge_weights: Option<EdgeWeights>,
+}
+
+/// Edge weight configuration for PPR graph construction.
+/// All values follow Aider-style multiplicative heuristics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EdgeWeights {
+    /// Multiplier for descriptive identifiers (>8 chars, contains _ or uppercase).
+    /// Default: 10.0
+    pub descriptive_ident_mult: f64,
+    /// Multiplier for underscore-prefixed identifiers (private/internal convention).
+    /// Default: 0.1
+    pub private_ident_mult: f64,
+    /// Multiplier for high-fan-out identifiers (resolves to >5 symbols).
+    /// Default: 0.1
+    pub high_fanout_mult: f64,
+    /// Threshold for high-fan-out classification.
+    /// Default: 5
+    pub high_fanout_threshold: usize,
+    /// Multiplier for references from focus-set symbols.
+    /// Default: 50.0
+    pub focus_boost: f64,
+}
+
+impl Default for EdgeWeights {
+    fn default() -> Self {
+        Self {
+            descriptive_ident_mult: 10.0,
+            private_ident_mult: 0.1,
+            high_fanout_mult: 0.1,
+            high_fanout_threshold: 5,
+            focus_boost: 50.0,
+        }
+    }
 }
 
 impl Default for Config {
@@ -50,6 +88,7 @@ impl Default for Config {
             default_map_budget: 2000,
             redact_secrets: true,
             allow_sensitive: false,
+            edge_weights: None,
         }
     }
 }

@@ -84,7 +84,7 @@ fn bench_repo_map_render(c: &mut Criterion) {
             weight: 1.0,
         })
         .collect();
-    let ranked = pagerank::pagerank(&symbols, &refs, &[], 0.85, 30);
+    let ranked = pagerank::pagerank(&symbols, &refs, &[], 0.85, 30, None);
 
     c.bench_function("render_repo_map/500_symbols", |b| {
         b.iter(|| pagerank::render_repo_map(&symbols, &ranked, 2000))

@@ -1295,12 +1295,14 @@ impl ReconServer {
                 let budget = server.config.default_map_budget;
                 let cache_key = format!("map_cache:{last_idx}:{budget}");
 
+                let ew = server.config.edge_weights.clone();
                 let ranked = pagerank::pagerank(
                     &all_symbols,
                     &all_refs,
                     &[],
                     0.85,
                     pagerank::DEFAULT_MAX_ITERATIONS,
+                    ew.as_ref(),
                 );
                 let content = pagerank::render_repo_map(&all_symbols, &ranked, budget);
                 let token_est = recon_search::tokens::estimate_tokens(&content);
@@ -4095,6 +4097,7 @@ impl ReconServer {
             // landing on the same tokio worker thread. Offload to the blocking
             // pool; the `all_symbols`/`all_refs` clones are Arc bumps, not deep
             // copies.
+            let edge_weights = self.config.edge_weights.clone();
             let content = {
                 let all_symbols = all_symbols.clone();
                 let all_refs = all_refs.clone();
@@ -4105,6 +4108,7 @@ impl ReconServer {
                         &focus_indices,
                         0.85,
                         pagerank::DEFAULT_MAX_ITERATIONS,
+                        edge_weights.as_ref(),
                     );
                     pagerank::render_repo_map(&all_symbols, &ranked, budget)
                 })

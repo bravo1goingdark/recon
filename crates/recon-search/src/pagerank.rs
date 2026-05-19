@@ -10,6 +10,7 @@
 //! per-node offsets. This avoids 320K inner Vec allocations on large codebases.
 
 use ahash::{AHashMap, AHashSet};
+use recon_core::config::EdgeWeights;
 use recon_core::symbol::{Ref, Symbol};
 use std::collections::VecDeque;
 
@@ -68,7 +69,8 @@ struct RankGraph {
 
 impl RankGraph {
     /// Build the graph from symbols and refs, applying Aider-style weight heuristics.
-    fn build(symbols: &[Symbol], refs: &[Ref], focus_symbols: &[usize]) -> Self {
+    /// Pass `edge_weights` to override Aider defaults for ablation studies.
+    fn build(symbols: &[Symbol], refs: &[Ref], focus_symbols: &[usize], edge_weights: Option<&EdgeWeights>) -> Self {
         let n = symbols.len();
 
         // Build name → index map for target resolution
@@ -155,18 +157,24 @@ impl RankGraph {
             let mut weight = r.weight as f64;
             let ident = r.ident.as_str();
 
-            // Aider-style weight heuristics
+            // Aider-style weight heuristics — overridable via EdgeWeights config
+            let desc_mult = edge_weights.map_or(10.0, |w| w.descriptive_ident_mult);
+            let priv_mult = edge_weights.map_or(0.1, |w| w.private_ident_mult);
+            let fanout_mult = edge_weights.map_or(0.1, |w| w.high_fanout_mult);
+            let fanout_thresh = edge_weights.map_or(5, |w| w.high_fanout_threshold);
+            let focus_boost = edge_weights.map_or(50.0, |w| w.focus_boost);
+
             if ident.len() > 8 && (ident.contains('_') || ident.chars().any(|c| c.is_uppercase())) {
-                weight *= 10.0;
+                weight *= desc_mult;
             }
             if ident.starts_with('_') {
-                weight *= 0.1;
+                weight *= priv_mult;
             }
-            if target_indices.len() > 5 {
-                weight *= 0.1;
+            if target_indices.len() > fanout_thresh {
+                weight *= fanout_mult;
             }
             if focus_set.contains(&src_idx) {
-                weight *= 50.0;
+                weight *= focus_boost;
             }
 
             for &target_idx in target_indices {
@@ -346,13 +354,14 @@ pub fn pagerank(
     focus_symbols: &[usize],
     damping: f64,
     iterations: usize,
+    edge_weights: Option<&EdgeWeights>,
 ) -> Vec<RankedSymbol> {
     let n = symbols.len();
     if n == 0 {
         return Vec::new();
     }
 
-    let graph = RankGraph::build(symbols, refs, focus_symbols);
+    let graph = RankGraph::build(symbols, refs, focus_symbols, edge_weights);
 
     // Dispatch: global power iteration for unfocused, push PPR for focused
     let mut scores = if focus_symbols.is_empty() {
@@ -480,7 +489,7 @@ mod tests {
             make_ref("helper", 1),
         ];
 
-        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS);
+        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS, None);
         assert!(!ranked.is_empty());
         // process_data (idx 1) should be top-ranked
         assert_eq!(ranked[0].index, 1, "process_data should rank first");
@@ -501,8 +510,8 @@ mod tests {
         ];
 
         // Focus on alpha (idx 0) — its neighborhood should rank higher
-        let focused = pagerank(&symbols, &refs, &[0], 0.85, DEFAULT_MAX_ITERATIONS);
-        let unfocused = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS);
+        let focused = pagerank(&symbols, &refs, &[0], 0.85, DEFAULT_MAX_ITERATIONS, None);
+        let unfocused = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS, None);
 
         assert!(!focused.is_empty());
         assert!(!unfocused.is_empty());
@@ -516,7 +525,7 @@ mod tests {
             sym(3, "baz", "crate::baz"),
         ];
         let refs = vec![make_ref("bar", 1)];
-        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS);
+        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS, None);
 
         let output = render_repo_map(&symbols, &ranked, 50);
         assert!(!output.is_empty());
@@ -548,7 +557,7 @@ mod tests {
             make_ref("test_target", 5),
             make_ref("test_target", 6),
         ];
-        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS);
+        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS, None);
 
         let prod_score = ranked
             .iter()
@@ -569,7 +578,7 @@ mod tests {
 
     #[test]
     fn empty_graph() {
-        let ranked = pagerank(&[], &[], &[], 0.85, DEFAULT_MAX_ITERATIONS);
+        let ranked = pagerank(&[], &[], &[], 0.85, DEFAULT_MAX_ITERATIONS, None);
         assert!(ranked.is_empty());
     }
 
@@ -583,7 +592,7 @@ mod tests {
             .map(|i| make_ref(&format!("sym_{}", (i + 1) % 1000), i as u64))
             .collect();
 
-        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS);
+        let ranked = pagerank(&symbols, &refs, &[], 0.85, DEFAULT_MAX_ITERATIONS, None);
         assert!(!ranked.is_empty());
         // Ring graph: all nodes should have similar scores
         let scores: Vec<f64> = ranked.iter().map(|r| r.score).collect();
